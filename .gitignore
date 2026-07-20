@@ -1,0 +1,16 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local telemetry storage output
+telemetry_engine/data/
+
+# macOS Finder metadata
+.DS_Store
