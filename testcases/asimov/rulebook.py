@@ -103,14 +103,22 @@ class Bound:
 
 @dataclass(frozen=True)
 class Rulebook:
-    """A named collection of Bounds for one test type (TestCase.TEST_NAME).
+    """A named collection of Bounds, applying to one or more test types
+    (TestCase.TEST_NAME values) via test_names.
 
     Multiple Rulebooks can be registered for the same test_name (e.g. a
     "safety" rulebook and a "performance" rulebook, checked
-    independently). There is no single Rulebook-per-test limit."""
+    independently) - there is no single Rulebook-per-test limit. The
+    reverse also holds: the same Rulebook can list more than one
+    test_name, e.g. a shared safety rulebook several concrete test
+    cases all start their runner against (see ydrive_rulebook.py).
+    test_names only matters for post-hoc lookup
+    (telemetry_engine/evaluation.py); live evaluation
+    (LiveRulebookRunner) evaluates whatever Rulebooks a test case
+    explicitly passes it, regardless of test_names."""
 
     name: str
-    test_name: str
+    test_names: List[str]
     bounds: List[Bound]
 
 

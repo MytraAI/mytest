@@ -1,48 +1,26 @@
-"""LiveRulebookRunner: wires a Rulebook's live evaluation into a
-running test case's side effects: publishing per-bound and aggregate
-pass/fail status via a TelemetryPublisher, logging, and (optionally)
-firing a hardware event for any bound that has one.
+"""LiveRulebookRunner: background thread that evaluates a Rulebook's
+bounds against live telemetry frames, publishing per-bound/aggregate
+pass/fail status and stopping evaluation on a fatal violation.
 
-Runs its own background thread - started via start(), stopped via
-stop(), the same pattern TelemetryPublisher uses - continuously
-consuming a telemetry client's frames and evaluating them against this
-runner's Rulebook(s). This is deliberate: a test step's own sequencing
-logic (e.g. testcases/example_dut/teststeps/teststeps.py) never
-touches a telemetry frame, a channels dict, or evaluation at all. It's
-just a plain elapsed-time loop using Stopwatch.wait() to pace itself.
-
-On a fatal bound's violation, evaluate() raises FatalBoundViolation
-directly, right where the violation is detected - not via a flag
-polled from elsewhere. _run() (this class's own background thread)
-catches it, logs, and stops evaluating for the rest of this test.
-
-This exception is deliberately NOT propagated into MainExecution's own
-thread. Python exceptions don't cross threads, and there's no safe way
-to force an already-running thread to stop - the unsafe ways (async
-exception injection, OS signals) were rejected. See the architecture
-doc's open question on the resulting risk: MainExecution can keep
-running, and keep commanding hardware, after evaluation itself has
-already stopped.
-
-This is generic glue, not test-specific logic. Any test case using
-Rulebook-based evaluation needs exactly this wiring - evaluate this
-frame, publish status, log, fire events, stop on fatal - so it lives
-here once instead of being reimplemented inside each test case's
-MainExecution.
+Started via start(telemetry_client), stopped via stop(). On a fatal
+bound's violation, evaluate() raises FatalBoundViolation; _run()
+catches it, logs, and stores it on self.fatal_violation so a caller
+polling from another thread (e.g. TestCase.check_fatal_violation())
+can notice and react at its own next safe point. Python can't force an
+already-running thread to stop on its own, and a signal-based watchdog
+was considered and rejected - signals only deliver on the interpreter's
+main thread, and this codebase already runs TestCase.run() off the
+main thread today (telemetry_engine/demo_*_run.py, via
+asyncio.to_thread()). A step that never polls (directly, or via
+TestCase.wait_for()) won't notice a violation until it returns on its
+own - see step.py.
 
 evaluate() uses wall-clock time (time.time()) for persistence_s
-debounce, generated internally rather than taken from the telemetry
-frame. Live and wall-clock time are the same thing here: a frame's own
-timestamp is itself stamped via time.time() on the hardware driver
-side, so the two differ only by microseconds of network latency during
-a live run.
-
-This is specific to the live path. Post-hoc evaluation
-(telemetry_engine.evaluation.Evaluator) replays archived data, where
-wall-clock time during replay has no relationship to the original
-test's real duration - so it continues to explicitly pass each frame's
-own recorded timestamp into RulebookEvaluator.evaluate() directly,
-unaffected by this class.
+debounce - fine live, since a frame's own timestamp is itself stamped
+via time.time() on the driver side. Post-hoc evaluation
+(telemetry_engine.evaluation.Evaluator) instead passes each frame's own
+recorded timestamp explicitly, since replay has no relation to real
+time.
 """
 from __future__ import annotations
 
@@ -73,8 +51,11 @@ def _format_value(value: Any) -> str:
 class FatalBoundViolation(Exception):
     """Raised by LiveRulebookRunner.evaluate() when a fatal bound
     violates. Only ever raised on this runner's own background thread
-    (see _run()). Deliberately not caught/re-raised anywhere that would
-    reach MainExecution's thread - see this module's docstring."""
+    (see _run()) - never crosses threads on its own. A caller on
+    another thread that wants to react to it polls
+    LiveRulebookRunner.fatal_violation and re-raises this same
+    instance itself, at its own next safe point - see this module's
+    docstring."""
 
     def __init__(self, test_id: str, bound_label: str):
         super().__init__(f"test {test_id}: fatal bound {bound_label} violated")
@@ -100,6 +81,13 @@ class LiveRulebookRunner:
             self._evaluator.register(rulebook)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self.fatal_violation: Optional[FatalBoundViolation] = None
+        """Set once, from _run() on this runner's own background
+        thread, if a fatal bound violates - None otherwise, including
+        if start() was never called at all. A caller polling in its
+        own loop (e.g. a test step's closed-loop wait) can check this
+        each tick and re-raise it to stop what it's doing - see
+        testcases/ydrive/teststeps/teststeps.py's cycle_position."""
 
     def start(self, telemetry_client: TelemetryClient) -> None:
         """Start a background thread evaluating telemetry_client's
@@ -122,8 +110,9 @@ class LiveRulebookRunner:
                 return
             try:
                 self.evaluate(dict(frame.channels))
-            except FatalBoundViolation:
+            except FatalBoundViolation as exc:
                 logger.error("test %s: fatal breach - stopping evaluation", self._test_id)
+                self.fatal_violation = exc
                 return
 
     def evaluate(self, channels: Dict[str, Any]) -> None:

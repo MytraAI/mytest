@@ -224,6 +224,10 @@ class OdriveCommandClient(CommandClient):
         """axis0.controller.config.homing_speed - turns/s - speed toward min_endstop during HOMING"""
         self.execute("set_controller_config_homing_speed", value=value)
 
+    def set_controller_config_input_filter_bandwidth(self, value) -> None:
+        """axis0.controller.config.input_filter_bandwidth - 1/s - POS_FILTER input filter bandwidth"""
+        self.execute("set_controller_config_input_filter_bandwidth", value=value)
+
     def set_controller_config_spinout_mechanical_power_bandwidth(self, value) -> None:
         """axis0.controller.config.spinout_mechanical_power_bandwidth - Hz"""
         self.execute("set_controller_config_spinout_mechanical_power_bandwidth", value=value)

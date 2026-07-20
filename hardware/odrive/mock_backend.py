@@ -116,6 +116,7 @@ DEFAULTS: Dict[str, Any] = {
     "controller_config_circular_setpoint_range": 0.0,
     "controller_config_absolute_setpoints": False,
     "controller_config_homing_speed": 0.0,
+    "controller_config_input_filter_bandwidth": 0.0,
     "controller_config_spinout_mechanical_power_bandwidth": 0.0,
     "controller_config_spinout_electrical_power_bandwidth": 0.0,
     "controller_config_spinout_mechanical_power_threshold": 0.0,

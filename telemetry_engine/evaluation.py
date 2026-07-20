@@ -4,15 +4,15 @@ Applies the exact same bound-transition-tracking logic MainExecution
 uses live (see testcases/asimov/rulebook.py), but runs it here
 post-hoc against tagged frames from the aggregator's merged stream. A
 fresh RulebookEvaluator is created the first time a given test_id is
-seen, and registered with every Rulebook matching that frame's
-test_name.
+seen, and registered with every Rulebook whose test_names includes
+that frame's test_name.
 
 This is a terminal sink, same as storage: it has no way to influence a
 running test. See testcases/asimov/rulebook.py's docstring for why
 that's a Rulebook property, not just an Evaluator one.
 
 Untagged (raw) frames aren't evaluated at all. Rulebooks are matched
-by Rulebook.test_name, and only TaggedTelemetryFrame carries one.
+by Rulebook.test_names, and only TaggedTelemetryFrame carries a test_name.
 """
 from __future__ import annotations
 
@@ -48,7 +48,8 @@ class Evaluator:
         self._trackers_by_test_id: Dict[str, RulebookEvaluator] = {}
 
     def register(self, rulebook: Rulebook) -> None:
-        self._rulebooks_by_test_name.setdefault(rulebook.test_name, []).append(rulebook)
+        for test_name in rulebook.test_names:
+            self._rulebooks_by_test_name.setdefault(test_name, []).append(rulebook)
 
     def evaluate(self, item: MergedItem) -> List[ViolationEvent]:
         if not isinstance(item, TaggedTelemetryFrame):
