@@ -32,6 +32,12 @@ DEFAULT_POWER_SUPPLY_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5561"
 DEFAULT_DUT_COMMAND_ENDPOINT = "tcp://127.0.0.1:5570"
 DEFAULT_DUT_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5571"
 
+# The ODrive motor controller is its own device/process too - the first
+# real (non-simulated) hardware this framework talks to, over USB via
+# the official odrive package (see hardware/odrive/).
+DEFAULT_ODRIVE_COMMAND_ENDPOINT = "tcp://127.0.0.1:5580"
+DEFAULT_ODRIVE_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5581"
+
 # Single topic used on the telemetry PUB socket, kept as one constant
 # rather than per-channel topics because subscribers currently want
 # the full frame. Splitting by channel is an easy future change if a

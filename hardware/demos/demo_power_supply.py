@@ -8,7 +8,7 @@ Proves the same command/telemetry server code drives a completely
 different device than the DAQ with zero server-side changes - only
 the backend and command client differ.
 
-Run with (from the repo root, Mytest/): python -m hardware.demo_power_supply
+Run with (from the repo root, Mytest/): python -m hardware.demos.demo_power_supply
 """
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ import subprocess
 import sys
 import time
 
-from .clients.telemetry_client import TelemetryClient
-from .mock_power_supply.mock_power_supply_command_client import PowerSupplyCommandClient
-from .protocol import DEFAULT_POWER_SUPPLY_COMMAND_ENDPOINT, DEFAULT_POWER_SUPPLY_TELEMETRY_ENDPOINT
+from ..clients.telemetry_client import TelemetryClient
+from ..mock_power_supply.mock_power_supply_command_client import PowerSupplyCommandClient
+from ..protocol import DEFAULT_POWER_SUPPLY_COMMAND_ENDPOINT, DEFAULT_POWER_SUPPLY_TELEMETRY_ENDPOINT
 
 
 def main():

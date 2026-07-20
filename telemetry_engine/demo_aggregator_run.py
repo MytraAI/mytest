@@ -8,7 +8,7 @@ stream produces.
 Note this test case never touches the DAQ's acquisition, so the
 aggregator's raw-stream side stays empty here; only the DUT's tagged
 stream flows. Proving the DAQ's raw stream specifically still works is
-what hardware/demo_end_to_end.py covers. This demo is instead about
+what hardware/demos/demo_end_to_end.py covers. This demo is instead about
 proving the aggregator merges whatever a self-contained, testbed-owning
 test case produces.
 

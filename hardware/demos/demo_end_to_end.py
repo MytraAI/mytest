@@ -4,7 +4,7 @@ Launches the hardware driver process, drives it through connect ->
 load setup -> start acquisition via the command client, reads a
 handful of telemetry frames, then stops and tears everything down.
 
-Run with (from the repo root, Mytest/): python -m hardware.demo_end_to_end
+Run with (from the repo root, Mytest/): python -m hardware.demos.demo_end_to_end
 """
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ import subprocess
 import sys
 import time
 
-from .clients.telemetry_client import TelemetryClient
-from .mock_daq.mock_daq_command_client import DaqCommandClient
+from ..clients.telemetry_client import TelemetryClient
+from ..mock_daq.mock_daq_command_client import DaqCommandClient
 
 
 def main():
