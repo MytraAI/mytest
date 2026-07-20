@@ -7,3 +7,10 @@ requires-python = ">=3.14"
 dependencies = [
     "pyzmq>=25.0",
 ]
+
+[project.optional-dependencies]
+# Only needed for hardware/odrive/odrive_backend.py (real USB hardware) -
+# pulls in pyusb/libusb. Not required for mock-only local development,
+# so it's kept out of the base dependency set. Pinned to the 0.6.x line
+# since that's the firmware hardware/odrive targets (see odrive_channels.py).
+odrive = ["odrive>=0.6.0,<0.7.0"]

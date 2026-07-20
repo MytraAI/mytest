@@ -9,7 +9,7 @@ Proves the same command/telemetry server code drives a third, still
 completely different device - a control loop, not just a readback -
 with zero server-side changes.
 
-Run with (from the repo root, Mytest/): python -m hardware.demo_dut
+Run with (from the repo root, Mytest/): python -m hardware.demos.demo_dut
 """
 from __future__ import annotations
 
@@ -17,9 +17,9 @@ import subprocess
 import sys
 import time
 
-from .clients.telemetry_client import TelemetryClient
-from .mock_dut.mock_dut_command_client import DutCommandClient
-from .protocol import DEFAULT_DUT_COMMAND_ENDPOINT, DEFAULT_DUT_TELEMETRY_ENDPOINT
+from ..clients.telemetry_client import TelemetryClient
+from ..mock_dut.mock_dut_command_client import DutCommandClient
+from ..protocol import DEFAULT_DUT_COMMAND_ENDPOINT, DEFAULT_DUT_TELEMETRY_ENDPOINT
 
 
 def main():
