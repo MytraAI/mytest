@@ -1,0 +1,7 @@
+# Code owners for MytraAI/mytest
+# Move this file to .github/CODEOWNERS in the repo (or to the repo root, or
+# to docs/CODEOWNERS - GitHub checks those three locations) for it to take
+# effect. It only does something once "Require review from Code Owners" is
+# also enabled in the branch protection rule for main.
+
+* @ColinShepard
