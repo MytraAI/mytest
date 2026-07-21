@@ -23,8 +23,8 @@ overshoot, peak velocity ~28, peak current ~19.
   Expected to trip briefly on every position change and clear once the
   DUT settles - a real, repeated performance signal, not a fault.
 
-TEST_NAME lives here, not on the TestCase, for the same reason as
-previous rulebooks: CycleDutPositionTest needs to import this Rulebook
+TEST_NAMES lives here, not on the TestCase, for the same reason as
+other rulebooks: CycleDutPositionTest needs to import this Rulebook
 for its own live evaluation, so this module can't import the test case
 back without a circular import.
 """
@@ -32,11 +32,11 @@ from __future__ import annotations
 
 from testcases.asimov.rulebook import Bound, Rulebook
 
-TEST_NAME = "cycle_dut_position_test"
+TEST_NAMES = ["cycle_dut_position_test"]
 
 CYCLE_DUT_POSITION_RULEBOOK = Rulebook(
     name="cycle_dut_position_rulebook",
-    test_name=TEST_NAME,
+    test_names=TEST_NAMES,
     bounds=[
         Bound(
             channel="position",

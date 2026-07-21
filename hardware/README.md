@@ -62,7 +62,7 @@ Mytest/
     odrive/
       odrive_backend.py            OdriveBackend - REAL, talks to actual ODrive hardware over USB via the official odrive package (firmware 0.6.x / Pro/S1)
       mock_backend.py              MockOdriveBackend - simulated, same channel surface as the real backend
-      odrive_channels.py           TELEMETRY_CHANNELS/COMMAND_CHANNELS - curated (not exhaustive): ~109 telemetry + ~73 command channels a test author would realistically use or need for diagnosis - see its docstring for what was deliberately cut
+      odrive_channels.py           TELEMETRY_CHANNELS/COMMAND_CHANNELS - curated (not exhaustive): ~110 telemetry + ~74 command channels a test author would realistically use or need for diagnosis - see its docstring for what was deliberately cut
       odrive_command_client.py     OdriveCommandClient - named sugar for ODrive actions, layered on the generic CommandClient
       main.py                      entry point: real backend by default, --mock to run MockOdriveBackend instead, calls runner.run()
     clients/
@@ -231,7 +231,7 @@ time) rather than a simple readback.
 `hardware.odrive.main --mock` was run end-to-end in development:
 launched as its own process, `OdriveCommandClient.verify_actions()`
 and `TelemetryClient.verify_channels()` both passed against the live
-process (73/73 command channels, 109/109 telemetry channels), a
+process (74/74 command channels, 110/110 telemetry channels), a
 representative sample of commands round-tripped across every
 subsystem (control mode/state, a config setter, a motor-config setter,
 a trap_traj setter, a board-level setter, a two-arg method), and a
@@ -254,7 +254,7 @@ mirroring the real `odrive` package's structure.
 The channel list started out deliberately exhaustive (every channel in
 ODrive's own 0.6.x API reference - ~450 telemetry + ~301 command
 channels) to prove the generation approach against the full documented
-surface, then was pruned back to the 109/73 kept today - removing
+surface, then was pruned back to the 110/74 kept today - removing
 internal FOC/ACIM/sensorless diagnostics, per-phase calibration
 coefficients, per-encoder-type config for hardware this test stand
 doesn't use, CAN bus config, and other one-time-commissioning/

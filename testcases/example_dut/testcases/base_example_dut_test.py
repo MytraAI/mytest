@@ -66,7 +66,6 @@ class BaseExampleDutTest(TestCase):
         self.testbed: Optional[ExampleTestbed] = None
         self.dut: Optional[ExampleDut] = None
         self._publisher: Optional[TelemetryPublisher] = None
-        self.runner: Optional[LiveRulebookRunner] = None
         self._publisher_started = False
         self._runner_started = False
 
@@ -133,13 +132,13 @@ class BaseExampleDutTest(TestCase):
             # Stop the rulebook runner's background thread before the DUT -
             # it relies on telemetry still flowing to notice the stop signal
             # promptly (see LiveRulebookRunner._run()).
-            self._teardown_step("stop rulebook runner", self.runner.stop)
+            self.teardown_step("stop rulebook runner", self.runner.stop)
 
         if self._publisher_started:
-            self._teardown_step("stop telemetry publisher", self._publisher.stop)
+            self.teardown_step("stop telemetry publisher", self._publisher.stop)
 
         if self.dut is not None:
-            self._teardown_step("stop DUT", self.dut.stop)
+            self.teardown_step("stop DUT", self.dut.stop)
 
         if self.testbed is not None:
-            self._teardown_step("stop testbed", self.testbed.stop)
+            self.teardown_step("stop testbed", self.testbed.stop)

@@ -125,6 +125,7 @@ TELEMETRY_CHANNELS = [
     "controller_config_circular_setpoint_range",  # turns
     "controller_config_absolute_setpoints",  # bool - False = startup-relative frame, True = requires valid pos_estimate
     "controller_config_homing_speed",  # turns/s - speed toward min_endstop during HOMING
+    "controller_config_input_filter_bandwidth",  # 1/s - POS_FILTER input filter bandwidth
     "controller_config_spinout_mechanical_power_bandwidth",  # Hz
     "controller_config_spinout_electrical_power_bandwidth",  # Hz
     "controller_config_spinout_mechanical_power_threshold",  # W
@@ -224,6 +225,7 @@ COMMAND_CHANNELS = [
     "set_controller_config_circular_setpoint_range",
     "set_controller_config_absolute_setpoints",
     "set_controller_config_homing_speed",
+    "set_controller_config_input_filter_bandwidth",
     "set_controller_config_spinout_mechanical_power_bandwidth",
     "set_controller_config_spinout_electrical_power_bandwidth",
     "set_controller_config_spinout_mechanical_power_threshold",

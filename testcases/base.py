@@ -27,10 +27,17 @@ assuming every resource it might reference exists.
 
 A teardown step against a device that was never reachable can itself
 fail (e.g. a ZeroMQ REQ socket left in an unmatched send/recv state
-after a connect timeout). Use `_teardown_step()` to run each cleanup
+after a connect timeout). Use `teardown_step()` to run each cleanup
 action independently, so one device's cleanup failure can't prevent
 another device's cleanup from being attempted, and can't mask whatever
 exception is already propagating out of `run()`.
+
+`self.runner` is an Optional[LiveRulebookRunner] every concrete
+subclass is expected to construct in its own pre_test_setup() (see
+BaseExampleDutTest/BaseYdriveTest) - kept here, not down on each
+subclass, purely so wait_for() below can rely on it existing (as None
+or a real runner) without every subclass redeclaring the same
+attribute. TestCase itself never constructs one.
 """
 from __future__ import annotations
 
@@ -38,6 +45,9 @@ import logging
 import uuid
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
+
+from .asimov.live_rulebook_runner import LiveRulebookRunner
+from .stopwatch import Stopwatch
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +57,7 @@ class TestCase(ABC):
 
     def __init__(self, test_id: Optional[str] = None):
         self.test_id = test_id or uuid.uuid4().hex
+        self.runner: Optional[LiveRulebookRunner] = None
 
     @abstractmethod
     def pre_test_setup(self) -> None:
@@ -75,9 +86,30 @@ class TestCase(ABC):
             logger.info("test %s: post_test_teardown", self.test_id)
             self.post_test_teardown()
 
-    def _teardown_step(self, description: str, action: Callable[[], None]) -> None:
+    def check_fatal_violation(self) -> None:
+        """Raise self.runner's fatal_violation if a fatal Rulebook bound
+        has violated - a no-op otherwise (including if self.runner is
+        None or never started). Called from wait_for() below (once per
+        tick) and from @step's entry/exit (see step.py) - see
+        testcases/asimov/live_rulebook_runner.py's docstring for the
+        polling model this is part of, and its known gap."""
+        if self.runner is not None and self.runner.fatal_violation is not None:
+            raise self.runner.fatal_violation
+
+    def wait_for(self, duration_s: float) -> None:
+        """Paced wait for duration_s, calling check_fatal_violation()
+        each tick instead of blocking the full duration regardless of a
+        fatal violation. Use this instead of iterating a Stopwatch
+        directly for a plain wait with no other condition to check."""
+        for _ in Stopwatch(duration_s=duration_s):
+            self.check_fatal_violation()
+
+    def teardown_step(self, description: str, action: Callable[[], None]) -> None:
         """Run one teardown action, logging (not raising) on failure so
-        the remaining teardown steps still get attempted."""
+        the remaining teardown steps still get attempted. Any
+        post_test_teardown() override - at any subclass depth - should
+        use this for each cleanup action, not just BaseYdriveTest/
+        BaseExampleDutTest's own."""
         try:
             action()
         except Exception:
