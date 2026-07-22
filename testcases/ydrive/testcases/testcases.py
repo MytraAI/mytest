@@ -1,4 +1,6 @@
-"""EnduranceCycleTest: cycles ydrive indefinitely between two position
+"""Concrete ydrive test cases.
+
+EnduranceCycleTest: cycles ydrive indefinitely between two position
 setpoints (no fixed duration or cycle count - runs until a fatal
 Rulebook violation stops it, or the process is stopped externally),
 tracking cumulative distance traveled as total_distance_m state.
@@ -14,6 +16,20 @@ own teardown idles the axis - wrapped in _teardown_step() like every
 other teardown action, so a fatal violation already in flight (move_to
 checks it at entry via @step) or a stuck axis just logs and moves on to
 idling rather than blocking teardown.
+
+ManualTest: no test sequence of its own. Starts live Rulebook
+evaluation, then blocks indefinitely via wait_for(float("inf")) -
+Stopwatch never expires on its own, so the only way this returns is
+check_fatal_violation() raising on a fatal bound, at the same 10ms
+polling cadence every other step already relies on. This keeps the
+ODrive driver process and its command/telemetry endpoints alive for as
+long as an operator (e.g. via a GUI) needs them, for manually viewing
+and commanding hardware directly. Deliberately leaves the axis in
+IDLE, unconfigured - control mode, tuning, and arming are the
+operator's own choice to make in the moment, not this test's to assume.
+post_test_teardown() is inherited unchanged from BaseYdriveTest for the
+same reason: it has no idea where the operator left the axis, so it
+doesn't command any move - just idles it.
 """
 from __future__ import annotations
 
@@ -60,3 +76,13 @@ class EnduranceCycleTest(BaseYdriveTest):
         if self.testbed is not None:
             self.teardown_step("move to position 0", lambda: move_to(self, 0.0))
         super().post_test_teardown()
+
+
+class ManualTest(BaseYdriveTest):
+    """No test sequence of its own - keeps the ODrive driver process and command/telemetry endpoints alive, under live Rulebook evaluation, for an operator to command/view directly (e.g. via a GUI) until stopped."""
+
+    TEST_NAME = "manual_test"
+
+    def main_execution(self) -> None:
+        self.runner.start(self.testbed.telemetry)
+        self.wait_for(float("inf"))

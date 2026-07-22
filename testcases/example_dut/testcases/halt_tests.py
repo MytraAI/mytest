@@ -27,14 +27,14 @@ from __future__ import annotations
 from typing import Optional
 
 from .base_example_dut_test import BaseExampleDutTest
-from ..rulebooks.cycle_dut_position_rulebook import CYCLE_DUT_POSITION_RULEBOOK, TEST_NAME
+from ..rulebooks.cycle_dut_position_rulebook import CYCLE_DUT_POSITION_RULEBOOK, TEST_NAMES
 from ..teststeps.teststeps import cycle_position
 
 
 class CycleDutPositionTest(BaseExampleDutTest):
     """Cycles the DUT's position between 0 and 130 for a fixed duration, evaluating performance live."""
 
-    TEST_NAME = TEST_NAME
+    TEST_NAME = TEST_NAMES[0]
     RULEBOOKS = [CYCLE_DUT_POSITION_RULEBOOK]
 
     POSITION_LOW = 0.0

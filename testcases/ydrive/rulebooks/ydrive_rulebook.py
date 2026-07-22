@@ -8,17 +8,17 @@ main_execution actually does:
   trusted instantaneously rather than debounced.
 
 TEST_NAMES lists every concrete ydrive TestCase.TEST_NAME that starts
-a runner against this Rulebook (today, just EnduranceCycleTest) - add
-a new test's TEST_NAME here when it should be checked against these
-same safety bounds too. Lives here rather than on the TestCase to
-avoid a circular import (see example_dut's rulebooks for the same
-pattern).
+a runner against this Rulebook (today, EnduranceCycleTest and
+ManualTest) - add a new test's TEST_NAME here when it should be
+checked against these same safety bounds too. Lives here rather than
+on the TestCase to avoid a circular import (see example_dut's
+rulebooks for the same pattern).
 """
 from __future__ import annotations
 
 from testcases.asimov.rulebook import Bound, Rulebook
 
-TEST_NAMES = ["endurance_cycle_test"]
+TEST_NAMES = ["endurance_cycle_test", "manual_test"]
 
 YDRIVE_RULEBOOK = Rulebook(
     name="ydrive_rulebook",
