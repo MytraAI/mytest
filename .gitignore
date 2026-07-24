@@ -14,3 +14,6 @@ telemetry_engine/data/
 
 # macOS Finder metadata
 .DS_Store
+
+# Local-only draft docs, not for commit
+AI/PDR.md

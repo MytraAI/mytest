@@ -43,15 +43,33 @@ from __future__ import annotations
 
 import logging
 import signal
+import tempfile
 import threading
 import uuid
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Callable, Optional
 
 from .asimov.live_rulebook_runner import LiveRulebookRunner
 from .stopwatch import Stopwatch
 
 logger = logging.getLogger(__name__)
+
+
+class StopRequested(Exception):
+    """Raised by TestCase.check_stop_requested() when tools/stop_test.py
+    has left a marker file requesting this test stop - a deliberate
+    operator action, not a safety violation, but propagated through
+    run()'s try/finally the same way FatalBoundViolation is.
+
+    Exists because SIGTERM/Popen.terminate() don't reliably reach a
+    process's own signal handling on Windows (see AI/Mytest.md's OS
+    compatibility section) - this sidesteps OS signals entirely via a
+    marker file the test's own poll loop already checks."""
+
+    def __init__(self, test_id: str):
+        super().__init__(f"test {test_id}: stop requested")
+        self.test_id = test_id
 
 
 class TestCase(ABC):
@@ -136,13 +154,38 @@ class TestCase(ABC):
         if self.runner is not None and self.runner.fatal_violation is not None:
             raise self.runner.fatal_violation
 
+    def _stop_request_path(self) -> Path:
+        """Where tools/stop_test.py leaves a marker file to request
+        this test stop - Path(tempfile.gettempdir())/mytest-stop-<test_id>,
+        resolving identically on Windows/CentOS/macOS since it's just
+        Path.exists()/.touch()/.unlink(), no OS-specific code at all.
+        See check_stop_requested() and stop_test.py's own docstring."""
+        return Path(tempfile.gettempdir()) / f"mytest-stop-{self.test_id}"
+
+    def check_stop_requested(self) -> None:
+        """Raise StopRequested if tools/stop_test.py has left a
+        marker file for this test_id - a no-op otherwise. Called from
+        wait_for() (every tick) and from @step's entry/exit (see
+        step.py) - the same call sites check_fatal_violation() already
+        uses, so an external stop request is noticed with the same
+        promptness a fatal violation already gets, with no new polling
+        wired into any test step. Deletes the marker file the moment
+        it's seen, before raising, so a stale file can't immediately
+        re-trigger a future run that happens to reuse the same test_id."""
+        path = self._stop_request_path()
+        if path.exists():
+            path.unlink(missing_ok=True)
+            raise StopRequested(self.test_id)
+
     def wait_for(self, duration_s: float) -> None:
         """Paced wait for duration_s, calling check_fatal_violation()
-        each tick instead of blocking the full duration regardless of a
-        fatal violation. Use this instead of iterating a Stopwatch
-        directly for a plain wait with no other condition to check."""
+        and check_stop_requested() each tick instead of blocking the
+        full duration regardless of either. Use this instead of
+        iterating a Stopwatch directly for a plain wait with no other
+        condition to check."""
         for _ in Stopwatch(duration_s=duration_s):
             self.check_fatal_violation()
+            self.check_stop_requested()
 
     def teardown_step(self, description: str, action: Callable[[], None]) -> None:
         """Run one teardown action, logging (not raising) on failure so

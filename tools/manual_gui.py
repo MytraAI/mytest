@@ -86,6 +86,8 @@ from hardware.protocol import (  # noqa: E402
     TelemetryFrame,
 )
 
+from .stop_test import request_stop  # noqa: E402
+
 POLL_INTERVAL_MS = 100
 PLOT_REDRAW_MS = 250
 COMMAND_TIMEOUT_MS = 5000
@@ -250,6 +252,7 @@ class ManualGuiApp:
         self._command_send_buttons: Dict[Tuple[str, str], ttk.Button] = {}
 
         self._section_collapsed = {"telemetry": False, "command": False}
+        self._current_test_id: Optional[str] = None
 
         self._telemetry_groups[TAGGED_STREAM_LABEL] = ChannelGroup(label=TAGGED_STREAM_LABEL)
 
@@ -272,8 +275,17 @@ class ManualGuiApp:
         left = ttk.Frame(main)
         left.pack(side="left", fill="both", expand=True, padx=(0, 4))
 
+        test_context_row = ttk.Frame(left)
+        test_context_row.pack(fill="x", pady=(0, 4))
         self._test_context_var = tk.StringVar(value="test: (no frame seen yet)")
-        ttk.Label(left, textvariable=self._test_context_var).pack(anchor="w", pady=(0, 4))
+        ttk.Label(test_context_row, textvariable=self._test_context_var).pack(side="left")
+        self._stop_test_button = ttk.Button(test_context_row, text="Stop test", command=self._on_stop_test)
+        self._stop_test_button.pack(side="left", padx=(8, 0))
+        self._stop_test_button.state(["disabled"])  # enabled once a test_id is actually known - see _apply_update
+        self._stop_test_status_var = tk.StringVar(value="")
+        ttk.Label(test_context_row, textvariable=self._stop_test_status_var, foreground="gray").pack(
+            side="left", padx=(8, 0)
+        )
 
         tagged_row = ttk.Frame(left)
         tagged_row.pack(fill="x", pady=(0, 4))
@@ -614,6 +626,18 @@ class ManualGuiApp:
         self._telemetry_subscribers[TAGGED_STREAM_LABEL] = subscriber
         self._add_error_var.set("")
 
+    def _on_stop_test(self) -> None:
+        """Requests a clean stop of whichever test_id the tagged stream
+        last reported - reuses tools/stop_test.py's own request_stop()
+        rather than re-implementing the marker-file convention here, so
+        this button and the standalone stop_test.py CLI can never drift
+        apart on what "stop" actually means. Disabled until a test_id is
+        actually known (see _apply_update) - nothing to stop otherwise."""
+        if self._current_test_id is None:
+            return
+        path = request_stop(self._current_test_id)
+        self._stop_test_status_var.set(f"stop requested for {self._current_test_id} ({path})")
+
     def _on_add_telemetry_device(self) -> None:
         endpoint = self._add_telemetry_var.get().strip()
         if not endpoint:
@@ -714,6 +738,10 @@ class ManualGuiApp:
         if update.test_context is not None:
             test_id, test_name = update.test_context
             self._test_context_var.set(f"test: {test_name} (test_id={test_id})")
+            if test_id != self._current_test_id:
+                self._current_test_id = test_id
+                self._stop_test_status_var.set("")
+                self._stop_test_button.state(["!disabled"])
 
     def _poll(self) -> None:
         try:
