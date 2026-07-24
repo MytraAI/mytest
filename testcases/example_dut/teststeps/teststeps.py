@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from testcases.example_dut.dut.example_dut import ExampleDut
 from testcases.example_dut.testcases.base_example_dut_test import BaseExampleDutTest
-from testcases.stopwatch import Stopwatch
+from testcases.utils import Stopwatch
 from testcases.step import step
 
 DEFAULT_POSITION_TOLERANCE = 3.0

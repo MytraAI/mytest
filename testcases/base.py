@@ -45,13 +45,14 @@ import logging
 import signal
 import tempfile
 import threading
+import time
 import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable, Optional
 
 from .asimov.live_rulebook_runner import LiveRulebookRunner
-from .stopwatch import Stopwatch
+from .utils import Stopwatch, spawn_operator_dashboard
 
 logger = logging.getLogger(__name__)
 
@@ -125,24 +126,86 @@ class TestCase(ABC):
         an unattended, physically-moving run - the scenario this
         actually protects against - so nothing is lost by not
         installing it in that context.
+
+        Also spawns the lightweight operator status page (see
+        testcases/utils.py's spawn_operator_dashboard and
+        tools/operator_dashboard.py) before pre_test_setup() even
+        starts, so it's up to show an error even if setup itself
+        crashes. Its status reflects how this method's own try/except
+        resolves: "stopped" for a deliberate StopRequested/SystemExit
+        (an operator asking to stop is not a failure), "failing" with
+        the exception for anything else, "passing" on clean completion.
+
+        On the main thread, once the test is over, this blocks
+        (_wait_until_interrupted()) so the dashboard keeps showing that
+        final result instead of vanishing the instant the test
+        completes - the operator closes it out themselves (Ctrl+C) once
+        they've seen it. Skipped when run() executes off the main
+        thread (the same three telemetry_engine/demo_*_run.py callers
+        the SIGTERM registration above already skips), so those demos
+        keep returning promptly rather than hanging forever. Also
+        skipped for a deliberate StopRequested/SystemExit - the operator
+        already took one action to end the test; making them take a
+        second one (another Ctrl+C/SIGTERM/stop_test.py) just to let the
+        process actually exit would be a real, confirmed bug, not a
+        feature - only "passing"/"failing" (the test reached its own
+        conclusion, not an external stop) linger.
         """
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, self._handle_sigterm)
+
+        dashboard = spawn_operator_dashboard(self.test_id, getattr(self, "TEST_NAME", "unknown"))
+        linger = False
 
         try:
             logger.info("test %s: pre_test_setup", self.test_id)
             self.pre_test_setup()
             logger.info("test %s: main_execution", self.test_id)
             self.main_execution()
+        except (StopRequested, SystemExit) as exc:
+            if dashboard is not None:
+                dashboard.set_status("stopped")
+                dashboard.set_error(str(exc))
+            raise
+        except BaseException as exc:
+            if dashboard is not None:
+                dashboard.set_status("failing")
+                dashboard.set_error(repr(exc))
+            linger = True
+            raise
+        else:
+            if dashboard is not None:
+                dashboard.set_status("passing")
+            linger = True
         finally:
             logger.info("test %s: post_test_teardown", self.test_id)
             self.post_test_teardown()
+            if dashboard is not None:
+                if linger and threading.current_thread() is threading.main_thread():
+                    logger.info(
+                        "test %s: complete - status page at %s (Ctrl+C to exit)", self.test_id, dashboard.url
+                    )
+                    self._wait_until_interrupted()
+                dashboard.stop()
 
     def _handle_sigterm(self, signum: int, frame: object) -> None:
         """Registered by run() on the main thread only - raises so
         run()'s try/finally runs post_test_teardown() instead of
         SIGTERM's OS-default immediate termination."""
         raise SystemExit(f"test {self.test_id}: stopped by SIGTERM")
+
+    def _wait_until_interrupted(self) -> None:
+        """Blocks (Ctrl+C/SIGTERM, or tools/stop_test.py again, to
+        break out) so the operator status page keeps showing the
+        test's final result rather than disappearing the moment the
+        test completes - see run()'s docstring for why this only ever
+        runs on the main thread."""
+        try:
+            while True:
+                time.sleep(1.0)
+                self.check_stop_requested()
+        except (KeyboardInterrupt, SystemExit, StopRequested):
+            pass
 
     def check_fatal_violation(self) -> None:
         """Raise self.runner's fatal_violation if a fatal Rulebook bound
