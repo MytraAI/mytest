@@ -1,6 +1,6 @@
 """Manual registry mapping a "<dut>.<test>" key to a factory that
 constructs that TestCase - the single place a new test case gets
-registered so testcases/run_test.py can look it up by name instead of
+registered so tools/run_test.py can look it up by name instead of
 every caller importing/instantiating it directly. Mirrors
 telemetry_engine/main.py's REGISTERED_RULEBOOKS: a manual list authors
 append to as new DUTs/test cases are added under testcases/.

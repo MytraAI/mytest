@@ -1,20 +1,25 @@
 """Generic entry point for running any registered TestCase by name -
-see registry.py for how a test gets registered and REGISTERED_TESTS for
-what's available. Not a demo: runs the selected test for real by
-default. --mock is forwarded to every factory uniformly; a test that
-has no real/mock distinction (e.g. anything under example_dut) simply
-ignores it.
+see testcases/registry.py for how a test gets registered and
+REGISTERED_TESTS for what's available. Not a demo: runs the selected
+test for real by default. --mock is forwarded to every factory
+uniformly; a test that has no real/mock distinction (e.g. anything
+under example_dut) simply ignores it.
+
+Lives in tools/, not testcases/, alongside stop_test.py and
+manual_gui.py - the operator-facing entry points, as opposed to
+testcases/ itself, which holds the test framework and its per-DUT
+content.
 
 Run with (from the repo root):
-    python -m testcases.run_test --test ydrive.manual
-    python -m testcases.run_test --test ydrive.endurance_cycle --mock
+    python -m tools.run_test --test ydrive.manual
+    python -m tools.run_test --test ydrive.endurance_cycle --mock
 """
 from __future__ import annotations
 
 import argparse
 import logging
 
-from .registry import REGISTERED_TESTS
+from testcases.registry import REGISTERED_TESTS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
