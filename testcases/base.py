@@ -42,6 +42,8 @@ attribute. TestCase itself never constructs one.
 from __future__ import annotations
 
 import logging
+import signal
+import threading
 import uuid
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
@@ -76,7 +78,39 @@ class TestCase(ABC):
         through, so only tear down what was actually set up."""
 
     def run(self) -> None:
-        """Run pre_test_setup -> main_execution, then always post_test_teardown."""
+        """Run pre_test_setup -> main_execution, then always post_test_teardown.
+
+        Also converts SIGTERM into the same clean-teardown path Ctrl+C
+        already gets for free. Python installs a default handler that
+        turns SIGINT into KeyboardInterrupt, which the try/finally below
+        already catches correctly - but Python installs no equivalent
+        handler for SIGTERM, so `kill <pid>` (the default signal an
+        external supervisor/systemd/CI would send to stop an unattended
+        run) would otherwise terminate the process immediately,
+        skipping post_test_teardown() entirely. For a test case that
+        runs until told to stop rather than for a fixed duration (e.g.
+        EnduranceCycleTest, ManualTest), that means real hardware gets
+        abandoned exactly where it was - the axis never idled, the
+        driver process orphaned instead of disconnected - discovered by
+        actually sending a real test process SIGTERM and watching
+        neither happen.
+
+        Only registered when run() is executing on the main thread:
+        signal.signal() raises ValueError from any other thread, and
+        this codebase already calls TestCase.run() off the main thread
+        in three places (telemetry_engine/demo_*_run.py, via
+        asyncio.to_thread(), so a synchronous run() doesn't block those
+        demos' own event loop) - see live_rulebook_runner.py's docstring
+        for the same main-thread constraint on the fatal-violation
+        watchdog. Silently skipped rather than raising there: those
+        demos exercise a no-op main_execution() for a few seconds, not
+        an unattended, physically-moving run - the scenario this
+        actually protects against - so nothing is lost by not
+        installing it in that context.
+        """
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, self._handle_sigterm)
+
         try:
             logger.info("test %s: pre_test_setup", self.test_id)
             self.pre_test_setup()
@@ -85,6 +119,12 @@ class TestCase(ABC):
         finally:
             logger.info("test %s: post_test_teardown", self.test_id)
             self.post_test_teardown()
+
+    def _handle_sigterm(self, signum: int, frame: object) -> None:
+        """Registered by run() on the main thread only - raises so
+        run()'s try/finally runs post_test_teardown() instead of
+        SIGTERM's OS-default immediate termination."""
+        raise SystemExit(f"test {self.test_id}: stopped by SIGTERM")
 
     def check_fatal_violation(self) -> None:
         """Raise self.runner's fatal_violation if a fatal Rulebook bound

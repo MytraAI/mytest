@@ -2,11 +2,11 @@
 official `odrive` Python package (firmware 0.6.x, Pro/S1). See
 mock_backend.py for the no-hardware-needed version.
 
-Requires the optional `odrive` extra (`uv sync --extra odrive` / `pip
-install odrive`) for actual USB communication. That import is deferred
-into connect() (not module load time), so importing this module - or
-running main.py with --mock - never needs the package installed; only
-connecting to real hardware does.
+Depends on the `odrive` package (a hard dependency of this project - see
+pyproject.toml) for actual USB communication. That import is still
+deferred into connect() rather than module load time, so importing this
+module - or running main.py with --mock - doesn't pay for it unless a
+real connection is actually attempted.
 
 connect() only opens the USB link and confirms the device answers -
 it does NOT engage CLOSED_LOOP_CONTROL. Call
@@ -340,8 +340,8 @@ class OdriveBackend(HardwareBackend):
             from odrive.enums import AxisState, ControlMode
         except ImportError as exc:
             raise HardwareError(
-                "the 'odrive' package isn't installed - install the optional extra "
-                "(uv sync --extra odrive / pip install odrive) to talk to real ODrive hardware"
+                "the 'odrive' package isn't installed - run 'uv sync' "
+                "(or 'pip install odrive') to talk to real ODrive hardware"
             ) from exc
 
         self._AxisState = AxisState
