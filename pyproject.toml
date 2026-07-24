@@ -10,4 +10,7 @@ dependencies = [
     # USB (pulls in pyusb/libusb). Pinned to the 0.6.x line since that's the
     # firmware hardware/odrive targets (see odrive_channels.py).
     "odrive>=0.6.0,<0.7.0",
+    # tools/manual_gui.py's live telemetry graph (dual y-axis, embedded in
+    # Tkinter via FigureCanvasTkAgg).
+    "matplotlib>=3.8",
 ]
