@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from testbeds.ydrive_testbed.ydrive_testbed import YdriveTestbed
 from testcases.step import step
-from testcases.stopwatch import Stopwatch
+from testcases.utils import Stopwatch
 from testcases.ydrive.testcases.base_ydrive_test import BaseYdriveTest
 
 DEFAULT_DWELL_S = 1.0

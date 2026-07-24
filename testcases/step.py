@@ -23,7 +23,7 @@ import functools
 import logging
 from typing import Any, Callable, TypeVar
 
-from .stopwatch import Stopwatch
+from .utils import Stopwatch
 
 logger = logging.getLogger(__name__)
 

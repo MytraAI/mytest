@@ -13,12 +13,23 @@ content.
 Run with (from the repo root):
     python -m tools.run_test --test ydrive.manual
     python -m tools.run_test --test ydrive.endurance_cycle --mock
+
+A deliberate stop (the operator dashboard's "Stop test" button,
+tools/stop_test.py, or a plain SIGTERM) surfaces here as
+StopRequested/SystemExit - TestCase.run() re-raises it after a clean
+teardown purely so a caller can tell a stop happened, not so this
+script should treat it as a failure. Caught below and reported as a
+plain log line with a clean exit, instead of the traceback and exit
+code 1 an uncaught StopRequested/SystemExit would otherwise produce
+for what was actually a successful, intentional stop.
 """
 from __future__ import annotations
 
 import argparse
 import logging
+import sys
 
+from testcases.base import StopRequested
 from testcases.registry import REGISTERED_TESTS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -36,7 +47,16 @@ def main() -> None:
 
     test_case = REGISTERED_TESTS[args.test](args.test_id, args.mock)
     logger.info("running %s (test_id=%s)", args.test, test_case.test_id)
-    test_case.run()
+    try:
+        test_case.run()
+    except (StopRequested, SystemExit) as exc:
+        # A deliberate operator stop (Stop test button, tools/stop_test.py,
+        # or SIGTERM) - TestCase.run() already re-raises this after a clean
+        # teardown, purely so a caller knows a stop happened rather than a
+        # normal completion. That's not a failure, so report it as a plain
+        # message and a clean exit rather than a traceback and exit code 1.
+        logger.info("test %s: stopped - %s", test_case.test_id, exc)
+        sys.exit(0)
 
 
 if __name__ == "__main__":
