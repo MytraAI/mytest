@@ -12,6 +12,16 @@ server never needs to know what commands any given device supports.
 It also does not implement a test sequence state machine itself -
 that logic belongs to the testcase execution process, which decides
 what commands to send and when.
+
+Deliberately no server-side timeouts on the backend calls in _handle():
+device operations have no sane fixed ceiling (motor calibration and
+homing legitimately run for many seconds), so a naive asyncio.wait_for
+here would kill real work. The actual hang protection lives on the
+client instead (CommandClient's RCVTIMEO/SNDTIMEO): there is exactly one
+client per driver and one test at a time, so a wedged backend call is
+already backstopped by the client timing out, the test aborting and
+tearing down, and the whole driver process being terminated - at which
+point this stalled loop dies with it. See hardware/clients/command_client.py.
 """
 from __future__ import annotations
 

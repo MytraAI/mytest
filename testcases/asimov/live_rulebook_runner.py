@@ -29,7 +29,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from hardware.clients.telemetry_client import TelemetryClient
+from hardware.clients.telemetry_client import TelemetryClient, TelemetryTimeout
 
 from ..telemetry_publisher import TelemetryPublisher
 from .rulebook import Rulebook, RulebookEvaluator
@@ -81,13 +81,17 @@ class LiveRulebookRunner:
             self._evaluator.register(rulebook)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self.fatal_violation: Optional[FatalBoundViolation] = None
-        """Set once, from _run() on this runner's own background
-        thread, if a fatal bound violates - None otherwise, including
-        if start() was never called at all. A caller polling in its
-        own loop (e.g. a test step's closed-loop wait) can check this
-        each tick and re-raise it to stop what it's doing - see
-        testcases/ydrive/teststeps/teststeps.py's cycle_position."""
+        self.fatal_violation: Optional[Exception] = None
+        """Set once, from _run() on this runner's own background thread,
+        if a fatal bound violates (FatalBoundViolation) OR the telemetry
+        stream goes silent (TelemetryTimeout) - None otherwise, including
+        if start() was never called at all. Either is fatal: a fatal
+        bound means the hardware breached a hard limit, a silent stream
+        means we've lost live monitoring while the hardware may still be
+        moving. A caller polling in its own loop (e.g. a test step's
+        closed-loop wait) checks this each tick and re-raises it to stop
+        what it's doing - see testcases/ydrive/teststeps/teststeps.py's
+        cycle_position and TestCase.check_fatal_violation()."""
 
     def start(self, telemetry_client: TelemetryClient) -> None:
         """Start a background thread evaluating telemetry_client's
@@ -105,15 +109,27 @@ class LiveRulebookRunner:
             self._thread.join(timeout=5)
 
     def _run(self, telemetry_client: TelemetryClient) -> None:
-        for frame in telemetry_client.frames():
+        try:
+            for frame in telemetry_client.frames():
+                if self._stop.is_set():
+                    return
+                try:
+                    self.evaluate(dict(frame.channels))
+                except FatalBoundViolation as exc:
+                    logger.error("test %s: fatal breach - stopping evaluation", self._test_id)
+                    self.fatal_violation = exc
+                    return
+        except TelemetryTimeout as exc:
+            # The telemetry stream went silent (dead driver/publisher).
+            # If we're already stopping, a quiet stream during teardown
+            # isn't a failure - just exit. Otherwise it's fatal: we've
+            # lost live safety monitoring mid-test, so store it the same
+            # way a fatal bound is stored, for the test's own
+            # check_fatal_violation() poll to raise and drive teardown.
             if self._stop.is_set():
                 return
-            try:
-                self.evaluate(dict(frame.channels))
-            except FatalBoundViolation as exc:
-                logger.error("test %s: fatal breach - stopping evaluation", self._test_id)
-                self.fatal_violation = exc
-                return
+            logger.error("test %s: telemetry stream went silent - treating as fatal", self._test_id)
+            self.fatal_violation = exc
 
     def evaluate(self, channels: Dict[str, Any]) -> None:
         """Evaluate this frame, publish live per-bound/aggregate status,

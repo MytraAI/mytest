@@ -36,6 +36,16 @@ from .storage import MergedItem
 
 logger = logging.getLogger(__name__)
 
+_STALENESS_TIMEOUT_S = 5.0
+"""How long a pump waits for a frame before logging that its stream has
+gone silent. Unlike the clients (which raise TelemetryTimeout to fail a
+test), the aggregator is a long-lived service: a silent stream here just
+means there's nothing to aggregate right now, so each pump logs a
+staleness warning and keeps looping, recovering on its own when frames
+resume. Bounding the receive is also what lets the pump notice
+cancellation promptly on shutdown."""
+_STALENESS_TIMEOUT_MS = int(_STALENESS_TIMEOUT_S * 1000)
+
 
 class Aggregator:
     """Merges the raw and tagged telemetry streams into one async feed."""
@@ -67,21 +77,40 @@ class Aggregator:
         socket.setsockopt(zmq.SUBSCRIBE, TELEMETRY_TOPIC)
         socket.connect(self._raw_endpoint)
         logger.info("aggregator subscribed to raw stream at %s", self._raw_endpoint)
-        try:
-            while True:
-                _, raw = await socket.recv_multipart()
-                await queue.put(TelemetryFrame.from_bytes(raw))
-        finally:
-            socket.close(linger=0)
+        await self._pump(socket, "raw", self._raw_endpoint, queue, TelemetryFrame.from_bytes)
 
     async def _pump_tagged(self, queue: "asyncio.Queue[MergedItem]") -> None:
         socket = self._ctx.socket(zmq.SUB)
         socket.setsockopt(zmq.SUBSCRIBE, TAGGED_TELEMETRY_TOPIC)
         socket.connect(self._tagged_endpoint)
         logger.info("aggregator subscribed to tagged stream at %s", self._tagged_endpoint)
+        await self._pump(socket, "tagged", self._tagged_endpoint, queue, TaggedTelemetryFrame.from_bytes)
+
+    async def _pump(self, socket, label, endpoint, queue, decode) -> None:
+        """Shared pump loop for both streams: poll with a staleness
+        deadline instead of blocking forever in recv_multipart(). When a
+        stream goes silent past _STALENESS_TIMEOUT_S, log once and keep
+        looping (recovering when frames resume) rather than raising -
+        see _STALENESS_TIMEOUT_S. The `stale` latch keeps it to one
+        warning per silent spell, and one info line when it recovers."""
+        poller = zmq.asyncio.Poller()
+        poller.register(socket, zmq.POLLIN)
+        stale = False
         try:
             while True:
+                events = dict(await poller.poll(timeout=_STALENESS_TIMEOUT_MS))
+                if socket not in events:
+                    if not stale:
+                        logger.warning(
+                            "aggregator: %s stream silent for >%.1fs at %s",
+                            label, _STALENESS_TIMEOUT_S, endpoint,
+                        )
+                        stale = True
+                    continue
+                if stale:
+                    logger.info("aggregator: %s stream resumed at %s", label, endpoint)
+                    stale = False
                 _, payload = await socket.recv_multipart()
-                await queue.put(TaggedTelemetryFrame.from_bytes(payload))
+                await queue.put(decode(payload))
         finally:
             socket.close(linger=0)
