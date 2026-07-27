@@ -20,7 +20,12 @@ established way to disambiguate channels across more than one device
 AI/Mytest.md). A per-device raw subscription is unambiguous by
 construction and works even with no test case running at all.
 
-Checking a telemetry channel plots it on the live graph (see below).
+Every telemetry channel shows its current value as plain text next to its
+checkbox, updated on every incoming frame regardless of whether it's
+checked - useful for enum/bool/string channels (axis_current_state,
+disarm_reason, ...) that a plot doesn't read well, and for a quick glance
+without committing to graphing something. Checking a telemetry channel
+additionally plots it on the live graph (see below).
 Checking a command channel shows an editable JSON params field (e.g.
 {"value": 1.5}) plus a Send button - JSON, not a bare value, because
 the wire protocol has no way to discover an action's parameter
@@ -235,6 +240,7 @@ class ManualGuiApp:
 
         self._telemetry_groups: Dict[str, ChannelGroup] = {}
         self._known_channels: Dict[Tuple[str, str], tk.BooleanVar] = {}
+        self._telemetry_value_vars: Dict[Tuple[str, str], tk.StringVar] = {}
         self._telemetry_subscribers: Dict[str, Any] = {}
         self._telemetry_history: Dict[Tuple[str, str], Deque[Tuple[float, float]]] = {}
         self._telemetry_axis: Dict[Tuple[str, str], int] = {}
@@ -432,7 +438,13 @@ class ManualGuiApp:
             child.destroy()
 
         row = self._render_section(
-            0, "telemetry", "Telemetry channels", self._telemetry_groups, self._known_channels, self._on_telemetry_toggle
+            0,
+            "telemetry",
+            "Telemetry channels",
+            self._telemetry_groups,
+            self._known_channels,
+            self._on_telemetry_toggle,
+            value_vars=self._telemetry_value_vars,
         )
         self._render_section(
             row, "command", "Command channels", self._command_groups, self._known_commands, self._on_command_toggle
@@ -446,6 +458,7 @@ class ManualGuiApp:
         groups: Dict[str, ChannelGroup],
         selection_vars: Dict[Tuple[str, str], tk.BooleanVar],
         on_toggle: Callable[[Tuple[str, str], tk.BooleanVar], None],
+        value_vars: Optional[Dict[Tuple[str, str], tk.StringVar]] = None,
     ) -> int:
         self._render_header(row, title, self._section_collapsed[section_key], lambda: self._toggle_section(section_key))
         row += 1
@@ -464,6 +477,11 @@ class ManualGuiApp:
                 ttk.Checkbutton(
                     self._checklist_inner, text=name, variable=var, command=lambda k=key, v=var: on_toggle(k, v)
                 ).grid(row=row, column=0, sticky="w", padx=(16, 0))
+                if value_vars is not None:
+                    value_var = value_vars.setdefault(key, tk.StringVar(value=""))
+                    ttk.Label(self._checklist_inner, textvariable=value_var, foreground="#555").grid(
+                        row=row, column=1, sticky="w", padx=(8, 0)
+                    )
                 row += 1
         return row
 
@@ -725,6 +743,9 @@ class ManualGuiApp:
         cutoff = now - MAX_HISTORY_S
         for name, value in update.channels.items():
             key = (update.device_label, name)
+            value_var = self._telemetry_value_vars.get(key)
+            if value_var is not None:
+                value_var.set(_format_value(value))
             hist = self._telemetry_history.get(key)
             if hist is None:
                 continue  # not currently checked - see _on_telemetry_toggle
