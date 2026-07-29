@@ -7,7 +7,7 @@ it up in ODrive's own docs for more detail than the one-liner gives.
 from __future__ import annotations
 
 from ..clients.command_client import CommandClient
-from ..protocol import DEFAULT_ODRIVE_COMMAND_ENDPOINT
+from protocol.wire import DEFAULT_ODRIVE_COMMAND_ENDPOINT
 
 
 class OdriveCommandClient(CommandClient):
@@ -139,10 +139,6 @@ class OdriveCommandClient(CommandClient):
     def set_motor_config_current_hard_max(self, value) -> None:
         """axis0.config.motor.current_hard_max - A - measured current ceiling -> CURRENT_LIMIT_VIOLATION if exceeded"""
         self.execute("set_motor_config_current_hard_max", value=value)
-
-    def set_encoder_onboard0_config_field_check_mode(self, value) -> None:
-        """odrv0.onboard_encoder0.config.field_check_mode"""
-        self.execute("set_encoder_onboard0_config_field_check_mode", value=value)
 
     def encoder_onboard0_get_field_strength(self) -> None:
         """odrv0.onboard_encoder0.get_field_strength() - reads back the onboard magnetic encoder's field strength magnitude, if the chip exposes it"""
@@ -291,14 +287,6 @@ class OdriveCommandClient(CommandClient):
     def set_board_config_inverter0_temp_limit_upper(self, value) -> None:
         """odrv0.config.inverter0.temp_limit_upper - degC"""
         self.execute("set_board_config_inverter0_temp_limit_upper", value=value)
-
-    def set_board_config_inverter0_derating_start(self, value) -> None:
-        """odrv0.config.inverter0.derating_start - V"""
-        self.execute("set_board_config_inverter0_derating_start", value=value)
-
-    def set_board_config_inverter0_current_soft_max_derated(self, value) -> None:
-        """odrv0.config.inverter0.current_soft_max_derated - A"""
-        self.execute("set_board_config_inverter0_current_soft_max_derated", value=value)
 
     def save_configuration(self) -> None:
         """odrv0.save_configuration()"""

@@ -17,7 +17,8 @@ from typing import Any, Dict, Optional
 
 import zmq
 
-from hardware.protocol import (
+from protocol.wire import (
+    DEFAULT_TELEMETRY_HWM,
     DEFAULT_TAGGED_TELEMETRY_ENDPOINT,
     DEFAULT_TELEMETRY_ENDPOINT,
     TAGGED_TELEMETRY_TOPIC,
@@ -77,9 +78,11 @@ class TelemetryPublisher:
         ctx = zmq.Context.instance()
         sub = ctx.socket(zmq.SUB)
         sub.setsockopt(zmq.SUBSCRIBE, TELEMETRY_TOPIC)
+        sub.setsockopt(zmq.RCVHWM, DEFAULT_TELEMETRY_HWM)
         sub.connect(self._raw_endpoint)
 
         pub = ctx.socket(zmq.PUB)
+        pub.setsockopt(zmq.SNDHWM, DEFAULT_TELEMETRY_HWM)
         pub.bind(self._tagged_endpoint)
 
         poller = zmq.Poller()

@@ -46,8 +46,6 @@ DEFAULTS: Dict[str, Any] = {
     "disarm_reason": 0,  # overwritten by the physics tick each sample - see stream_samples()
     "detailed_disarm_reason": 0,
     "last_drv_fault": 0,
-    "total_charge_used": 0.0,
-    "total_power_used": 0.0,
     "axis_config_startup_motor_calibration": False,
     "axis_config_startup_encoder_index_search": False,
     "axis_config_startup_encoder_offset_calibration": False,
@@ -86,9 +84,7 @@ DEFAULTS: Dict[str, Any] = {
     "posvelmapper_status": 0,
     "commutmapper_status": 0,
     "encoder_onboard0_status": 0,
-    "encoder_onboard0_field_status": 0,
     "encoder_onboard0_raw": 0.0,
-    "encoder_onboard0_config_field_check_mode": 0.0,
     "controller_pos_setpoint": 0.0,  # overwritten by the physics tick each sample - see stream_samples()
     "controller_vel_setpoint": 0.0,  # overwritten by the physics tick each sample - see stream_samples()
     "controller_torque_setpoint": 0.0,  # overwritten by the physics tick each sample - see stream_samples()
@@ -129,11 +125,6 @@ DEFAULTS: Dict[str, Any] = {
     "board_vbus_voltage": 0.0,  # overwritten by the physics tick each sample - see stream_samples()
     "board_ibus": 0.0,  # overwritten by the physics tick each sample - see stream_samples()
     "board_serial_number": 0,
-    "board_brake_resistor0_current": 0.0,
-    "board_brake_resistor0_duty": 0.0,
-    "board_brake_resistor0_chopper_temp": 0.0,
-    "board_brake_resistor0_is_armed": False,
-    "board_brake_resistor0_was_saturated": False,
     "board_config_dc_bus_undervoltage_trip_level": 0.0,
     "board_config_dc_bus_overvoltage_trip_level": 0.0,
     "board_config_dc_max_positive_current": 0.0,
@@ -143,8 +134,6 @@ DEFAULTS: Dict[str, Any] = {
     "board_config_inverter0_current_hard_max": 0.0,
     "board_config_inverter0_temp_limit_lower": 0.0,
     "board_config_inverter0_temp_limit_upper": 0.0,
-    "board_config_inverter0_derating_start": 0.0,
-    "board_config_inverter0_current_soft_max_derated": 0.0,
     "debug_mcu_temperature": 0.0,
 }
 

@@ -38,8 +38,10 @@ imports of each other's internals.
 
 ```
 Mytest/
+  protocol/
+    wire.py                     shared wire schemas (CommandRequest/Reply, TelemetryFrame, TaggedTelemetryFrame) + endpoint constants
+    verdict.py                  per-test verdict record shared by the testcase process and the telemetry engine
   hardware/
-    protocol.py                shared message schemas (CommandRequest/Reply, TelemetryFrame, TaggedTelemetryFrame)
     backend.py                  abstract HardwareBackend interface (universal core + execute())
     command_server.py          ZeroMQ REP server, dispatches commands to the backend
     telemetry_server.py         ZeroMQ PUB server, forwards backend.stream_samples()
@@ -62,7 +64,7 @@ Mytest/
     odrive/
       odrive_backend.py            OdriveBackend - REAL, talks to actual ODrive hardware over USB via the official odrive package (firmware 0.6.x / Pro/S1)
       mock_backend.py              MockOdriveBackend - simulated, same channel surface as the real backend
-      odrive_channels.py           TELEMETRY_CHANNELS/COMMAND_CHANNELS - curated (not exhaustive): ~110 telemetry + ~74 command channels a test author would realistically use or need for diagnosis - see its docstring for what was deliberately cut
+      odrive_channels.py           TELEMETRY_CHANNELS/COMMAND_CHANNELS - curated (not exhaustive): 99 telemetry + 71 command channels a test author would realistically use or need for diagnosis, every one verified to exist on the real board at connect() - see its docstring for what was deliberately cut
       odrive_command_client.py     OdriveCommandClient - named sugar for ODrive actions, layered on the generic CommandClient
       main.py                      entry point: real backend by default, --mock to run MockOdriveBackend instead, calls runner.run()
     clients/
@@ -94,7 +96,7 @@ python -m hardware.demos.demo_end_to_end
 That launches the DAQ driver as a subprocess, connects, loads a setup,
 starts acquisition, prints five telemetry frames, then stops and tears
 everything down. DAQ ports default to `tcp://127.0.0.1:5555` (command)
-and `tcp://127.0.0.1:5556` (telemetry) - see `protocol.py`.
+and `tcp://127.0.0.1:5556` (telemetry) - see `protocol/wire.py`.
 
 ```
 python -m hardware.demos.demo_power_supply
@@ -162,8 +164,14 @@ the same machine.
 2. Add a `main.py` in that same folder: pick default command/telemetry
    endpoints, instantiate the new backend, log a warning that it's a
    simulated device, call `runner.run(backend, command_endpoint,
-   telemetry_endpoint)` - copy `mock_power_supply/main.py` as a
-   template.
+   telemetry_endpoint, device=DEVICE_<NAME>, sample_interval_s=...)` -
+   copy `mock_power_supply/main.py` as a template. Add the
+   `DEVICE_<NAME>` constant to `protocol/wire.py` alongside the others:
+   it's stamped onto every frame this driver publishes, becomes the
+   directory name this device's telemetry is stored under, and is what
+   keeps two devices' identically-named channels apart.
+   `sample_interval_s` is the backend's own `SAMPLE_INTERVAL_S`, used to
+   size the publisher's high-water mark in seconds of buffer.
 3. Optionally add a thin `CommandClient` subclass in that same device
    folder (e.g. `mock_<device>/mock_<device>_command_client.py`) with
    named methods that call `self.execute(...)` - pure convenience for
@@ -231,11 +239,11 @@ time) rather than a simple readback.
 `hardware.odrive.main --mock` was run end-to-end in development:
 launched as its own process, `OdriveCommandClient.verify_actions()`
 and `TelemetryClient.verify_channels()` both passed against the live
-process (74/74 command channels, 110/110 telemetry channels), a
+process (all declared command and telemetry channels), a
 representative sample of commands round-tripped across every
 subsystem (control mode/state, a config setter, a motor-config setter,
 a trap_traj setter, a board-level setter, a two-arg method), and a
-telemetry frame containing all 109 channels round-tripped through
+telemetry frame containing every declared telemetry channel round-tripped through
 JSON exactly as the real wire protocol does. `OdriveBackend`,
 `odrive_command_client.py`, and `mock_backend.py` are all generated
 from one systematically-derived attribute-path table (see
@@ -254,7 +262,7 @@ mirroring the real `odrive` package's structure.
 The channel list started out deliberately exhaustive (every channel in
 ODrive's own 0.6.x API reference - ~450 telemetry + ~301 command
 channels) to prove the generation approach against the full documented
-surface, then was pruned back to the 110/74 kept today - removing
+surface, then was pruned back to the 99/71 kept today - removing
 internal FOC/ACIM/sensorless diagnostics, per-phase calibration
 coefficients, per-encoder-type config for hardware this test stand
 doesn't use, CAN bus config, and other one-time-commissioning/
@@ -296,16 +304,21 @@ module, a stub attribute-graph object, and a backend whose
   constructor param (also `main.py --discovery-timeout`) and a clear
   `HardwareError` on timeout. Verified with a stubbed `odrive` module
   whose `find_any()` always raises.
-- `_read_all_channels()`'s bare `except AttributeError: return None`
-  couldn't distinguish "this hardware config doesn't have this
-  channel" (benign) from "the path table has a typo" (a real bug) -
-  both silently returned `None` forever with no way to tell them
-  apart. Now logs a warning the first time each channel is missing
-  (not on every 20 Hz tick) - anything that isn't `AttributeError`
-  still propagates uncaught, which is what lets the `runner.py` fix
-  above actually catch a real disconnect. Verified against a stub
-  object exposing only one of 109 channels: that one channel read
-  correctly, the other 108 each warned exactly once across two calls.
+- `_read_all_channels()`'s `except AttributeError: return None` was
+  removed entirely, and absence is now a **setup-time error**.
+  Substituting `None` meant a declared-but-absent channel still
+  appeared as a key in every frame, so `verify_channels()` saw nothing
+  missing and the run looked healthy while recording an empty column
+  for its whole duration - and a `Bound` against such a channel raised
+  `TypeError` inside the live evaluation thread, killing it and leaving
+  the test unsupervised. `connect()` now probes every declared path
+  once and raises `MissingChannelError` naming each one that doesn't
+  resolve (see `_verify_declared_channels_exist`). Confirmed against a
+  real ODrive Pro: 11 telemetry + 3 command channels were absent and
+  have been pruned, after which all 168 declared channels verify and a
+  live frame contains zero `None` values. Anything that isn't
+  `AttributeError` still propagates uncaught, which is what lets the
+  `runner.py` fix above catch a real disconnect.
 - Added logging (`connect`/`disconnect`/missing-channel warnings) -
   previously silent - and `hardware/demos/demo_odrive.py`, matching every
   other device's `demo_<device>.py` convention (always `--mock`); this

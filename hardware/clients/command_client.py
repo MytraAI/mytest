@@ -40,7 +40,7 @@ from typing import Any, Dict, Iterable, List
 import zmq
 
 from ..backend import MissingChannelError
-from ..protocol import DEFAULT_COMMAND_ENDPOINT, CommandReply, CommandRequest
+from protocol.wire import DEFAULT_COMMAND_ENDPOINT, CommandReply, CommandRequest
 
 
 class CommandClientError(Exception):

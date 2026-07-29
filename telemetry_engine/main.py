@@ -1,22 +1,40 @@
-"""Entry point for the telemetry engine process.
+"""Telemetry engine entry point - the recording process, the architecture
+doc's process #5.
 
-This is the aggregator -> evaluation + storage stage, per the
-architecture doc's process #3.
+Runs the Aggregator's merged stream into per-device wide CSV files, and
+keeps each test run's verdict record honest. Concretely it owns three
+jobs, and deliberately no others:
 
-Runs the Aggregator's merged stream through both TelemetryStorage (raw
-points) and the Evaluator (Rulebook bound checks, which emits a
-ViolationEvent to ResultStorage on each pass/fail transition). Both
-storage interfaces sit behind minimal ABCs, so a real time-series
-database and a real report/relational store can replace the CSV
-implementations later without touching this file or the aggregator.
+1. **Record telemetry.** Every merged frame is queued to a writer task
+   and written wide (one row per frame) into that frame's own file -
+   runs/<test_id>/<device>/telemetry.csv for tagged frames, raw/<device>/
+   for the untagged continuous stream. See wide_csv_storage.py.
+2. **Stamp completeness.** Per run, count frames, seq gaps (per device)
+   and writer drops, and amend the test's own verdict.json with them once
+   its stream goes quiet - plus synthesize a CRASHED verdict for a run
+   whose test process died without writing one. See run_recorder.py.
+3. **Advertise that it's recording.** A heartbeat file, refreshed each
+   tick, that a test checks before starting and while running - a test
+   whose recorder has died aborts rather than spending hardware wear on a
+   run that will have no record. See protocol/heartbeat.py.
 
-REGISTERED_RULEBOOKS below is a manual list for now: as new DUTs and
-their test cases/Rulebooks are added under testcases/, add their
-Rulebook here too.
+What it deliberately no longer does: evaluate Rulebooks. There used to be
+a second, *online* post-hoc evaluator here (Evaluator -> ResultStorage),
+running the same bound logic as the test process's LiveRulebookRunner but
+over the tagged stream - one hop further downstream, therefore lossier -
+and gated on a hand-maintained REGISTERED_RULEBOOKS list that had already
+drifted out of sync (ydrive's Rulebook was never added, so both real
+hardware test cases produced an empty violations file). Two evaluators
+over the same bounds could disagree about the same run, and only one of
+them - the live one, in the test process - ever actually gated the run.
+So pass/fail now has exactly one author: the test process, which records
+its full transition timeline in the verdict itself. The shared evaluation
+logic is still available for *offline* replay against stored telemetry,
+which is where post-hoc evaluation is genuinely useful - see replay.py.
 
-Run it directly with:
-
-    python -m telemetry_engine.main
+There is still no feedback path carrying evaluation results back to a
+running test; the heartbeat carries liveness only, never a verdict or a
+violation. See protocol/heartbeat.py.
 """
 from __future__ import annotations
 
@@ -26,48 +44,115 @@ import logging
 import signal
 from datetime import datetime
 from pathlib import Path
-from typing import List
 
-from testcases.asimov.rulebook import Rulebook
-from testcases.example_dut.rulebooks.cycle_dut_position_rulebook import CYCLE_DUT_POSITION_RULEBOOK
+from protocol import heartbeat
+from protocol.paths import DEFAULT_OUTPUT_DIR
+from protocol.wire import TaggedTelemetryFrame
 
 from .aggregator import Aggregator
-from .csv_result_storage import CsvResultStorage
-from .csv_storage import CsvStorage
-from .evaluation import Evaluator
-from .result_storage import ResultStorage
-from .storage import TelemetryStorage
+from .run_recorder import RunRecorder
+from .storage import MergedItem
+from .wide_csv_storage import WideCsvTelemetryStorage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-DEFAULT_OUTPUT_DIR = Path("telemetry_engine/data")
+WRITE_QUEUE_SIZE = 2000
+"""Frames the writer task may fall behind by before the engine starts
+dropping them. Storage writes are decoupled from the aggregator's socket
+reads for exactly this reason: a disk hiccup used to backpressure straight
+into the SUB socket (write() was awaited per frame, and every store
+flushed per row), which is what would actually overflow a socket buffer.
+A drop here is counted and reported in the verdict's completeness, never
+silent - see run_recorder.py."""
 
-REGISTERED_RULEBOOKS: List[Rulebook] = [CYCLE_DUT_POSITION_RULEBOOK]
+FLUSH_INTERVAL_S = 1.0
+"""How often the writer task flushes to disk. Replaces the old
+flush-every-row behaviour, which at ~4,500 rows/s was the most likely
+source of a stall in the first place."""
+
+RECONCILE_INTERVAL_S = 1.0
 
 
-async def _consume(
-    aggregator: Aggregator, telemetry_storage: TelemetryStorage, evaluator: Evaluator, result_storage: ResultStorage
-) -> None:
+async def _consume(aggregator: Aggregator, queue: "asyncio.Queue[MergedItem]", recorder: RunRecorder) -> None:
+    """Read the merged stream and hand frames to the writer.
+
+    Accounting happens here rather than in the writer so that a frame
+    dropped for want of queue space is still counted against its run - the
+    engine knows it received it, which is the distinction completeness
+    reports.
+    """
+    dropped_raw = 0
+    next_raw_warning = 1
     async for item in aggregator.merged_stream():
-        await telemetry_storage.write(item)
-        for event in evaluator.evaluate(item):
-            logger.info(
-                "test %s (%s): %s %s (%s=%.3f)",
-                event.test_id, event.test_name, event.bound_label, event.transition, event.channel, event.value,
-            )
-            await result_storage.write(event)
+        if isinstance(item, TaggedTelemetryFrame):
+            recorder.observe(item)
+        try:
+            queue.put_nowait(item)
+        except asyncio.QueueFull:
+            if isinstance(item, TaggedTelemetryFrame):
+                recorder.note_dropped(item)  # reported per run in the verdict's completeness
+            else:
+                # Raw frames belong to no run, so there's nowhere to record
+                # them but the log - and sustained backpressure would mean
+                # thousands of identical lines a second, which makes the
+                # stall worse. Warn on an exponentially growing threshold so
+                # the first drop is immediate and the scale stays visible.
+                dropped_raw += 1
+                if dropped_raw >= next_raw_warning:
+                    logger.warning(
+                        "write queue full - %d raw frame(s) dropped so far (latest from %s)",
+                        dropped_raw, item.device,
+                    )
+                    next_raw_warning *= 10
+
+
+async def _write_loop(queue: "asyncio.Queue[MergedItem]", storage: WideCsvTelemetryStorage) -> None:
+    """Drain the queue into storage, flushing periodically."""
+    last_flush = asyncio.get_running_loop().time()
+    while True:
+        item = await queue.get()
+        try:
+            await storage.write(item)
+            now = asyncio.get_running_loop().time()
+            if now - last_flush >= FLUSH_INTERVAL_S:
+                storage.flush()
+                last_flush = now
+        except Exception:
+            logger.exception("failed to write a telemetry frame")
+        finally:
+            queue.task_done()
+
+
+async def _reconcile_loop(
+    recorder: RunRecorder, output_dir: Path, stop: asyncio.Event, interval_s: float = RECONCILE_INTERVAL_S
+) -> None:
+    """Tick the recorder and refresh the heartbeat ~once a second, waking
+    promptly when stop is set rather than sleeping the full interval."""
+    while not stop.is_set():
+        heartbeat.write_heartbeat(output_dir)
+        try:
+            await recorder.reconcile()
+        except Exception:
+            # Stop refreshing the heartbeat and say why. A recorder that
+            # can't finalize runs (a full disk, a permissions problem) is not
+            # recording, and the heartbeat going stale is exactly how a
+            # running test finds that out and aborts. Dying silently here
+            # would leave the engine process up, looking alive.
+            logger.exception("reconciliation failed - stopping heartbeat so running tests abort")
+            return
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_s)
+        except asyncio.TimeoutError:
+            pass
 
 
 async def main(output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
+    session = datetime.now().strftime("%Y%m%d_%H%M%S")
     aggregator = Aggregator()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    telemetry_storage = CsvStorage(output_dir / f"telemetry_{timestamp}.csv")
-    result_storage = CsvResultStorage(output_dir / f"results_{timestamp}.csv")
-
-    evaluator = Evaluator()
-    for rulebook in REGISTERED_RULEBOOKS:
-        evaluator.register(rulebook)
+    storage = WideCsvTelemetryStorage(output_dir, session)
+    recorder = RunRecorder(output_dir, storage)
+    queue: "asyncio.Queue[MergedItem]" = asyncio.Queue(maxsize=WRITE_QUEUE_SIZE)
 
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
@@ -77,14 +162,37 @@ async def main(output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
         except NotImplementedError:
             pass  # signal handlers aren't available on all platforms
 
-    task = asyncio.create_task(
-        _consume(aggregator, telemetry_storage, evaluator, result_storage), name="telemetry_engine_consume"
-    )
-    await stop.wait()
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
-    await telemetry_storage.close()
-    await result_storage.close()
+    # Publish liveness before anything else, so a test started immediately
+    # after this process comes up doesn't lose the race and refuse to run.
+    heartbeat.write_heartbeat(output_dir)
+    logger.info("telemetry engine recording to %s (session %s)", output_dir, session)
+
+    tasks = [
+        asyncio.create_task(_consume(aggregator, queue, recorder), name="telemetry_engine_consume"),
+        asyncio.create_task(_write_loop(queue, storage), name="telemetry_engine_write"),
+        asyncio.create_task(
+            _reconcile_loop(recorder, output_dir, stop), name="telemetry_engine_reconcile"
+        ),
+    ]
+    try:
+        await stop.wait()
+    finally:
+        # Stop reading first, then drain what's already queued, so a clean
+        # shutdown doesn't discard frames the engine had already accepted.
+        tasks[0].cancel()
+        await asyncio.gather(tasks[0], return_exceptions=True)
+        try:
+            await asyncio.wait_for(queue.join(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("gave up draining %d queued frames at shutdown", queue.qsize())
+        for task in tasks[1:]:
+            task.cancel()
+        await asyncio.gather(*tasks[1:], return_exceptions=True)
+
+        await recorder.flush()
+        await storage.close()
+        heartbeat.clear_heartbeat()  # so the next test fails fast instead of waiting out staleness
+        logger.info("telemetry engine stopped")
 
 
 if __name__ == "__main__":

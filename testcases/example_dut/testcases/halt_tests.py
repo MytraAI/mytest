@@ -52,8 +52,9 @@ class CycleDutPositionTest(BaseExampleDutTest):
         test_id: Optional[str] = None,
         cycle_duration_s: Optional[float] = None,
         dwell_s: Optional[float] = None,
+        require_engine: bool = True,
     ):
-        super().__init__(test_id)
+        super().__init__(test_id, require_engine=require_engine)
         self._cycle_duration_s = cycle_duration_s if cycle_duration_s is not None else self.CYCLE_DURATION_S
         self._dwell_s = dwell_s if dwell_s is not None else self.DWELL_S
 

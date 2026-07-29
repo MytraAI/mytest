@@ -18,7 +18,7 @@ import time
 
 from ..clients.telemetry_client import TelemetryClient
 from ..mock_power_supply.mock_power_supply_command_client import PowerSupplyCommandClient
-from ..protocol import DEFAULT_POWER_SUPPLY_COMMAND_ENDPOINT, DEFAULT_POWER_SUPPLY_TELEMETRY_ENDPOINT
+from protocol.wire import DEFAULT_POWER_SUPPLY_COMMAND_ENDPOINT, DEFAULT_POWER_SUPPLY_TELEMETRY_ENDPOINT
 
 
 def main():

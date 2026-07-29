@@ -10,6 +10,8 @@ import asyncio
 import logging
 import signal
 
+from protocol.wire import UNKNOWN_DEVICE
+
 from .backend import HardwareBackend
 from .command_server import CommandServer
 from .telemetry_server import TelemetryServer
@@ -17,7 +19,13 @@ from .telemetry_server import TelemetryServer
 logger = logging.getLogger(__name__)
 
 
-async def run(backend: HardwareBackend, command_endpoint: str, telemetry_endpoint: str) -> None:
+async def run(
+    backend: HardwareBackend,
+    command_endpoint: str,
+    telemetry_endpoint: str,
+    device: str = UNKNOWN_DEVICE,
+    sample_interval_s: float = 0.02,
+) -> None:
     """Connect the backend, serve command/telemetry until SIGINT/SIGTERM (or
     either server task fails on its own), then disconnect.
 
@@ -28,11 +36,19 @@ async def run(backend: HardwareBackend, command_endpoint: str, telemetry_endpoin
     actually exits (loud, visible in the log/exit code) instead of quietly
     continuing with one server silently dead. Mocks never hit this path -
     only a real backend's I/O can fail this way.
+
+    `device` is stamped onto every published telemetry frame and is what
+    per-device storage keys off (see protocol/wire.py's UNKNOWN_DEVICE);
+    `sample_interval_s` sizes the publisher's high-water mark in seconds
+    of buffer rather than a raw frame count. Both come from the device's
+    own entry point, keeping this wiring device-agnostic.
     """
     await backend.connect()
 
     command_server = CommandServer(backend, command_endpoint)
-    telemetry_server = TelemetryServer(backend, telemetry_endpoint)
+    telemetry_server = TelemetryServer(
+        backend, telemetry_endpoint, device=device, sample_interval_s=sample_interval_s
+    )
 
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()

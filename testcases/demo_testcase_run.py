@@ -23,7 +23,7 @@ import threading
 
 import zmq
 
-from hardware.protocol import DEFAULT_TAGGED_TELEMETRY_ENDPOINT, TAGGED_TELEMETRY_TOPIC, TaggedTelemetryFrame
+from protocol.wire import DEFAULT_TAGGED_TELEMETRY_ENDPOINT, TAGGED_TELEMETRY_TOPIC, TaggedTelemetryFrame
 
 from .example_dut.testcases.base_example_dut_test import BaseExampleDutTest
 
@@ -56,7 +56,7 @@ def main() -> None:
     printer = threading.Thread(target=print_tagged_frames, args=(stop_printer,), daemon=True)
     printer.start()
 
-    test_case = BaseExampleDutTest()
+    test_case = BaseExampleDutTest(require_engine=False)
     test_case.run()
 
     stop_printer.set()

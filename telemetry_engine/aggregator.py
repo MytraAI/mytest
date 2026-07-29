@@ -23,7 +23,8 @@ from typing import AsyncIterator
 import zmq
 import zmq.asyncio
 
-from hardware.protocol import (
+from protocol.wire import (
+    DEFAULT_TELEMETRY_HWM,
     DEFAULT_TAGGED_TELEMETRY_ENDPOINT,
     DEFAULT_TELEMETRY_ENDPOINT,
     TAGGED_TELEMETRY_TOPIC,
@@ -75,6 +76,7 @@ class Aggregator:
     async def _pump_raw(self, queue: "asyncio.Queue[MergedItem]") -> None:
         socket = self._ctx.socket(zmq.SUB)
         socket.setsockopt(zmq.SUBSCRIBE, TELEMETRY_TOPIC)
+        socket.setsockopt(zmq.RCVHWM, DEFAULT_TELEMETRY_HWM)
         socket.connect(self._raw_endpoint)
         logger.info("aggregator subscribed to raw stream at %s", self._raw_endpoint)
         await self._pump(socket, "raw", self._raw_endpoint, queue, TelemetryFrame.from_bytes)
@@ -82,6 +84,7 @@ class Aggregator:
     async def _pump_tagged(self, queue: "asyncio.Queue[MergedItem]") -> None:
         socket = self._ctx.socket(zmq.SUB)
         socket.setsockopt(zmq.SUBSCRIBE, TAGGED_TELEMETRY_TOPIC)
+        socket.setsockopt(zmq.RCVHWM, DEFAULT_TELEMETRY_HWM)
         socket.connect(self._tagged_endpoint)
         logger.info("aggregator subscribed to tagged stream at %s", self._tagged_endpoint)
         await self._pump(socket, "tagged", self._tagged_endpoint, queue, TaggedTelemetryFrame.from_bytes)

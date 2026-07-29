@@ -23,7 +23,7 @@ import threading
 
 import zmq
 
-from hardware.protocol import DEFAULT_TAGGED_TELEMETRY_ENDPOINT, TAGGED_TELEMETRY_TOPIC, TaggedTelemetryFrame
+from protocol.wire import DEFAULT_TAGGED_TELEMETRY_ENDPOINT, TAGGED_TELEMETRY_TOPIC, TaggedTelemetryFrame
 
 from .ydrive.testcases.base_ydrive_test import BaseYdriveTest
 
@@ -56,7 +56,7 @@ def main() -> None:
     printer = threading.Thread(target=print_tagged_frames, args=(stop_printer,), daemon=True)
     printer.start()
 
-    test_case = BaseYdriveTest(use_mock=True)
+    test_case = BaseYdriveTest(use_mock=True, require_engine=False)
     test_case.run()
 
     stop_printer.set()

@@ -39,8 +39,6 @@ TELEMETRY_CHANNELS = [
     "disarm_reason",  # Error enum int - reason the axis last disarmed, cleared via clear_errors
     "detailed_disarm_reason",  # int - extra detail on disarm_reason, not populated for every error type
     "last_drv_fault",  # int - last gate-driver (DRV chip) fault code
-    "total_charge_used",  # Coulombs - total charge drawn from the bus since boot (can be negative, i.e. regen)
-    "total_power_used",  # Joules - total energy drawn from the bus since boot (can be negative)
 
     # --- Axis config (axis0.config.*, settable but also readable - see COMMAND_CHANNELS) ---
     "axis_config_startup_motor_calibration",  # bool
@@ -89,9 +87,7 @@ TELEMETRY_CHANNELS = [
 
     # --- Onboard encoder (odrv0.onboard_encoder0 - the built-in magnetic encoder; not under axis0, see module docstring) ---
     "encoder_onboard0_status",  # ComponentStatus enum
-    "encoder_onboard0_field_status",  # FieldStrengthMonitoring enum - magnet field strength health (e.g. misalignment)
     "encoder_onboard0_raw",  # raw sensor reading, pre-scaling
-    "encoder_onboard0_config_field_check_mode",
 
     # --- Controller (axis0.controller.*, read-only telemetry) ---
     "controller_pos_setpoint",  # turns - post-filter position reference actually used
@@ -144,11 +140,6 @@ TELEMETRY_CHANNELS = [
     "board_vbus_voltage",  # V - DC bus voltage
     "board_ibus",  # A - DC bus current (calculated)
     "board_serial_number",  # int - use hex(...).upper() to match the USB descriptor string; identifies which physical unit produced this data
-    "board_brake_resistor0_current",  # A
-    "board_brake_resistor0_duty",  # ratio 0-1
-    "board_brake_resistor0_chopper_temp",  # degC
-    "board_brake_resistor0_is_armed",  # bool
-    "board_brake_resistor0_was_saturated",  # bool - brake resistor couldn't dissipate all regen energy
     "board_config_dc_bus_undervoltage_trip_level",  # V
     "board_config_dc_bus_overvoltage_trip_level",  # V
     "board_config_dc_max_positive_current",  # A
@@ -158,8 +149,6 @@ TELEMETRY_CHANNELS = [
     "board_config_inverter0_current_hard_max",  # A
     "board_config_inverter0_temp_limit_lower",  # degC
     "board_config_inverter0_temp_limit_upper",  # degC
-    "board_config_inverter0_derating_start",  # V
-    "board_config_inverter0_current_soft_max_derated",  # A
     "debug_mcu_temperature",  # degC - MCU die temperature; ODrive's own docs label this "diagnostics, not for end users", kept anyway since it's cheap and could explain thermal-stress-related odd behavior
 ]
 
@@ -202,7 +191,6 @@ COMMAND_CHANNELS = [
     "set_motor_config_current_hard_max",
 
     # --- Onboard encoder config setter + method ---
-    "set_encoder_onboard0_config_field_check_mode",
     "encoder_onboard0_get_field_strength",  # odrv0.onboard_encoder0.get_field_strength() - reads back the onboard magnetic encoder's field strength magnitude, if the chip exposes it
 
     # --- Controller setpoints + config setters ---
@@ -246,8 +234,6 @@ COMMAND_CHANNELS = [
     "set_board_config_inverter0_current_hard_max",
     "set_board_config_inverter0_temp_limit_lower",
     "set_board_config_inverter0_temp_limit_upper",
-    "set_board_config_inverter0_derating_start",
-    "set_board_config_inverter0_current_soft_max_derated",
     "save_configuration",  # odrv0.save_configuration()
     "erase_configuration",  # odrv0.erase_configuration()
     "reboot",  # odrv0.reboot()

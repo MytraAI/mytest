@@ -52,8 +52,8 @@ class EnduranceCycleTest(BaseYdriveTest):
     LOW_POSITION = 0.0
     HIGH_POSITION = 10.0
 
-    def __init__(self, test_id: Optional[str] = None, use_mock: bool = False):
-        super().__init__(test_id, use_mock)
+    def __init__(self, test_id: Optional[str] = None, use_mock: bool = False, require_engine: bool = True):
+        super().__init__(test_id, use_mock, require_engine=require_engine)
         self.total_distance_m = 0.0
 
     def main_execution(self) -> None:

@@ -1,9 +1,9 @@
 """Manual registry mapping a "<dut>.<test>" key to a factory that
 constructs that TestCase - the single place a new test case gets
 registered so tools/run_test.py can look it up by name instead of
-every caller importing/instantiating it directly. Mirrors
-telemetry_engine/main.py's REGISTERED_RULEBOOKS: a manual list authors
-append to as new DUTs/test cases are added under testcases/.
+every caller importing/instantiating it directly. A deliberately
+manual list authors append to as new DUTs/test cases are added under
+testcases/, rather than introspection/auto-discovery magic.
 
 Every factory has the same call signature - (test_id, use_mock) -
 regardless of whether the underlying TestCase's own __init__ actually

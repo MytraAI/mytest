@@ -22,7 +22,7 @@ import time
 from ..clients.telemetry_client import TelemetryClient
 from ..odrive.odrive_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
 from ..odrive.odrive_command_client import OdriveCommandClient
-from ..protocol import DEFAULT_ODRIVE_COMMAND_ENDPOINT, DEFAULT_ODRIVE_TELEMETRY_ENDPOINT
+from protocol.wire import DEFAULT_ODRIVE_COMMAND_ENDPOINT, DEFAULT_ODRIVE_TELEMETRY_ENDPOINT
 
 
 def main():

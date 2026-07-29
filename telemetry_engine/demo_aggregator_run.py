@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from hardware.protocol import TaggedTelemetryFrame
+from protocol.wire import TaggedTelemetryFrame
 from testcases.example_dut.testcases.halt_tests import CycleDutPositionTest
 
 from .aggregator import Aggregator
@@ -41,7 +41,7 @@ async def main() -> None:
     printer = asyncio.create_task(print_merged(aggregator), name="demo-print-merged")
 
     print("--- running CycleDutPositionTest (shortened for verification) ---", flush=True)
-    await asyncio.to_thread(CycleDutPositionTest(cycle_duration_s=20.0, dwell_s=6.0).run)
+    await asyncio.to_thread(CycleDutPositionTest(cycle_duration_s=20.0, dwell_s=6.0, require_engine=False).run)
 
     await asyncio.sleep(0.5)  # let any in-flight frames drain before shutting down
     printer.cancel()
