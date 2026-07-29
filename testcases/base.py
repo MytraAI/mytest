@@ -6,38 +6,26 @@ generic idle/arm/run/abort/complete state machine sketched in the
 architecture doc - this component uses the three-phase model
 exclusively.
 
-- PreTestSetup connects to the hardware driver, subscribes to
-  telemetry, and starts the Telemetry Publisher.
-- MainExecution runs the test's own sequence logic. Any pass/fail
-  decision that needs to affect the live sequence must be made here,
-  using the test case's own telemetry subscription directly. Per the
-  architecture doc's "no feedback loop" principle, nothing downstream
-  of the Telemetry Publisher can influence this process.
-- PostTestTeardown returns the system to a state where another test
-  can start.
+- PreTestSetup connects to the hardware driver, subscribes to telemetry,
+  and starts the Telemetry Publisher.
+- MainExecution runs the test's own sequence logic. Any pass/fail decision
+  that affects the live sequence is made here, from the test's own
+  telemetry subscription: no *evaluation result* computed downstream of the
+  Telemetry Publisher can influence this process. (The engine's liveness
+  heartbeat is not such a result - see check_recording_alive.)
+- PostTestTeardown returns the system to a state where another test can
+  start.
 
-PostTestTeardown always runs, unconditionally, regardless of how
-PreTestSetup or MainExecution ended: normal completion, a fatal
-channel breach, or an unexpected exception anywhere. A test case that
-sets up more than one device in PreTestSetup can fail partway through
-(e.g. the second device's connection fails after the first device
-already started acquiring). So PostTestTeardown must be defensive:
-check what was actually set up before tearing it down, rather than
-assuming every resource it might reference exists.
+PostTestTeardown always runs, however the run ended. Since PreTestSetup can
+fail partway through several devices, it must check what was actually set up
+before tearing it down. Use `teardown_step()` for each cleanup action, so one
+device's failure can't prevent another's or mask the exception already
+propagating out of `run()`.
 
-A teardown step against a device that was never reachable can itself
-fail (e.g. a ZeroMQ REQ socket left in an unmatched send/recv state
-after a connect timeout). Use `teardown_step()` to run each cleanup
-action independently, so one device's cleanup failure can't prevent
-another device's cleanup from being attempted, and can't mask whatever
-exception is already propagating out of `run()`.
-
-`self.runner` is an Optional[LiveRulebookRunner] every concrete
-subclass is expected to construct in its own pre_test_setup() (see
-BaseExampleDutTest/BaseYdriveTest) - kept here, not down on each
-subclass, purely so wait_for() below can rely on it existing (as None
-or a real runner) without every subclass redeclaring the same
-attribute. TestCase itself never constructs one.
+`self.runner` is an Optional[LiveRulebookRunner] each concrete subclass
+constructs in its own pre_test_setup(). It lives here, not on each subclass,
+only so wait_for() can rely on the attribute existing. TestCase itself never
+constructs one.
 """
 from __future__ import annotations
 
@@ -66,12 +54,11 @@ class RecordingLost(Exception):
     engine's heartbeat is missing or stale - nothing is recording this
     run any more.
 
-    Not a safety failure: the LiveRulebookRunner keeps evaluating from its
-    own subscription, so bound monitoring is unaffected. It's an economic
-    one. A test's whole product is its record, and both real-hardware test
-    cases here run indefinitely, so continuing would spend hours of real
-    mechanical wear producing nothing recoverable. Handled by run()'s
-    try/finally exactly like StopRequested."""
+    Not a safety failure - the runner keeps evaluating from its own
+    subscription, so bound monitoring is unaffected - but an economic one: a
+    run's whole product is its record, so continuing spends hardware wear
+    producing nothing recoverable. Handled by run()'s try/finally exactly
+    like StopRequested."""
 
     def __init__(self, test_id: str, detail: str):
         super().__init__(f"test {test_id}: telemetry recording lost - {detail}")
@@ -117,9 +104,9 @@ class TestCase(ABC):
         """True once post_test_teardown() starts, which switches off
         check_recording_alive(). Teardown steps go through @step like any
         other, so without this a dead engine would abort every individual
-        teardown step - leaving the axis un-idled, which is precisely the
-        state teardown exists to prevent. By then the verdict is already
-        written, so recording liveness has nothing left to protect."""
+        teardown step - leaving hardware in exactly the state teardown exists
+        to return it from. By then the verdict is already written, so
+        recording liveness has nothing left to protect."""
 
     @abstractmethod
     def pre_test_setup(self) -> None:
@@ -140,57 +127,30 @@ class TestCase(ABC):
     def run(self) -> None:
         """Run pre_test_setup -> main_execution, then always post_test_teardown.
 
-        Also converts SIGTERM into the same clean-teardown path Ctrl+C
-        already gets for free. Python installs a default handler that
-        turns SIGINT into KeyboardInterrupt, which the try/finally below
-        already catches correctly - but Python installs no equivalent
-        handler for SIGTERM, so `kill <pid>` (the default signal an
-        external supervisor/systemd/CI would send to stop an unattended
-        run) would otherwise terminate the process immediately,
-        skipping post_test_teardown() entirely. For a test case that
-        runs until told to stop rather than for a fixed duration (e.g.
-        EnduranceCycleTest, ManualTest), that means real hardware gets
-        abandoned exactly where it was - the axis never idled, the
-        driver process orphaned instead of disconnected - discovered by
-        actually sending a real test process SIGTERM and watching
-        neither happen.
+        Refuses to start unless something is recording (see
+        require_recording_started), then authors this run's verdict before
+        teardown - everything it records is already determined by then, and
+        result_metadata() can still read live hardware.
 
-        Only registered when run() is executing on the main thread:
-        signal.signal() raises ValueError from any other thread, and
-        this codebase already calls TestCase.run() off the main thread
-        in three places (telemetry_engine/demo_*_run.py, via
-        asyncio.to_thread(), so a synchronous run() doesn't block those
-        demos' own event loop) - see live_rulebook_runner.py's docstring
-        for the same main-thread constraint on the fatal-violation
-        watchdog. Silently skipped rather than raising there: those
-        demos exercise a no-op main_execution() for a few seconds, not
-        an unattended, physically-moving run - the scenario this
-        actually protects against - so nothing is lost by not
-        installing it in that context.
+        Converts SIGTERM into the clean-teardown path SIGINT gets for free:
+        Python installs no SIGTERM handler, so `kill <pid>` would otherwise
+        skip post_test_teardown() entirely and abandon hardware wherever it
+        was. Registered only on the main thread, since signal.signal() raises
+        elsewhere and this codebase does call run() off the main thread (the
+        demos, via asyncio.to_thread); silently skipped there, which costs
+        nothing because those runs aren't unattended or physically moving.
 
-        Also spawns the lightweight operator status page (see
-        testcases/utils.py's spawn_operator_dashboard and
-        tools/operator_dashboard.py) before pre_test_setup() even
-        starts, so it's up to show an error even if setup itself
-        crashes. Its status reflects how this method's own try/except
-        resolves: "stopped" for a deliberate StopRequested/SystemExit
-        (an operator asking to stop is not a failure), "failing" with
-        the exception for anything else, "passing" on clean completion.
+        Spawns the operator status page before pre_test_setup(), so it's up to
+        show an error even if setup crashes, and reflects how this method's
+        try/except resolves: "stopped" for a deliberate stop, "failing" with
+        the exception otherwise, "passing" on a clean completion whose bounds
+        also passed.
 
-        On the main thread, once the test is over, this blocks
-        (_wait_until_interrupted()) so the dashboard keeps showing that
-        final result instead of vanishing the instant the test
-        completes - the operator closes it out themselves (Ctrl+C) once
-        they've seen it. Skipped when run() executes off the main
-        thread (the same three telemetry_engine/demo_*_run.py callers
-        the SIGTERM registration above already skips), so those demos
-        keep returning promptly rather than hanging forever. Also
-        skipped for a deliberate StopRequested/SystemExit - the operator
-        already took one action to end the test; making them take a
-        second one (another Ctrl+C/SIGTERM/stop_test.py) just to let the
-        process actually exit would be a real, confirmed bug, not a
-        feature - only "passing"/"failing" (the test reached its own
-        conclusion, not an external stop) linger.
+        On the main thread a completed run then blocks
+        (_wait_until_interrupted) so that final result stays on screen until
+        the operator closes it. Deliberately skipped for a stop or a lost
+        recorder - the operator already acted, or nobody is watching - and off
+        the main thread, so the demos return promptly.
         """
         if threading.current_thread() is threading.main_thread():
             signal.signal(signal.SIGTERM, self._handle_sigterm)
@@ -449,8 +409,7 @@ class TestCase(ABC):
         """Run one teardown action, logging (not raising) on failure so
         the remaining teardown steps still get attempted. Any
         post_test_teardown() override - at any subclass depth - should
-        use this for each cleanup action, not just BaseYdriveTest/
-        BaseExampleDutTest's own."""
+        use this for each cleanup action, not just a base case's own."""
         try:
             action()
         except Exception:

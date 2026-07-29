@@ -1,40 +1,24 @@
 """Telemetry engine entry point - the recording process, the architecture
 doc's process #5.
 
-Runs the Aggregator's merged stream into per-device wide CSV files, and
-keeps each test run's verdict record honest. Concretely it owns three
-jobs, and deliberately no others:
+Three jobs, and deliberately no others:
 
-1. **Record telemetry.** Every merged frame is queued to a writer task
-   and written wide (one row per frame) into that frame's own file -
-   runs/<test_id>/<device>/telemetry.csv for tagged frames, raw/<device>/
-   for the untagged continuous stream. See wide_csv_storage.py.
-2. **Stamp completeness.** Per run, count frames, seq gaps (per device)
-   and writer drops, and amend the test's own verdict.json with them once
-   its stream goes quiet - plus synthesize a CRASHED verdict for a run
-   whose test process died without writing one. See run_recorder.py.
-3. **Advertise that it's recording.** A heartbeat file, refreshed each
-   tick, that a test checks before starting and while running - a test
-   whose recorder has died aborts rather than spending hardware wear on a
-   run that will have no record. See protocol/heartbeat.py.
+1. **Record telemetry.** Every merged frame is queued to a writer task and
+   written wide, one file per device per run. See wide_csv_storage.py.
+2. **Stamp completeness.** Per run, count frames, per-device seq gaps and
+   writer drops, and amend that run's verdict once its stream goes quiet -
+   or synthesize one if the test process died. See run_recorder.py.
+3. **Advertise that it's recording.** A heartbeat a test checks before
+   starting and while running. See protocol/heartbeat.py.
 
-What it deliberately no longer does: evaluate Rulebooks. There used to be
-a second, *online* post-hoc evaluator here (Evaluator -> ResultStorage),
-running the same bound logic as the test process's LiveRulebookRunner but
-over the tagged stream - one hop further downstream, therefore lossier -
-and gated on a hand-maintained REGISTERED_RULEBOOKS list that had already
-drifted out of sync (ydrive's Rulebook was never added, so both real
-hardware test cases produced an empty violations file). Two evaluators
-over the same bounds could disagree about the same run, and only one of
-them - the live one, in the test process - ever actually gated the run.
-So pass/fail now has exactly one author: the test process, which records
-its full transition timeline in the verdict itself. The shared evaluation
-logic is still available for *offline* replay against stored telemetry,
-which is where post-hoc evaluation is genuinely useful - see replay.py.
+It deliberately does *not* evaluate Rulebooks. Pass/fail has one author, the
+test process, which records its own transition timeline in the verdict; a
+second evaluator here would read a lossier copy of the stream and could
+disagree about the same run. The shared evaluation logic remains available
+for offline replay against stored telemetry - see replay.py.
 
-There is still no feedback path carrying evaluation results back to a
-running test; the heartbeat carries liveness only, never a verdict or a
-violation. See protocol/heartbeat.py.
+No evaluation result ever flows back to a running test. The heartbeat carries
+liveness only.
 """
 from __future__ import annotations
 

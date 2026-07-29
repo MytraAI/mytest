@@ -37,7 +37,7 @@ class TelemetryTimeout(TimeoutError):
     frame arrives within timeout_s of the previous one (or of the call,
     for the first frame) - a dead driver or stopped publisher. Subclasses
     builtin TimeoutError so existing `except TimeoutError` handlers (e.g.
-    ydrive move_to's own arrival deadline) still catch it, while callers
+    a closed-loop move's own arrival deadline) still catch it, while callers
     that care can tell a silent-stream timeout apart from other errors."""
 
 

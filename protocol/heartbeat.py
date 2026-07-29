@@ -1,31 +1,21 @@
 """The telemetry engine's liveness heartbeat, and how a test reads it.
 
-A test run's whole product is its record, so a test that keeps moving
-hardware after recording has stopped spends real mechanical wear
-producing nothing. The engine therefore publishes a heartbeat while it's
-recording, and TestCase checks it: once before pre_test_setup() (refuse
-to start with no recorder) and then at the same call sites
-check_fatal_violation()/check_stop_requested() already poll, so the test
-aborts promptly and tears down cleanly if recording stops mid-run.
+A run's whole product is its record, so a test that keeps driving hardware
+after recording has stopped spends wear producing nothing. The engine
+publishes a heartbeat while recording; TestCase refuses to start without one
+and aborts if it goes stale (see TestCase.check_recording_alive).
 
-A plain file under the system tempdir, for the same reason
-tools/stop_test.py's stop markers are: Path.exists()/write_text()/
-unlink() resolve identically on Windows, CentOS and macOS with no
-OS-specific code, unlike signals. Same convention as
-tools/operator_dashboard.py's dashboard lock file.
+A plain file under the system tempdir, for the same reason stop markers are:
+exists()/write_text()/unlink() behave identically on Windows, CentOS and
+macOS, unlike signals. It carries the engine's actual output_dir, so the test
+finds the run directory to write into without a shared config or a flag that
+could disagree - the engine is the authority on where it writes.
 
-It also carries the engine's *actual* output_dir, which is what lets the
-test process find the run directory to write its verdict into without a
-shared config file or a CLI flag that could disagree - the engine is the
-authority on where it's writing, so the test asks it.
-
-Note on AI/Mytest.md's "no feedback loop from the telemetry engine"
-principle: this is deliberately not that. What the engine forbids is
-*evaluation results* influencing a running test - a ViolationEvent can
-never abort a run, and all live safety logic stays in the test process.
-A liveness check carries no evaluation result at all; it's an
-infrastructure precondition the test pulls from the filesystem, exactly
-as it already pulls stop requests.
+This is deliberately not the "no feedback loop from the telemetry engine"
+that AI/Mytest.md forbids: that rule keeps *evaluation results* from
+influencing a running test. A liveness check carries no result - it's an
+infrastructure precondition, pulled from the filesystem exactly as stop
+requests already are.
 """
 from __future__ import annotations
 

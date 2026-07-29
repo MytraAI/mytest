@@ -54,6 +54,10 @@ DEFAULT_ODRIVE_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5581"
 # subscriber ever needs to filter server-side.
 TELEMETRY_TOPIC = b"telem"
 
+# Topic used on the Telemetry Publisher's tagged PUB socket - the testcase
+# execution process's outbound feed to the Telemetry Aggregator.
+TAGGED_TELEMETRY_TOPIC = b"telem_tagged"
+
 # Which device a telemetry frame came from, carried on the frame itself
 # rather than inferred from which endpoint a subscriber happened to
 # connect to. Needed once more than one device streams into one test:
@@ -77,17 +81,17 @@ DEVICE_ODRIVE = "odrive"
 # PUB silently drops once its queue is full. Expressed here in seconds of
 # buffer instead of a raw count, because the useful question is "how long
 # may a consumer stall before we lose data", and one count means very
-# different things at 20 Hz (the real ODrive) and 50 Hz (the mocks).
+# different things at each device's sample rate.
 #
 # Deliberately modest rather than huge. Storage writes are drained by a
 # separate task (see telemetry_engine/main.py), so a socket queue should
 # never grow for long; a very deep queue would only convert a slow writer
 # into tens of seconds of invisible latency, where a shallow one surfaces
 # it promptly as a counted drop. It also has to stay small enough that
-# many devices can each hold one without adding up: a 111-channel frame
-# is roughly 5 KB, so 500 frames is about 2.5 MB per socket.
+# many devices can each hold one without adding up: a frame of ~100
+# channels is roughly 5 KB, so 500 frames is about 2.5 MB per socket.
 TELEMETRY_BUFFER_S = 10.0
-DEFAULT_TELEMETRY_HWM = 500  # 10 s at the fastest rate anything here runs (50 Hz)
+DEFAULT_TELEMETRY_HWM = 500  # fallback for subscribers, which don't know the publisher's rate
 
 
 def hwm_for_interval(sample_interval_s: float, buffer_s: float = TELEMETRY_BUFFER_S) -> int:
@@ -98,10 +102,6 @@ def hwm_for_interval(sample_interval_s: float, buffer_s: float = TELEMETRY_BUFFE
         return DEFAULT_TELEMETRY_HWM
     return max(1, int(buffer_s / sample_interval_s))
 
-# Topic used on the Telemetry Publisher's tagged PUB socket - the
-# testcase execution process's outbound feed towards the (not yet
-# built) Telemetry Aggregator.
-TAGGED_TELEMETRY_TOPIC = b"telem_tagged"
 
 
 @dataclass
