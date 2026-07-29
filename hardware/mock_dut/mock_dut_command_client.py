@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from ..clients.command_client import CommandClient
-from ..protocol import DEFAULT_DUT_COMMAND_ENDPOINT
+from protocol.wire import DEFAULT_DUT_COMMAND_ENDPOINT
 
 
 class DutCommandClient(CommandClient):

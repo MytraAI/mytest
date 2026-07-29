@@ -67,7 +67,7 @@ from typing import Optional
 
 import zmq
 
-from hardware.protocol import DEFAULT_TAGGED_TELEMETRY_ENDPOINT, TAGGED_TELEMETRY_TOPIC, TaggedTelemetryFrame
+from protocol.wire import DEFAULT_TAGGED_TELEMETRY_ENDPOINT, TAGGED_TELEMETRY_TOPIC, TaggedTelemetryFrame
 
 from .stop_test import request_stop
 

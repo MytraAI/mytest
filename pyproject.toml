@@ -14,3 +14,16 @@ dependencies = [
     # Tkinter via FigureCanvasTkAgg).
     "matplotlib>=3.8",
 ]
+
+[dependency-groups]
+dev = [
+    # tests/ - pure-logic unit tests over the verdict record, the bound
+    # summary, wide CSV storage and replay. No hardware, no ZeroMQ.
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Repo root on sys.path, since modules are imported as top-level packages
+# (protocol/, hardware/, testcases/, telemetry_engine/) rather than installed.
+pythonpath = ["."]

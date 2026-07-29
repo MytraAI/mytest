@@ -11,8 +11,16 @@ testcases/ itself, which holds the test framework and its per-DUT
 content.
 
 Run with (from the repo root):
+    python -m telemetry_engine.main          # first, in its own terminal
     python -m tools.run_test --test ydrive.manual
     python -m tools.run_test --test ydrive.endurance_cycle --mock
+
+The telemetry engine has to be running: a test refuses to start if nothing
+is recording, and aborts if recording stops mid-run, since a run's whole
+product is its record (see TestCase.check_recording_alive and
+protocol/heartbeat.py). Both surface here as RecordingLost, reported as a
+plain error line with exit code 1 rather than a traceback - it's a real
+failure, but an operator-actionable one whose message says what to do.
 
 A deliberate stop (the operator dashboard's "Stop test" button,
 tools/stop_test.py, or a plain SIGTERM) surfaces here as
@@ -29,7 +37,7 @@ import argparse
 import logging
 import sys
 
-from testcases.base import StopRequested
+from testcases.base import RecordingLost, StopRequested
 from testcases.registry import REGISTERED_TESTS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -57,6 +65,13 @@ def main() -> None:
         # message and a clean exit rather than a traceback and exit code 1.
         logger.info("test %s: stopped - %s", test_case.test_id, exc)
         sys.exit(0)
+    except RecordingLost as exc:
+        # Nothing is recording, so the run either never started or was
+        # aborted mid-way (see TestCase.check_recording_alive). This is a
+        # real failure - exit 1 - but it's an operator-actionable one with
+        # a self-explanatory message, so a traceback adds only noise.
+        logger.error("%s", exc)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

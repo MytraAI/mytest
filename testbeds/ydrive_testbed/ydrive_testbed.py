@@ -21,7 +21,7 @@ from typing import Dict, Optional
 from hardware.clients.telemetry_client import TelemetryClient
 from hardware.odrive.odrive_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
 from hardware.odrive.odrive_command_client import OdriveCommandClient
-from hardware.protocol import DEFAULT_ODRIVE_COMMAND_ENDPOINT, DEFAULT_ODRIVE_TELEMETRY_ENDPOINT
+from protocol.wire import DEFAULT_ODRIVE_COMMAND_ENDPOINT, DEFAULT_ODRIVE_TELEMETRY_ENDPOINT
 
 STARTUP_DELAY_S = 0.5
 

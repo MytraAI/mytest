@@ -29,7 +29,7 @@ from typing import Iterable, Iterator
 import zmq
 
 from ..backend import MissingChannelError
-from ..protocol import DEFAULT_TELEMETRY_ENDPOINT, TELEMETRY_TOPIC, TelemetryFrame
+from protocol.wire import DEFAULT_TELEMETRY_ENDPOINT, DEFAULT_TELEMETRY_HWM, TELEMETRY_TOPIC, TelemetryFrame
 
 
 class TelemetryTimeout(TimeoutError):
@@ -48,6 +48,7 @@ class TelemetryClient:
         self._ctx = zmq.Context.instance()
         self._socket = self._ctx.socket(zmq.SUB)
         self._socket.setsockopt(zmq.SUBSCRIBE, TELEMETRY_TOPIC)
+        self._socket.setsockopt(zmq.RCVHWM, DEFAULT_TELEMETRY_HWM)
         self._socket.connect(endpoint)
         self._timeout_s = timeout_s
         self._poller = zmq.Poller()

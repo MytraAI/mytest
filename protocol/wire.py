@@ -1,10 +1,20 @@
-"""Shared message schemas and constants for the hardware driver's
-command server (REQ/REP) and telemetry server (PUB/SUB).
+"""Wire schemas and endpoint constants for the command server (REQ/REP)
+and telemetry server/publisher (PUB/SUB).
 
-Both servers speak JSON payloads over ZeroMQ. Keeping the schemas in
-one module means the driver and any client (testcase execution
-process, telemetry aggregator) import the same contract instead of
-hand-rolling their own message shapes.
+Both speak JSON payloads over ZeroMQ. Keeping the schemas in one module
+means every process on the wire - hardware drivers, the testcase
+execution process, the telemetry engine - imports the same contract
+instead of hand-rolling its own message shapes.
+
+Lives under protocol/ rather than hardware/ because most of what's here
+isn't hardware-specific: TaggedTelemetryFrame and
+DEFAULT_TAGGED_TELEMETRY_ENDPOINT are a contract between the testcase
+execution process (which publishes) and the telemetry engine (which
+consumes), neither of which is a hardware driver. protocol/ is the one
+home for anything two processes have to agree on - see the package's
+sibling verdict.py, and AI/Mytest.md's process architecture, whose rule
+is that processes communicate only through defined interfaces, never by
+importing each other.
 """
 from __future__ import annotations
 
@@ -43,6 +53,50 @@ DEFAULT_ODRIVE_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5581"
 # the full frame. Splitting by channel is an easy future change if a
 # subscriber ever needs to filter server-side.
 TELEMETRY_TOPIC = b"telem"
+
+# Which device a telemetry frame came from, carried on the frame itself
+# rather than inferred from which endpoint a subscriber happened to
+# connect to. Needed once more than one device streams into one test:
+# storage keys per-device files by it, and two devices could otherwise
+# declare the same channel name (a DAQ and an ODrive can both plausibly
+# publish "temperature") with no way to tell the values apart. Set by the
+# driver process that publishes the frame - the only participant that
+# knows what it's driving.
+UNKNOWN_DEVICE = "unknown"
+
+# The device names themselves, kept here next to the endpoint constants so
+# a driver, the engine's storage layout, and any analysis of the stored
+# files all spell them identically. These become directory names under a
+# run (see protocol/paths.py), so they stay lowercase and path-safe.
+DEVICE_DAQ = "daq"
+DEVICE_POWER_SUPPLY = "power_supply"
+DEVICE_DUT = "dut"
+DEVICE_ODRIVE = "odrive"
+
+# High-water marks. ZeroMQ's default is 1000 *messages* on both ends, and
+# PUB silently drops once its queue is full. Expressed here in seconds of
+# buffer instead of a raw count, because the useful question is "how long
+# may a consumer stall before we lose data", and one count means very
+# different things at 20 Hz (the real ODrive) and 50 Hz (the mocks).
+#
+# Deliberately modest rather than huge. Storage writes are drained by a
+# separate task (see telemetry_engine/main.py), so a socket queue should
+# never grow for long; a very deep queue would only convert a slow writer
+# into tens of seconds of invisible latency, where a shallow one surfaces
+# it promptly as a counted drop. It also has to stay small enough that
+# many devices can each hold one without adding up: a 111-channel frame
+# is roughly 5 KB, so 500 frames is about 2.5 MB per socket.
+TELEMETRY_BUFFER_S = 10.0
+DEFAULT_TELEMETRY_HWM = 500  # 10 s at the fastest rate anything here runs (50 Hz)
+
+
+def hwm_for_interval(sample_interval_s: float, buffer_s: float = TELEMETRY_BUFFER_S) -> int:
+    """Frames-worth of high-water mark for a device sampling every
+    `sample_interval_s`. Each backend already declares its own interval,
+    so a publisher sizes its own buffer with no new number to maintain."""
+    if sample_interval_s <= 0:
+        return DEFAULT_TELEMETRY_HWM
+    return max(1, int(buffer_s / sample_interval_s))
 
 # Topic used on the Telemetry Publisher's tagged PUB socket - the
 # testcase execution process's outbound feed towards the (not yet
@@ -92,6 +146,7 @@ class TelemetryFrame:
     seq: int
     t: float
     channels: Dict[str, float]
+    device: str = UNKNOWN_DEVICE
 
     def to_bytes(self) -> bytes:
         return json.dumps(asdict(self)).encode("utf-8")
@@ -99,11 +154,16 @@ class TelemetryFrame:
     @classmethod
     def from_bytes(cls, raw: bytes) -> "TelemetryFrame":
         data = json.loads(raw.decode("utf-8"))
-        return cls(seq=data["seq"], t=data["t"], channels=data["channels"])
+        return cls(
+            seq=data["seq"],
+            t=data["t"],
+            channels=data["channels"],
+            device=data.get("device", UNKNOWN_DEVICE),
+        )
 
     @classmethod
-    def now(cls, seq: int, channels: Dict[str, float]) -> "TelemetryFrame":
-        return cls(seq=seq, t=time.time(), channels=channels)
+    def now(cls, seq: int, channels: Dict[str, float], device: str = UNKNOWN_DEVICE) -> "TelemetryFrame":
+        return cls(seq=seq, t=time.time(), channels=channels, device=device)
 
 
 @dataclass
@@ -129,6 +189,7 @@ class TaggedTelemetryFrame:
     seq: int
     t: float
     channels: Dict[str, Any]
+    device: str = UNKNOWN_DEVICE
 
     def to_bytes(self) -> bytes:
         return json.dumps(asdict(self)).encode("utf-8")
@@ -142,6 +203,7 @@ class TaggedTelemetryFrame:
             seq=data["seq"],
             t=data["t"],
             channels=data["channels"],
+            device=data.get("device", UNKNOWN_DEVICE),
         )
 
     @classmethod
@@ -149,4 +211,11 @@ class TaggedTelemetryFrame:
         cls, frame: TelemetryFrame, test_id: str, test_name: str, extra_channels: Optional[Dict[str, Any]] = None
     ) -> "TaggedTelemetryFrame":
         channels = {**frame.channels, **(extra_channels or {})}
-        return cls(test_id=test_id, test_name=test_name, seq=frame.seq, t=frame.t, channels=channels)
+        return cls(
+            test_id=test_id,
+            test_name=test_name,
+            seq=frame.seq,
+            t=frame.t,
+            channels=channels,
+            device=frame.device,
+        )

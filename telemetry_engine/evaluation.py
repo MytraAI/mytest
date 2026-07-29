@@ -1,25 +1,34 @@
-"""Evaluator: a per-test_id multiplexer over RulebookEvaluator.
+"""Evaluator: a per-test_id multiplexer over RulebookEvaluator, for
+evaluating a *stream* of tagged frames belonging to more than one run.
 
-Applies the exact same bound-transition-tracking logic MainExecution
-uses live (see testcases/asimov/rulebook.py), but runs it here
-post-hoc against tagged frames from the aggregator's merged stream. A
-fresh RulebookEvaluator is created the first time a given test_id is
-seen, and registered with every Rulebook whose test_names includes
-that frame's test_name.
+Applies the exact same bound-transition-tracking logic the live runner
+uses (see testcases/asimov/rulebook.py). A fresh RulebookEvaluator is
+created the first time a given test_id is seen, and registered with every
+Rulebook whose test_names includes that frame's test_name.
 
-This is a terminal sink, same as storage: it has no way to influence a
-running test. See testcases/asimov/rulebook.py's docstring for why
-that's a Rulebook property, not just an Evaluator one.
+Not wired into the engine's recording path any more. It used to run there,
+online, against the aggregator's merged stream - a second evaluator over
+the same bounds, reading a lossier copy of the stream than the live runner
+and gated on a hand-maintained rulebook list that had already drifted out
+of sync. Pass/fail now has exactly one author, the test process, whose
+verdict carries its own transition timeline (see protocol/verdict.py).
 
-Untagged (raw) frames aren't evaluated at all. Rulebooks are matched
-by Rulebook.test_names, and only TaggedTelemetryFrame carries a test_name.
+What's left here is genuinely useful offline: replaying stored telemetry
+that spans several runs, or asking whether different bounds would have
+caught something. For the single-run case - replay one run directory and
+compare against its verdict - use replay.py, which is simpler and doesn't
+need the per-test_id multiplexing. Either way this can never influence a
+running test.
+
+Untagged (raw) frames aren't evaluated at all. Rulebooks are matched by
+Rulebook.test_names, and only TaggedTelemetryFrame carries a test_name.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal
 
-from hardware.protocol import TaggedTelemetryFrame
+from protocol.wire import TaggedTelemetryFrame
 from testcases.asimov.rulebook import Rulebook, RulebookEvaluator
 
 from .storage import MergedItem

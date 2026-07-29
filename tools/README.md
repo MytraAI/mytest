@@ -19,6 +19,20 @@ python -m tools.run_test --test ydrive.manual
 python -m tools.run_test --test ydrive.endurance_cycle --mock
 ```
 
+**The telemetry engine must already be running**, or the test refuses to
+start:
+
+```
+python -m telemetry_engine.main          # in its own terminal, first
+```
+
+A run's whole product is its record, so a test that would record nothing
+fails immediately rather than moving hardware for no result - and if the
+engine dies mid-run, the test aborts and tears down cleanly. Each run lands
+in `<output_dir>/runs/<test_id>/` as a `verdict.json` plus per-device wide
+telemetry CSVs; see `AI/Mytest.md`'s "The per-run result record". Only the
+demo scripts opt out of this (`require_engine=False`).
+
 `--mock` is forwarded to every factory uniformly; a test with no real/mock
 distinction (e.g. anything under `example_dut`) simply ignores it. Replaces
 one-off runner scripts per test case - `demo_testcase_run.py`/

@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from typing import Any, List, Optional
 
-from hardware.protocol import DEFAULT_ODRIVE_TELEMETRY_ENDPOINT
+from protocol.wire import DEFAULT_ODRIVE_TELEMETRY_ENDPOINT
 from testbeds.ydrive_testbed.ydrive_testbed import YdriveTestbed
 from testcases.asimov.live_rulebook_runner import LiveRulebookRunner
 from testcases.asimov.rulebook import Rulebook
@@ -42,8 +42,8 @@ class BaseYdriveTest(TestCase):
     TEST_NAME = "base_ydrive_test"
     RULEBOOKS: List[Rulebook] = [YDRIVE_RULEBOOK]
 
-    def __init__(self, test_id: Optional[str] = None, use_mock: bool = False):
-        super().__init__(test_id)
+    def __init__(self, test_id: Optional[str] = None, use_mock: bool = False, require_engine: bool = True):
+        super().__init__(test_id, require_engine=require_engine)
         self._use_mock = use_mock
         self.testbed: Optional[YdriveTestbed] = None
         self._publisher: Optional[TelemetryPublisher] = None

@@ -33,14 +33,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
-from ..backend import HardwareBackend, HardwareError
+from ..backend import HardwareBackend, HardwareError, MissingChannelError
 from .odrive_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
 
 logger = logging.getLogger(__name__)
 
-SAMPLE_INTERVAL_S = 0.05  # 20 Hz - each read is a real USB round-trip per channel, unlike the mocks' in-memory state; tune against real latency once hardware is in hand
+SAMPLE_INTERVAL_S = 0.05
+"""Sleep *between* frames, not a frame period - and against real hardware
+the difference matters. Each frame reads its declared channels as that many
+sequential USB round-trips, which measured ~29 ms on a real ODrive Pro
+(fw 0.6.11), so the achieved rate is ~12.6 Hz, not the 20 Hz this interval
+alone implies. Measured over a 60 s ManualTest run: 749 frames in 59.9 s.
+
+Left at 0.05 deliberately rather than retuned: dropping it to ~0.021 would
+get closer to a true 20 Hz, but the right value depends on what the tests
+actually need from the sample rate, which is a test-engineering decision,
+not a driver one. Whatever it's set to, the publisher's high-water mark is
+sized from it (see protocol/wire.py's hwm_for_interval), so the buffer stays
+proportional to the intended rate."""
 DEFAULT_DISCOVERY_TIMEOUT_S = 10.0  # how long connect() waits for odrive.find_any() to see a matching device
 
 _AXIS_STATE_NAMES = ("IDLE", "CLOSED_LOOP_CONTROL")
@@ -73,19 +85,12 @@ _TELEMETRY_PATHS: Dict[str, Tuple[str, str]] = {
     "axis_is_armed": ("axis", "is_armed"),
     "axis_is_homed": ("axis", "is_homed"),
     "axis_procedure_result": ("axis", "procedure_result"),
-    "board_brake_resistor0_chopper_temp": ("odrv", "brake_resistor0.chopper_temp"),
-    "board_brake_resistor0_current": ("odrv", "brake_resistor0.current"),
-    "board_brake_resistor0_duty": ("odrv", "brake_resistor0.duty"),
-    "board_brake_resistor0_is_armed": ("odrv", "brake_resistor0.is_armed"),
-    "board_brake_resistor0_was_saturated": ("odrv", "brake_resistor0.was_saturated"),
     "board_config_dc_bus_overvoltage_trip_level": ("odrv", "config.dc_bus_overvoltage_trip_level"),
     "board_config_dc_bus_undervoltage_trip_level": ("odrv", "config.dc_bus_undervoltage_trip_level"),
     "board_config_dc_max_negative_current": ("odrv", "config.dc_max_negative_current"),
     "board_config_dc_max_positive_current": ("odrv", "config.dc_max_positive_current"),
     "board_config_inverter0_current_hard_max": ("odrv", "config.inverter0.current_hard_max"),
     "board_config_inverter0_current_soft_max": ("odrv", "config.inverter0.current_soft_max"),
-    "board_config_inverter0_current_soft_max_derated": ("odrv", "config.inverter0.current_soft_max_derated"),
-    "board_config_inverter0_derating_start": ("odrv", "config.inverter0.derating_start"),
     "board_config_inverter0_temp_limit_lower": ("odrv", "config.inverter0.temp_limit_lower"),
     "board_config_inverter0_temp_limit_upper": ("odrv", "config.inverter0.temp_limit_upper"),
     "board_config_max_regen_current": ("odrv", "config.max_regen_current"),
@@ -128,8 +133,6 @@ _TELEMETRY_PATHS: Dict[str, Tuple[str, str]] = {
     "debug_mcu_temperature": ("odrv", "debug.mcu_temperature"),
     "detailed_disarm_reason": ("axis", "detailed_disarm_reason"),
     "disarm_reason": ("axis", "disarm_reason"),
-    "encoder_onboard0_config_field_check_mode": ("odrv", "onboard_encoder0.config.field_check_mode"),
-    "encoder_onboard0_field_status": ("odrv", "onboard_encoder0.field_status"),
     "encoder_onboard0_raw": ("odrv", "onboard_encoder0.raw"),
     "encoder_onboard0_status": ("odrv", "onboard_encoder0.status"),
     "last_drv_fault": ("axis", "last_drv_fault"),
@@ -154,8 +157,6 @@ _TELEMETRY_PATHS: Dict[str, Tuple[str, str]] = {
     "motor_torque_estimate": ("axis", "motor.torque_estimate"),
     "pos_estimate": ("axis", "pos_estimate"),
     "posvelmapper_status": ("axis", "pos_vel_mapper.status"),
-    "total_charge_used": ("axis", "total_charge_used"),
-    "total_power_used": ("axis", "total_power_used"),
     "traptraj_config_accel_limit": ("axis", "trap_traj.config.accel_limit"),
     "traptraj_config_decel_limit": ("axis", "trap_traj.config.decel_limit"),
     "traptraj_config_vel_limit": ("axis", "trap_traj.config.vel_limit"),
@@ -189,8 +190,6 @@ _SETTERS: Dict[str, Tuple[str, str]] = {
     "set_board_config_dc_max_positive_current": ("odrv", "config.dc_max_positive_current"),
     "set_board_config_inverter0_current_hard_max": ("odrv", "config.inverter0.current_hard_max"),
     "set_board_config_inverter0_current_soft_max": ("odrv", "config.inverter0.current_soft_max"),
-    "set_board_config_inverter0_current_soft_max_derated": ("odrv", "config.inverter0.current_soft_max_derated"),
-    "set_board_config_inverter0_derating_start": ("odrv", "config.inverter0.derating_start"),
     "set_board_config_inverter0_temp_limit_lower": ("odrv", "config.inverter0.temp_limit_lower"),
     "set_board_config_inverter0_temp_limit_upper": ("odrv", "config.inverter0.temp_limit_upper"),
     "set_board_config_max_regen_current": ("odrv", "config.max_regen_current"),
@@ -214,7 +213,6 @@ _SETTERS: Dict[str, Tuple[str, str]] = {
     "set_controller_config_vel_integrator_limit": ("axis", "controller.config.vel_integrator_limit"),
     "set_controller_config_vel_limit": ("axis", "controller.config.vel_limit"),
     "set_controller_config_vel_ramp_rate": ("axis", "controller.config.vel_ramp_rate"),
-    "set_encoder_onboard0_config_field_check_mode": ("odrv", "onboard_encoder0.config.field_check_mode"),
     "set_motor_config_current_hard_max": ("axis", "config.motor.current_hard_max"),
     "set_motor_config_current_soft_max": ("axis", "config.motor.current_soft_max"),
     "set_motor_config_direction": ("axis", "config.motor.direction"),
@@ -332,7 +330,6 @@ class OdriveBackend(HardwareBackend):
         self._odrv = None  # the odrive package's device handle, once connected
         self._AxisState = None
         self._ControlMode = None
-        self._warned_missing_channels: Set[str] = set()
 
     async def connect(self) -> None:
         try:
@@ -365,6 +362,85 @@ class OdriveBackend(HardwareBackend):
                 f"(serial_number={self._serial_number!r}) - check USB connection and power"
             ) from exc
         logger.info("connected to ODrive serial_number=%s", getattr(self._odrv, "serial_number", None))
+        await asyncio.to_thread(self._verify_declared_channels_exist)
+
+    def _verify_declared_channels_exist(self) -> None:
+        """Confirm every declared channel actually resolves on this device,
+        raising MissingChannelError naming the ones that don't.
+
+        This closes a hole that silence made invisible. Reading an absent
+        attribute raises AttributeError, which _read_all_channels() used to
+        swallow into a `None` value with a one-line warning - so the channel
+        key was still present in every frame, TelemetryClient's
+        verify_channels() saw nothing missing, and the run proceeded looking
+        healthy while that column stayed empty for its whole duration. You'd
+        find out at analysis time, having believed you had the data. Worse, a
+        Bound pointed at such a channel got `None` to compare against, which
+        raised TypeError inside the live evaluation thread and killed it -
+        leaving the test running with no safety monitoring at all.
+
+        Probed here, once, at connect, because "not present" is a structural
+        fact about the hardware and this process is the only one that can tell
+        it apart from "no value at this instant". Emptiness is NOT a usable
+        signal for this: a test-published state channel like `current_step` is
+        legitimately blank until something sets it, so failing on empty values
+        would condemn perfectly good channels.
+
+        Setters and methods are probed by resolving their parent object and
+        checking the leaf with hasattr - never by writing or calling, which on
+        real hardware would be an unacceptable side effect of a health check.
+        """
+        missing = []
+        for name, (root, path) in sorted(_TELEMETRY_PATHS.items()):
+            if not self._path_exists(root, path):
+                missing.append((name, root, path))
+        for name, (root, path) in sorted(_SETTERS.items()):
+            if not self._path_exists(root, path):
+                missing.append((name, root, path))
+        for name, entry in sorted(_METHODS.items()):
+            if not self._path_exists(entry[0], entry[1]):
+                missing.append((name, entry[0], entry[1]))
+
+        if not missing:
+            logger.info(
+                "verified all %d declared channels exist on this device",
+                len(_TELEMETRY_PATHS) + len(_SETTERS) + len(_METHODS),
+            )
+            return
+
+        detail = "\n".join(
+            f"  {name} -> odrv0{'.axis0' if root == 'axis' else ''}.{path}" for name, root, path in missing
+        )
+        raise MissingChannelError(
+            f"{len(missing)} declared channel(s) do not exist on this ODrive "
+            f"(serial_number={getattr(self._odrv, 'serial_number', None)}, fw {self._firmware_version()}):\n"
+            f"{detail}\n"
+            "Either this board genuinely lacks the hardware (e.g. no brake resistor fitted), or the "
+            "attribute path is wrong for this firmware. Fix the path, or remove the channel from "
+            "hardware/odrive/odrive_channels.py and its table entry here - but do not leave it declared, "
+            "because a declared-but-absent channel records nothing while looking present."
+        )
+
+    def _path_exists(self, root: str, path: str) -> bool:
+        """Whether a dotted attribute path resolves on this device, walking
+        intermediates so a missing parent is caught as cleanly as a missing
+        leaf. Read-only: never assigns, never calls."""
+        obj = self._odrv.axis0 if root == "axis" else self._odrv
+        parts = path.split(".")
+        for part in parts[:-1]:
+            if not hasattr(obj, part):
+                return False
+            obj = getattr(obj, part)
+        return hasattr(obj, parts[-1])
+
+    def _firmware_version(self) -> str:
+        try:
+            return (
+                f"{self._odrv.fw_version_major}.{self._odrv.fw_version_minor}."
+                f"{self._odrv.fw_version_revision}"
+            )
+        except AttributeError:
+            return "unknown"
 
     async def disconnect(self) -> None:
         if self._odrv is not None:
@@ -414,25 +490,21 @@ class OdriveBackend(HardwareBackend):
         result = {}
         for name, (root, path) in _TELEMETRY_PATHS.items():
             obj = axis if root == "axis" else odrv
-            try:
-                result[name] = _to_jsonable(_get_path(obj, path))
-            except AttributeError as exc:
-                # Only AttributeError is treated as benign - a channel this
-                # particular hardware config doesn't have (e.g. a different
-                # encoder type than onboard_encoder0). Anything else (a real
-                # connection loss, etc.) propagates and is NOT caught here -
-                # see runner.py, which treats stream_samples() raising as
-                # fatal and shuts the process down loudly rather than letting
-                # telemetry silently go quiet.
-                result[name] = None
-                if name not in self._warned_missing_channels:
-                    self._warned_missing_channels.add(name)
-                    logger.warning(
-                        "channel %r (odrv0%s.%s) not present on this device - reporting None from "
-                        "now on; this either means the hardware config genuinely doesn't have it, "
-                        "or the attribute path is wrong (%s)",
-                        name, ".axis0" if root == "axis" else "", path, exc,
-                    )
+            # No AttributeError handling here, deliberately. connect() has
+            # already probed every declared path (see
+            # _verify_declared_channels_exist), so an absent channel fails
+            # loudly at setup rather than arriving here. If one somehow still
+            # does, AttributeError propagates like any other failure -
+            # runner.py treats stream_samples() raising as fatal and shuts the
+            # process down, which is the right outcome: it means the device's
+            # attribute graph changed underneath us mid-run.
+            #
+            # This used to catch AttributeError and substitute None, which is
+            # exactly what let a declared-but-absent channel look present in
+            # every frame while recording nothing, and made a Bound against it
+            # raise TypeError inside the evaluation thread. Absence is a
+            # setup-time error now, not a per-frame value.
+            result[name] = _to_jsonable(_get_path(obj, path))
         return result
 
     async def _set_axis_state(self, state: str) -> None:

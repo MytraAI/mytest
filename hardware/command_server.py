@@ -31,7 +31,7 @@ import zmq
 import zmq.asyncio
 
 from .backend import HardwareBackend, HardwareError
-from .protocol import DEFAULT_COMMAND_ENDPOINT, CommandReply, CommandRequest
+from protocol.wire import DEFAULT_COMMAND_ENDPOINT, CommandReply, CommandRequest
 
 logger = logging.getLogger(__name__)
 

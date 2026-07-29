@@ -39,7 +39,7 @@ from __future__ import annotations
 import logging
 from typing import Any, List, Optional
 
-from hardware.protocol import DEFAULT_DUT_TELEMETRY_ENDPOINT
+from protocol.wire import DEFAULT_DUT_TELEMETRY_ENDPOINT
 from testbeds.example_testbed.example_testbed import ExampleTestbed
 from testcases.asimov.live_rulebook_runner import LiveRulebookRunner
 from testcases.asimov.rulebook import Rulebook
@@ -61,8 +61,8 @@ class BaseExampleDutTest(TestCase):
     POWER_SUPPLY_VOLTAGE = 24.0
     POWER_SUPPLY_CURRENT = 2.0
 
-    def __init__(self, test_id: Optional[str] = None):
-        super().__init__(test_id)
+    def __init__(self, test_id: Optional[str] = None, require_engine: bool = True):
+        super().__init__(test_id, require_engine=require_engine)
         self.testbed: Optional[ExampleTestbed] = None
         self.dut: Optional[ExampleDut] = None
         self._publisher: Optional[TelemetryPublisher] = None

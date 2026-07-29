@@ -16,8 +16,15 @@ import logging
 import zmq
 import zmq.asyncio
 
+from protocol.wire import (
+    DEFAULT_TELEMETRY_ENDPOINT,
+    TELEMETRY_TOPIC,
+    UNKNOWN_DEVICE,
+    TelemetryFrame,
+    hwm_for_interval,
+)
+
 from .backend import HardwareBackend
-from .protocol import DEFAULT_TELEMETRY_ENDPOINT, TELEMETRY_TOPIC, TelemetryFrame
 
 logger = logging.getLogger(__name__)
 
@@ -25,20 +32,31 @@ logger = logging.getLogger(__name__)
 class TelemetryServer:
     """Publisher forwarding a HardwareBackend's sample stream as telemetry frames."""
 
-    def __init__(self, backend: HardwareBackend, endpoint: str = DEFAULT_TELEMETRY_ENDPOINT):
+    def __init__(
+        self,
+        backend: HardwareBackend,
+        endpoint: str = DEFAULT_TELEMETRY_ENDPOINT,
+        device: str = UNKNOWN_DEVICE,
+        sample_interval_s: float = 0.02,
+    ):
         self._backend = backend
         self._endpoint = endpoint
+        self._device = device
+        """Stamped onto every frame this server publishes - see
+        protocol/wire.py's UNKNOWN_DEVICE. Passed down from the device's
+        own entry point, the only place that knows what it is."""
         self._ctx = zmq.asyncio.Context.instance()
         self._socket = self._ctx.socket(zmq.PUB)
+        self._socket.setsockopt(zmq.SNDHWM, hwm_for_interval(sample_interval_s))
 
     async def run(self) -> None:
         """Bind the socket and publish telemetry frames until cancelled."""
         self._socket.bind(self._endpoint)
-        logger.info("telemetry server publishing on %s", self._endpoint)
+        logger.info("telemetry server publishing %s on %s", self._device, self._endpoint)
         seq = 0
         try:
             async for channels in self._backend.stream_samples():
-                frame = TelemetryFrame.now(seq=seq, channels=channels)
+                frame = TelemetryFrame.now(seq=seq, channels=channels, device=self._device)
                 await self._socket.send_multipart([TELEMETRY_TOPIC, frame.to_bytes()])
                 seq += 1
         finally:

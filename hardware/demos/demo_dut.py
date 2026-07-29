@@ -19,7 +19,7 @@ import time
 
 from ..clients.telemetry_client import TelemetryClient
 from ..mock_dut.mock_dut_command_client import DutCommandClient
-from ..protocol import DEFAULT_DUT_COMMAND_ENDPOINT, DEFAULT_DUT_TELEMETRY_ENDPOINT
+from protocol.wire import DEFAULT_DUT_COMMAND_ENDPOINT, DEFAULT_DUT_TELEMETRY_ENDPOINT
 
 
 def main():

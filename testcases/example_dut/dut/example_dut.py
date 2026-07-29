@@ -48,7 +48,7 @@ from typing import Dict, Optional
 from hardware.mock_dut.mock_dut_command_client import DutCommandClient
 from hardware.clients.telemetry_client import TelemetryClient
 from hardware.mock_dut.mock_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
-from hardware.protocol import DEFAULT_DUT_TELEMETRY_ENDPOINT
+from protocol.wire import DEFAULT_DUT_TELEMETRY_ENDPOINT
 
 STARTUP_DELAY_S = 0.5
 

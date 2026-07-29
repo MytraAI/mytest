@@ -47,6 +47,33 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 
+class UnevaluableBoundError(Exception):
+    """Raised when a Bound cannot be evaluated at all, because its channel
+    carries a value it can't be compared against (a None, or a type that
+    won't compare with the configured limit).
+
+    This is deliberately loud rather than skipped. A bound that silently
+    fails to evaluate is the most dangerous state in this framework: the
+    hardware goes unsupervised while the test looks healthy. Before this
+    existed, a None value made `actual > upper` raise TypeError, which
+    escaped the live runner's background thread and killed it outright -
+    leaving fatal_violation unset, so the test's own polling never noticed,
+    and the run continued with no monitoring. LiveRulebookRunner now treats
+    this the same way it treats a silent telemetry stream: fatal to the
+    test.
+
+    Normally unreachable: a channel that doesn't exist on the hardware is
+    now caught at connect() (see OdriveBackend._verify_declared_channels_exist),
+    so this is the backstop for a channel that exists but reports an
+    uncomparable value."""
+
+    def __init__(self, bound_label: str, channel: str, value: Any, reason: str):
+        super().__init__(f"bound {bound_label} cannot be evaluated: channel {channel}={value!r} - {reason}")
+        self.bound_label = bound_label
+        self.channel = channel
+        self.value = value
+
+
 @dataclass(frozen=True)
 class Bound:
     """One channel check: violated if `channel`'s value is above `upper`, below `lower`, or not `expected`.
@@ -85,13 +112,33 @@ class Bound:
     def evaluate(self, channels: Dict[str, Any]) -> Optional[bool]:
         """Return True if violated, False if satisfied, or None if this
         bound doesn't apply to this frame (gate not met, or its channel
-        isn't present)."""
+        isn't present).
+
+        Raises UnevaluableBoundError if the channel is present but carries a
+        value that can't be compared against this bound's limits - see that
+        exception for why this must be loud rather than skipped. Note an
+        `expected`-only bound needs no ordering, so it accepts any type and
+        never raises."""
         if self.gate_channel is not None and channels.get(self.gate_channel) != self.gate_value:
             return None
         if self.channel not in channels:
             return None
 
         actual = channels[self.channel]
+        if self.upper is not None or self.lower is not None:
+            if actual is None:
+                raise UnevaluableBoundError(
+                    self.label, self.channel, actual,
+                    "the channel reported no value, so its numeric limits can't be checked",
+                )
+            if not isinstance(actual, (int, float)):
+                # bool is an int subclass and compares fine, so it passes here
+                # deliberately - a bool channel with a numeric limit is a
+                # rulebook mistake, not an unevaluable frame.
+                raise UnevaluableBoundError(
+                    self.label, self.channel, actual,
+                    f"a {type(actual).__name__} can't be compared against a numeric limit",
+                )
         if self.upper is not None and actual > self.upper:
             return True
         if self.lower is not None and actual < self.lower:
@@ -127,8 +174,9 @@ class BoundTransition:
     """One bound's pass/fail transition, produced by exactly one
     RulebookEvaluator instance. It's scoped to whatever single run that
     evaluator is tracking (a live test, or one post-hoc test_id), so
-    unlike ViolationEvent (telemetry_engine/evaluation.py) this carries
-    no test_id/test_name/seq/t of its own."""
+    unlike protocol/verdict.py's Violation - which the live runner builds
+    from this, stamping on the frame's own seq/t - this carries no
+    test_id/test_name/seq/t of its own."""
 
     rulebook_name: str
     bound_label: str

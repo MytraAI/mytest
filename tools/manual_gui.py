@@ -10,7 +10,7 @@ works unmodified against any current or future testcase, including
 hardware this repo doesn't support yet.
 
 Telemetry is deliberately per-device, not one shared stream: the tagged
-stream (hardware/protocol.py's DEFAULT_TAGGED_TELEMETRY_ENDPOINT) is
+stream (protocol/wire.py's DEFAULT_TAGGED_TELEMETRY_ENDPOINT) is
 still subscribed by default - it's the only place test-level context
 (test_id/test_name, Rulebook bound-status, current_step) lives - but
 it's just one more sub-group among however many raw per-device
@@ -83,7 +83,7 @@ from matplotlib.figure import Figure  # noqa: E402
 import zmq  # noqa: E402
 
 from hardware.clients.command_client import CommandClient, CommandClientError  # noqa: E402
-from hardware.protocol import (  # noqa: E402
+from protocol.wire import (  # noqa: E402
     DEFAULT_TAGGED_TELEMETRY_ENDPOINT,
     TAGGED_TELEMETRY_TOPIC,
     TELEMETRY_TOPIC,
@@ -120,7 +120,7 @@ class TelemetryUpdate:
 
 class TaggedTelemetrySubscriber:
     """Subscribes to the tagged telemetry stream - there is only ever
-    one (see hardware/protocol.py's DEFAULT_TAGGED_TELEMETRY_ENDPOINT),
+    one (see protocol/wire.py's DEFAULT_TAGGED_TELEMETRY_ENDPOINT),
     carrying test-level context alongside whichever single device's raw
     channels that test happens to be watching. Runs on a background
     thread; Tkinter isn't thread-safe, so decoded updates are pushed

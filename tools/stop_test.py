@@ -17,7 +17,7 @@ something more code here can fix.
 
 With no --test-id, discovers whichever test is currently running via
 the tagged telemetry stream (there's only ever one - see
-hardware/protocol.py's DEFAULT_TAGGED_TELEMETRY_ENDPOINT) rather than
+protocol/wire.py's DEFAULT_TAGGED_TELEMETRY_ENDPOINT) rather than
 requiring the operator to already know its auto-generated test_id.
 
 Lives in tools/, not testcases/, alongside run_test.py and
@@ -38,7 +38,7 @@ from pathlib import Path
 
 import zmq
 
-from hardware.protocol import DEFAULT_TAGGED_TELEMETRY_ENDPOINT, TAGGED_TELEMETRY_TOPIC, TaggedTelemetryFrame
+from protocol.wire import DEFAULT_TAGGED_TELEMETRY_ENDPOINT, TAGGED_TELEMETRY_TOPIC, TaggedTelemetryFrame
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)

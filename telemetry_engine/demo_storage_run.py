@@ -1,14 +1,17 @@
-"""End-to-end demo of CSV telemetry storage.
+"""End-to-end demo of wide per-device telemetry storage.
 
-Runs CycleDutPositionTest (shortened for verification; it starts its
-own testbed and DUT internally in PreTestSetup) through CsvStorage,
-then reads the resulting CSV back and prints a summary. This proves
-points actually landed on disk with the right shape: long format, one
-row per channel value.
+Runs CycleDutPositionTest (shortened for verification; it starts its own
+testbed and DUT internally in PreTestSetup) through
+WideCsvTelemetryStorage, then reads the resulting files back and prints a
+summary. This proves frames actually land on disk in the right shape: one
+row per frame, one column per channel, one file per device per run - and
+that a run directory ends up holding both the telemetry and the verdict
+the test wrote itself.
 
-This test case never touches the DAQ's acquisition, so all rows here
-are tagged (DUT) points. There's no untagged/raw-only phase to show,
-unlike the older DAQ-based demos.
+Runs with require_engine=False: the real telemetry engine isn't up here,
+this demo is its own consumer. A real run refuses to start without an
+engine recording (see protocol/heartbeat.py), which is exactly the
+protection this demo has to opt out of.
 
 Run with (from the repo root, Mytest/):
     python -m telemetry_engine.demo_storage_run
@@ -21,19 +24,21 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from protocol.paths import runs_dir
 from testcases.example_dut.testcases.halt_tests import CycleDutPositionTest
 
 from .aggregator import Aggregator
-from .csv_storage import CsvStorage
+from .wide_csv_storage import WideCsvTelemetryStorage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-OUTPUT_PATH = Path("telemetry_engine/data") / f"demo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+OUTPUT_DIR = Path("telemetry_engine/data") / f"demo_storage_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 
 async def main() -> None:
     aggregator = Aggregator()
-    storage = CsvStorage(OUTPUT_PATH)
+    session = datetime.now().strftime("%Y%m%d_%H%M%S")
+    storage = WideCsvTelemetryStorage(OUTPUT_DIR, session)
 
     async def consume() -> None:
         async for item in aggregator.merged_stream():
@@ -42,19 +47,28 @@ async def main() -> None:
     consumer = asyncio.create_task(consume(), name="demo-storage-consume")
 
     print("--- running CycleDutPositionTest (shortened for verification) ---", flush=True)
-    await asyncio.to_thread(CycleDutPositionTest(cycle_duration_s=20.0, dwell_s=6.0).run)
+    test = CycleDutPositionTest(cycle_duration_s=20.0, dwell_s=6.0, require_engine=False)
+    test._output_dir = OUTPUT_DIR  # this demo is the recorder, so point the verdict here too
+    await asyncio.to_thread(test.run)
 
     await asyncio.sleep(0.5)  # let any in-flight frames drain before shutting down
     consumer.cancel()
     await asyncio.gather(consumer, return_exceptions=True)
     await storage.close()
 
-    print(f"--- reading back {OUTPUT_PATH} ---", flush=True)
-    with open(OUTPUT_PATH, newline="") as f:
-        rows = list(csv.DictReader(f))
-    print(f"total rows: {len(rows)}")
-    print("first row:", rows[0])
-    print("last row: ", rows[-1])
+    for path in sorted(storage.paths()):
+        with open(path, newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        print(f"--- {path} ---", flush=True)
+        print(f"rows: {len(rows)}, columns: {len(rows[0]) if rows else 0}")
+        if rows:
+            print("first row seq/t:", rows[0].get("seq"), rows[0].get("t"))
+
+    for run in sorted(runs_dir(OUTPUT_DIR).glob("*")):
+        print(f"--- run directory {run.name} ---", flush=True)
+        for item in sorted(run.rglob("*")):
+            if item.is_file():
+                print(f"  {item.relative_to(run)} ({item.stat().st_size} bytes)")
 
 
 if __name__ == "__main__":
