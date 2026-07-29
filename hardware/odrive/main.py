@@ -21,12 +21,10 @@ import argparse
 import asyncio
 import logging
 
-from protocol.wire import DEFAULT_ODRIVE_COMMAND_ENDPOINT, DEFAULT_ODRIVE_TELEMETRY_ENDPOINT, DEVICE_ODRIVE
+from protocol.wire import DEFAULT_ODRIVE_COMMAND_ENDPOINT, DEFAULT_ODRIVE_TELEMETRY_ENDPOINT
 
 from ..runner import run
-from .mock_backend import SAMPLE_INTERVAL_S as MOCK_SAMPLE_INTERVAL_S
 from .mock_backend import MockOdriveBackend
-from .odrive_backend import SAMPLE_INTERVAL_S as REAL_SAMPLE_INTERVAL_S
 from .odrive_backend import DEFAULT_DISCOVERY_TIMEOUT_S, OdriveBackend
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -51,20 +49,7 @@ if __name__ == "__main__":
     if args.mock:
         logger.warning("SIMULATED DEVICE - MockOdriveBackend, no real hardware connected")
         backend = MockOdriveBackend()
-        # The mock streams from in-memory state at 50 Hz; the real backend
-        # does a USB round-trip per channel and runs 20 Hz. The publisher's
-        # buffer is sized in seconds, so it needs whichever is actually running.
-        sample_interval_s = MOCK_SAMPLE_INTERVAL_S
     else:
         backend = OdriveBackend(serial_number=args.serial_number, discovery_timeout_s=args.discovery_timeout)
-        sample_interval_s = REAL_SAMPLE_INTERVAL_S
 
-    asyncio.run(
-        run(
-            backend,
-            args.command_endpoint,
-            args.telemetry_endpoint,
-            device=DEVICE_ODRIVE,
-            sample_interval_s=sample_interval_s,
-        )
-    )
+    asyncio.run(run(backend, args.command_endpoint, args.telemetry_endpoint))

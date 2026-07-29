@@ -181,6 +181,12 @@ the same machine.
 4. Nothing in `runner.py`, `command_server.py`, `telemetry_server.py`,
    or `TelemetryClient` needs to change - they only depend on the
    universal core and the generic wire protocol.
+5. Don't re-implement what `HardwareBackend` already provides:
+   `_require_connected()` (override the `is_connected` property instead if
+   your connection state is a handle rather than the `_connected` flag) and
+   `to_jsonable()` for coercing device values onto the JSON wire. Declare
+   `device` and `sample_interval_s` as class attributes - `runner.run()`
+   reads both off the backend, so no entry point passes them.
 
 To go from a mock to a real device, implement the same
 `HardwareBackend` interface against the real API as a new file

@@ -16,6 +16,8 @@ import random
 import time
 from typing import Any, AsyncIterator, List, Optional
 
+from protocol.wire import DEVICE_DAQ
+
 from ..backend import HardwareBackend, HardwareError
 from .mock_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
 
@@ -24,6 +26,9 @@ SAMPLE_INTERVAL_S = 0.02  # 50 Hz - tune to taste for local testing
 
 class MockDaqBackend(HardwareBackend):
     """Simulated DAQ backend - sine waves + noise, no real hardware needed."""
+
+    device = DEVICE_DAQ
+    sample_interval_s = SAMPLE_INTERVAL_S
 
     def __init__(self) -> None:
         self._connected = False
@@ -78,10 +83,6 @@ class MockDaqBackend(HardwareBackend):
 
     async def list_actions(self) -> List[str]:
         return list(COMMAND_CHANNELS)
-
-    def _require_connected(self) -> None:
-        if not self._connected:
-            raise HardwareError("backend not connected")
 
     async def stream_samples(self) -> AsyncIterator[dict]:
         while True:

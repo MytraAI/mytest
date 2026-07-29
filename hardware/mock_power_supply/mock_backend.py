@@ -15,6 +15,8 @@ import asyncio
 import random
 from typing import Any, AsyncIterator, List
 
+from protocol.wire import DEVICE_POWER_SUPPLY
+
 from ..backend import HardwareBackend, HardwareError
 from .mock_channels import COMMAND_CHANNELS
 
@@ -23,6 +25,9 @@ SAMPLE_INTERVAL_S = 0.02  # 50 Hz - tune to taste for local testing
 
 class MockPowerSupplyBackend(HardwareBackend):
     """Simulated power supply - setpoint + noise readback, no real hardware needed."""
+
+    device = DEVICE_POWER_SUPPLY
+    sample_interval_s = SAMPLE_INTERVAL_S
 
     def __init__(self) -> None:
         self._connected = False
@@ -59,10 +64,6 @@ class MockPowerSupplyBackend(HardwareBackend):
 
     async def list_actions(self) -> List[str]:
         return list(COMMAND_CHANNELS)
-
-    def _require_connected(self) -> None:
-        if not self._connected:
-            raise HardwareError("backend not connected")
 
     async def stream_samples(self) -> AsyncIterator[dict]:
         while True:

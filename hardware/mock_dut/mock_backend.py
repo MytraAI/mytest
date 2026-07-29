@@ -32,6 +32,8 @@ import asyncio
 import random
 from typing import Any, AsyncIterator, List
 
+from protocol.wire import DEVICE_DUT
+
 from ..backend import HardwareBackend, HardwareError
 from .mock_channels import COMMAND_CHANNELS
 
@@ -40,6 +42,9 @@ SAMPLE_INTERVAL_S = 0.02  # 50 Hz - tune to taste for local testing
 
 class MockDutBackend(HardwareBackend):
     """Simulated DUT - a first-order position/velocity/current servo approximation, no real hardware needed."""
+
+    device = DEVICE_DUT
+    sample_interval_s = SAMPLE_INTERVAL_S
 
     def __init__(self) -> None:
         self._connected = False
@@ -85,10 +90,6 @@ class MockDutBackend(HardwareBackend):
 
     async def list_actions(self) -> List[str]:
         return list(COMMAND_CHANNELS)
-
-    def _require_connected(self) -> None:
-        if not self._connected:
-            raise HardwareError("backend not connected")
 
     async def stream_samples(self) -> AsyncIterator[dict]:
         while True:
