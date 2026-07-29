@@ -20,6 +20,8 @@ import asyncio
 import random
 from typing import Any, AsyncIterator, Dict, List
 
+from protocol.wire import DEVICE_ODRIVE
+
 from ..backend import HardwareBackend, HardwareError
 from .odrive_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
 
@@ -141,6 +143,9 @@ DEFAULTS: Dict[str, Any] = {
 class MockOdriveBackend(HardwareBackend):
     """Simulated ODrive axis - position/velocity/torque control, no real hardware needed."""
 
+    device = DEVICE_ODRIVE
+    sample_interval_s = SAMPLE_INTERVAL_S
+
     def __init__(self) -> None:
         self._connected = False
         self._config: Dict[str, Any] = dict(DEFAULTS)
@@ -223,10 +228,6 @@ class MockOdriveBackend(HardwareBackend):
 
     async def list_actions(self) -> List[str]:
         return list(COMMAND_CHANNELS)
-
-    def _require_connected(self) -> None:
-        if not self._connected:
-            raise HardwareError("backend not connected")
 
     async def stream_samples(self) -> AsyncIterator[dict]:
         while True:

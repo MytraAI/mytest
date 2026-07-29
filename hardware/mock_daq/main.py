@@ -8,9 +8,9 @@ import argparse
 import asyncio
 import logging
 
-from protocol.wire import DEVICE_DAQ, DEFAULT_COMMAND_ENDPOINT, DEFAULT_TELEMETRY_ENDPOINT
+from protocol.wire import DEFAULT_COMMAND_ENDPOINT, DEFAULT_TELEMETRY_ENDPOINT
 from ..runner import run
-from .mock_backend import SAMPLE_INTERVAL_S, MockDaqBackend
+from .mock_backend import MockDaqBackend
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -21,12 +21,4 @@ if __name__ == "__main__":
     parser.add_argument("--telemetry-endpoint", default=DEFAULT_TELEMETRY_ENDPOINT)
     args = parser.parse_args()
     logger.warning("SIMULATED DEVICE - MockDaqBackend, no real hardware connected")
-    asyncio.run(
-        run(
-            MockDaqBackend(),
-            args.command_endpoint,
-            args.telemetry_endpoint,
-            device=DEVICE_DAQ,
-            sample_interval_s=SAMPLE_INTERVAL_S,
-        )
-    )
+    asyncio.run(run(MockDaqBackend(), args.command_endpoint, args.telemetry_endpoint))

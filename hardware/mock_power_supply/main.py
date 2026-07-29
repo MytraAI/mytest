@@ -8,9 +8,9 @@ import argparse
 import asyncio
 import logging
 
-from protocol.wire import DEVICE_POWER_SUPPLY, DEFAULT_POWER_SUPPLY_COMMAND_ENDPOINT, DEFAULT_POWER_SUPPLY_TELEMETRY_ENDPOINT
+from protocol.wire import DEFAULT_POWER_SUPPLY_COMMAND_ENDPOINT, DEFAULT_POWER_SUPPLY_TELEMETRY_ENDPOINT
 from ..runner import run
-from .mock_backend import SAMPLE_INTERVAL_S, MockPowerSupplyBackend
+from .mock_backend import MockPowerSupplyBackend
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -21,12 +21,4 @@ if __name__ == "__main__":
     parser.add_argument("--telemetry-endpoint", default=DEFAULT_POWER_SUPPLY_TELEMETRY_ENDPOINT)
     args = parser.parse_args()
     logger.warning("SIMULATED DEVICE - MockPowerSupplyBackend, no real hardware connected")
-    asyncio.run(
-        run(
-            MockPowerSupplyBackend(),
-            args.command_endpoint,
-            args.telemetry_endpoint,
-            device=DEVICE_POWER_SUPPLY,
-            sample_interval_s=SAMPLE_INTERVAL_S,
-        )
-    )
+    asyncio.run(run(MockPowerSupplyBackend(), args.command_endpoint, args.telemetry_endpoint))

@@ -35,7 +35,9 @@ import asyncio
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
-from ..backend import HardwareBackend, HardwareError, MissingChannelError
+from ..backend import HardwareBackend, HardwareError, MissingChannelError, to_jsonable
+from protocol.wire import DEVICE_ODRIVE
+
 from .odrive_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
 
 logger = logging.getLogger(__name__)
@@ -283,20 +285,6 @@ def _validate_channel_coverage() -> None:
 _validate_channel_coverage()
 
 
-def _to_jsonable(value: Any) -> Any:
-    """Coerce a raw fibre RPC value to something json.dumps can serialize.
-    Real fibre properties are normally already plain float/int/bool/str,
-    but enum-like values that slip through as non-primitive objects get
-    cast to int (or str as a last resort) rather than crashing the
-    telemetry server's JSON encode."""
-    if value is None or isinstance(value, (int, float, bool, str)):
-        return value
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return str(value)
-
-
 def _get_path(obj: Any, path: str) -> Any:
     for part in path.split("."):
         obj = getattr(obj, part)
@@ -319,6 +307,9 @@ def _call_path(obj: Any, path: str, *args: Any) -> Any:
 
 class OdriveBackend(HardwareBackend):
     """Real ODrive backend over USB, via the official `odrive` package. Firmware 0.6.x (Pro/S1)."""
+
+    device = DEVICE_ODRIVE
+    sample_interval_s = SAMPLE_INTERVAL_S
 
     def __init__(
         self,
@@ -365,30 +356,17 @@ class OdriveBackend(HardwareBackend):
         await asyncio.to_thread(self._verify_declared_channels_exist)
 
     def _verify_declared_channels_exist(self) -> None:
-        """Confirm every declared channel actually resolves on this device,
-        raising MissingChannelError naming the ones that don't.
+        """Confirm every declared channel resolves on this device, raising
+        MissingChannelError naming the ones that don't.
 
-        This closes a hole that silence made invisible. Reading an absent
-        attribute raises AttributeError, which _read_all_channels() used to
-        swallow into a `None` value with a one-line warning - so the channel
-        key was still present in every frame, TelemetryClient's
-        verify_channels() saw nothing missing, and the run proceeded looking
-        healthy while that column stayed empty for its whole duration. You'd
-        find out at analysis time, having believed you had the data. Worse, a
-        Bound pointed at such a channel got `None` to compare against, which
-        raised TypeError inside the live evaluation thread and killed it -
-        leaving the test running with no safety monitoring at all.
+        Probed once at connect, because "not present" is a structural fact only
+        this process can tell apart from "no value at this instant" - emptiness
+        is not a usable signal, since a test-published state channel is
+        legitimately blank until something sets it.
 
-        Probed here, once, at connect, because "not present" is a structural
-        fact about the hardware and this process is the only one that can tell
-        it apart from "no value at this instant". Emptiness is NOT a usable
-        signal for this: a test-published state channel like `current_step` is
-        legitimately blank until something sets it, so failing on empty values
-        would condemn perfectly good channels.
-
-        Setters and methods are probed by resolving their parent object and
-        checking the leaf with hasattr - never by writing or calling, which on
-        real hardware would be an unacceptable side effect of a health check.
+        Setters and methods are probed by resolving their parent and checking
+        the leaf with hasattr, never by writing or calling: a health check must
+        not have side effects on real hardware.
         """
         missing = []
         for name, (root, path) in sorted(_TELEMETRY_PATHS.items()):
@@ -490,21 +468,11 @@ class OdriveBackend(HardwareBackend):
         result = {}
         for name, (root, path) in _TELEMETRY_PATHS.items():
             obj = axis if root == "axis" else odrv
-            # No AttributeError handling here, deliberately. connect() has
-            # already probed every declared path (see
-            # _verify_declared_channels_exist), so an absent channel fails
-            # loudly at setup rather than arriving here. If one somehow still
-            # does, AttributeError propagates like any other failure -
-            # runner.py treats stream_samples() raising as fatal and shuts the
-            # process down, which is the right outcome: it means the device's
-            # attribute graph changed underneath us mid-run.
-            #
-            # This used to catch AttributeError and substitute None, which is
-            # exactly what let a declared-but-absent channel look present in
-            # every frame while recording nothing, and made a Bound against it
-            # raise TypeError inside the evaluation thread. Absence is a
-            # setup-time error now, not a per-frame value.
-            result[name] = _to_jsonable(_get_path(obj, path))
+            # AttributeError is deliberately not caught: connect() has already
+            # probed every declared path, so absence is a setup-time error. If
+            # one appears here the device's attribute graph changed mid-run, and
+            # runner.py treating a raising stream_samples() as fatal is correct.
+            result[name] = to_jsonable(_get_path(obj, path))
         return result
 
     async def _set_axis_state(self, state: str) -> None:
@@ -519,6 +487,7 @@ class OdriveBackend(HardwareBackend):
             setattr, self._odrv.axis0.controller.config, "control_mode", getattr(self._ControlMode, mode)
         )
 
-    def _require_connected(self) -> None:
-        if self._odrv is None:
-            raise HardwareError("backend not connected")
+    @property
+    def is_connected(self) -> bool:
+        """Connection state is the device handle itself, not a flag."""
+        return self._odrv is not None
