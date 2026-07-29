@@ -8,10 +8,10 @@ checks. They're used two ways:
   only place a bound violation can actually affect the running test
   (abort on a `fatal` bound) or fire a hardware event (`event_name`).
   See base.py's "no feedback loop" note.
-- Post-hoc, in the telemetry engine (a separate process). See
-  telemetry_engine/evaluation.py, which wraps this same
-  RulebookEvaluator per test_id. It can never influence a running or
-  already-finished test - it only produces a persisted record.
+- Offline, against stored telemetry, via telemetry_engine/replay.py (or
+  evaluation.py for a stream spanning several runs). Used to ask whether
+  different bounds would have caught something, and to check a stored record
+  against the verdict written from it. It can never influence any test.
 
 A Bound checks one channel against up to three constraints:
 
@@ -52,20 +52,14 @@ class UnevaluableBoundError(Exception):
     carries a value it can't be compared against (a None, or a type that
     won't compare with the configured limit).
 
-    This is deliberately loud rather than skipped. A bound that silently
-    fails to evaluate is the most dangerous state in this framework: the
-    hardware goes unsupervised while the test looks healthy. Before this
-    existed, a None value made `actual > upper` raise TypeError, which
-    escaped the live runner's background thread and killed it outright -
-    leaving fatal_violation unset, so the test's own polling never noticed,
-    and the run continued with no monitoring. LiveRulebookRunner now treats
-    this the same way it treats a silent telemetry stream: fatal to the
-    test.
+    Loud rather than skipped, deliberately: a bound that silently fails to
+    evaluate leaves the hardware unsupervised while the test looks healthy.
+    LiveRulebookRunner treats it exactly as it treats a silent telemetry
+    stream - fatal to the test.
 
-    Normally unreachable: a channel that doesn't exist on the hardware is
-    now caught at connect() (see OdriveBackend._verify_declared_channels_exist),
-    so this is the backstop for a channel that exists but reports an
-    uncomparable value."""
+    Normally unreachable, since a backend verifies its declared channels
+    exist at connect(). This is the backstop for a channel that exists but
+    reports an uncomparable value."""
 
     def __init__(self, bound_label: str, channel: str, value: Any, reason: str):
         super().__init__(f"bound {bound_label} cannot be evaluated: channel {channel}={value!r} - {reason}")
@@ -158,10 +152,9 @@ class Rulebook:
     independently) - there is no single Rulebook-per-test limit. The
     reverse also holds: the same Rulebook can list more than one
     test_name, e.g. a shared safety rulebook several concrete test
-    cases all start their runner against (see ydrive_rulebook.py).
-    test_names only matters for post-hoc lookup
-    (telemetry_engine/evaluation.py); live evaluation
-    (LiveRulebookRunner) evaluates whatever Rulebooks a test case
+    cases all start their runner against.
+    test_names only matters when looking up rulebooks by test name during
+    offline replay; live evaluation runs whatever Rulebooks a test case
     explicitly passes it, regardless of test_names."""
 
     name: str

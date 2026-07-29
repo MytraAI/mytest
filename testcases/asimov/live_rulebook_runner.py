@@ -83,10 +83,9 @@ class RunSummary:
     any_violated(), which is momentary (currently-violated).
 
     `evaluated_frames` is why NOT_EVALUATED exists: a runner that was
-    constructed but never started (BaseYdriveTest deliberately leaves
-    start() to its subclasses) produces an empty timeline, which must not
-    read as a clean pass. Zero frames evaluated means the run had no
-    monitoring at all, and the verdict says so.
+    constructed but never started - a base test case may leave start() to its
+    subclasses - produces an empty timeline, which must not read as a clean
+    pass. Zero frames evaluated means the run had no monitoring at all.
     """
 
     violations: List[Violation] = field(default_factory=list)
@@ -149,8 +148,7 @@ class LiveRulebookRunner:
         means we've lost live monitoring while the hardware may still be
         moving. A caller polling in its own loop (e.g. a test step's
         closed-loop wait) checks this each tick and re-raises it to stop
-        what it's doing - see testcases/ydrive/teststeps/teststeps.py's
-        cycle_position and TestCase.check_fatal_violation()."""
+        what it's doing - see TestCase.check_fatal_violation()."""
 
     def start(self, telemetry_client: TelemetryClient) -> None:
         """Start a background thread evaluating telemetry_client's

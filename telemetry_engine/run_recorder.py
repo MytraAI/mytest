@@ -16,26 +16,16 @@ stream has been quiet for staleness_s, that run is finalized:
   3. That run's telemetry files are closed, so a finished run's record is
      complete on disk without waiting for engine shutdown.
 
-Why there's no spool directory or settle window any more. The verdict used
-to be relayed through a spool dir in the system tempdir, drained here,
-held for a couple of seconds so trailing frames could be counted, then
-written to a store this module owned. All of that machinery existed to
-decouple the two processes' lifetimes and to guess when a run's frames had
-finished arriving. Neither problem remains: the test now writes straight
-into its own run directory (a location both sides derive from
-protocol/paths.py), and completeness is only stamped once the stream has
-*already* gone quiet, so trailing frames are counted by construction
-rather than by a timing heuristic. It also removes a real bug the old
-three-set (claimed/pending/done) bookkeeping had: a teardown slower than
-the staleness window would get an INCOMPLETE verdict synthesized *and*
-then the real verdict written too, as two contradictory records. Here a
-late verdict simply exists, and existence is the whole check.
+The verdict's *existence* is the whole check, which is what keeps this
+simple: there's no spool directory to drain and no settle window to tune,
+because completeness is only stamped once the stream has already gone quiet,
+so trailing frames are counted by construction. A verdict that lands late
+(slow teardown) simply wins.
 
-flush() finalizes everything immediately at engine shutdown, but never
-synthesizes CRASHED for a still-active run: a run in progress when the
-engine stops isn't crashed. Note the engine stopping is itself something a
-test notices and aborts on (see protocol/heartbeat.py), so this is a
-narrow window by design.
+flush() finalizes everything at engine shutdown but never synthesizes
+CRASHED: a run still in progress isn't crashed. That window is narrow anyway,
+since a stopping engine is itself something a running test notices and aborts
+on (see protocol/heartbeat.py).
 """
 from __future__ import annotations
 

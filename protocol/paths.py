@@ -17,23 +17,19 @@ Layout::
         <device>/telemetry.csv    wide: one row per frame, one column per channel
       raw/<device>/telemetry_<session>.csv
 
-One directory per test run, one subdirectory per device inside it. The
-per-device split is deliberate: devices sample at different rates and
-declare different channel sets (the ODrive streams 111 channels at 20 Hz;
-the mocks stream a handful at 50 Hz), so a single wide table per run
-would have to either interpolate - inventing data - or pad most cells
-empty. Keeping one file per device preserves each device's own native
-rate and seq numbering, and leaves aligning them a deliberate query on
-`t` rather than a guess frozen into storage. Device subdirectories, not
-filename suffixes, so a device can accumulate more artifact types later
-(status/error logs) without anything being renamed.
+One directory per run, one subdirectory per device inside it. Per-device
+because devices sample at different rates, declare different channel sets,
+and number `seq` independently, so a single table per run would have to
+interpolate (inventing data) or pad most cells empty. Keeping them apart
+preserves each device's native rate and leaves aligning them a deliberate
+query on `t`. Subdirectories rather than filename suffixes, so a device can
+gain more artifact types (status/error logs) without renaming anything.
 
-The raw stream lives outside runs/ because it carries no test_id at all
-(only the Telemetry Publisher tags frames), so it cannot be routed per
-run without inventing the raw/tagged seq correlation the architecture doc
-deliberately leaves open. It's the continuous instrument record whose
-whole point is not depending on the test process; recover the slice for a
-run by time range from the verdict's started_at/ended_at.
+The raw stream lives outside runs/ because it carries no test_id - only the
+Telemetry Publisher tags frames - so routing it per run would mean inventing
+the raw/tagged seq correlation the architecture doc leaves open. It's the
+continuous instrument record whose point is not depending on the test
+process; recover a run's slice by time range from the verdict.
 """
 from __future__ import annotations
 

@@ -1,42 +1,27 @@
 """Wide CSV telemetry storage: one row per frame, one column per channel,
 one file per device per run.
 
-Replaces the earlier long/tidy layout (one row per channel *value*, with
-seq/t/test_id repeated on every row). The long form was justified as
-"the shape a real time-series database write wants", but that
-decomposition is a four-line loop inside a TelemetryStorage.write()
-implementation, not a property of the interim file - a future
-InfluxStorage receives the same MergedItem and decomposes it itself
-regardless of what this class chose to write. Meanwhile the long form
-repeated a 32-char test_id and a ~35-char channel name for every single
-value, on a test case that runs indefinitely, and needed a pivot before a
-human could read it. Wide opens in a spreadsheet and loads straight into
-a dataframe.
+Wide rather than long/tidy (one row per channel *value*): the "one point per
+tag/field/timestamp" shape a TSDB wants is a loop inside a
+TelemetryStorage.write() implementation, not a property of the interim file,
+and the long form repeated the test_id and channel name for every value.
+Measured ~15x smaller on a ~100-channel device, and it opens in a
+spreadsheet without a pivot.
 
-Measured against real hardware, the saving is about 15x rather than the
-~4x first estimated: a 117-column ODrive frame is 762 bytes wide, versus
-~116 rows x ~100 bytes long. At the real device's achieved ~12.6 Hz that
-is ~35 MB/hour.
-
-Routing. One instance fans out across many files: tagged frames go to
+Routing. One instance fans out: tagged frames to
 <output>/runs/<test_id>/<device>/telemetry.csv, raw (untagged) frames to
-<output>/raw/<device>/telemetry_<session>.csv. Files are opened lazily on
-the first frame that needs one, and in append mode, so an engine restart
-mid-run keeps adding to the same run's file instead of truncating it or
-silently starting a second one.
+<output>/raw/<device>/telemetry_<session>.csv (see protocol/paths.py). Files
+open lazily and in append mode, so an engine restart mid-run keeps adding to
+the same file rather than truncating it or starting a second one.
 
-The header problem, and how it's handled. A wide file's columns must be
-fixed when the header line is written, but the full channel set isn't
-knowable from frame one: the tagged stream merges in test-published state
-channels (test_status, {bound_label}_status, current_step) that only
-appear once something publishes them. So each writer buffers the first
-HEADER_SAMPLE_FRAMES frames, takes the union of their channel names as
-the header, then writes the header and the buffered rows. After that the
-schema is fixed: a channel that shows up later is logged once and
-dropped, and a channel missing from a frame is an empty cell. Both are
-visible in the file rather than silent - an empty cell in a known column
-says "this frame didn't carry it", which is exactly what you want for the
-~10 channels a real ODrive reports as absent depending on board config.
+The header problem. A wide file's columns are fixed when the header is
+written, but the full channel set isn't knowable from frame one - the tagged
+stream merges in test-published state channels that appear only once
+something sets them. So each writer buffers HEADER_SAMPLE_FRAMES frames,
+takes the union of their channel names, then writes header and buffer. After
+that the schema is fixed: a later channel is logged once and dropped, and a
+channel missing from a frame is an empty cell. Both stay visible in the file
+rather than silent.
 """
 from __future__ import annotations
 
@@ -53,10 +38,9 @@ from .storage import MergedItem, TelemetryStorage
 logger = logging.getLogger(__name__)
 
 HEADER_SAMPLE_FRAMES = 50
-"""Frames buffered before the header is fixed - 1 s at 50 Hz, 2.5 s at
-the real ODrive's 20 Hz. Long enough for the test's published state
-channels to appear, short enough that nothing meaningful is held in
-memory or delayed on disk."""
+"""Frames buffered before the header is fixed - a second or two at the rates
+devices here run. Long enough for the test's published state channels to
+appear, short enough that little is held in memory or delayed on disk."""
 
 _FIXED_COLUMNS = ["seq", "t"]
 
@@ -73,7 +57,7 @@ class _WideCsvWriter:
         self._known_columns: Set[str] = set()
         """The header as a set, and the channel columns as a list, both built
         once when the header is fixed. Rebuilding them per row cost a
-        117-element set construction on every frame in the hot path."""
+        set construction per column on every frame, in the hot path."""
         self._channel_columns: List[str] = []
         self._buffer: List[Tuple[int, float, Dict[str, Any]]] = []
         self._pending_channels: Set[str] = set()

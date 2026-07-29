@@ -1,42 +1,22 @@
 """The per-test verdict record: one authoritative outcome per test run.
 
-A Verdict is the whole result of one test run - how it ended, whether the
-DUT stayed inside its bounds, every bound transition that happened, and
-how much telemetry backs the record. It is the summary half of a test
-result; the full time-series lives beside it as per-device wide CSVs (see
-paths.py), joined by nothing more than sharing a directory.
+How the run ended, whether the DUT stayed inside its bounds, every bound
+transition, and how much telemetry backs the record. The time-series lives
+beside it as per-device CSVs (see paths.py), joined by sharing a directory.
 
-Who writes what
----------------
-The *test process* authors it. It is the only participant that knows how
-the run ended, and it holds the LiveRulebookRunner whose evaluation
-actually gated the run - so the recorded verdict is what the test truly
-acted on, not a second opinion computed downstream from a lossier copy of
-the stream. It writes verdict.json atomically into its own run directory
-*before* post_test_teardown(), so the record exists before any teardown
-delay and so metadata() can still read live hardware.
+The test process authors it - it alone knows how the run ended, and it holds
+the evaluator that actually gated the run - and writes it into the run
+directory before its own teardown. The telemetry engine only adds
+`completeness`, the one field it alone can produce, and synthesizes a
+CRASHED record for a run whose process died without writing one.
 
-The *telemetry engine* only ever adds `completeness`, amending the file in
-place once that run's tagged stream goes quiet. That's the one field the
-test can't produce: how many frames actually reached storage and how many
-were dropped in transit. The engine also synthesizes a whole verdict, with
-lifecycle=CRASHED, if a run's stream goes stale and no verdict.json exists
-- a test process killed outright (taskkill /F, SIGKILL) never gets to
-write one, and a run that left no record at all would otherwise vanish.
-
-Two fields, not one
--------------------
-`lifecycle` (how the run ended) and `bounds_result` (whether the DUT
-behaved) are orthogonal, and collapsing them into a single enum loses
-real outcomes. Both of this project's real-hardware test cases -
-EnduranceCycleTest and ManualTest - run until stopped and can never
-return normally, so their *expected successful* end state is
-lifecycle=STOPPED with bounds_result=PASS. A single enum has no way to
-say that: a stopped run would either be filed as neither-pass-nor-fail
-(hiding forty bound violations from any query filtering on failure) or as
-a failure (condemning a perfectly good run). Two small closed enums also
-port to a database as two indexed columns, which is what you want; one
-overloaded column is the thing you regret after it's in a table.
+`lifecycle` and `bounds_result` are separate fields because they're
+independent. A test that runs until an operator stops it ends deliberately
+and may still be a success (STOPPED/PASS); one that completes normally may
+still have violated a bound. A single enum makes the first case
+inexpressible - it has to file a stopped run as either not-a-failure (hiding
+any violations from a query) or a failure (condemning a good run). Two small
+closed enums also map to two indexed database columns.
 """
 from __future__ import annotations
 

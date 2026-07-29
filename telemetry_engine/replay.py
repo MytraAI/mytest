@@ -1,35 +1,24 @@
 """Offline replay: re-evaluate a stored run's telemetry against Rulebooks.
 
-This is what "post-hoc evaluation" is actually good for, and the reason
-the shared RulebookEvaluator logic still has two callers even though only
-one of them runs live. It answers questions you can only ask after the
-fact:
+What post-hoc evaluation is genuinely good for - two questions you can only
+ask after the fact:
 
-- Would a tighter bound have caught this run? (replay with a modified
-  Rulebook and see)
-- Does the stored record actually explain its own verdict? (replay with
-  the *same* Rulebook and compare against verdict.json)
+- Would a tighter bound have caught this run? (replay a modified Rulebook)
+- Does the stored record explain its own verdict? (replay the *same* Rulebook
+  and compare against verdict.json)
 
-That second use is why this exists now rather than later: it's the only
-check that proves the record is self-sufficient. If replaying a run's
-stored telemetry reproduces the transition timeline the live runner
-recorded, then the wide per-device CSV format lost nothing, and collapsing
-to a single online evaluator lost nothing either. If it *doesn't*, the
-stored telemetry is missing something - which is worth discovering now,
-not after a database port.
+The second doubles as the check that the stored record is self-sufficient: if
+replay reproduces the timeline the live runner recorded, the storage format
+lost nothing.
 
-One honest caveat when comparing. A Rulebook's persistence_s debounce is
-timed off frame timestamps, so frames lost in transit (the transport is
-best-effort by design - see the verdict's completeness stats) make replay
-see a gap the live runner never saw, and a debounced bound can legitimately
-resolve differently. A mismatch on a run with a non-zero seq_gap_count is
-the completeness numbers telling you they matter, not a bug in replay.
+Caveat when comparing: persistence_s debounce is timed off frame timestamps,
+so frames lost in transit make replay see a gap the live runner didn't, and a
+debounced bound can legitimately resolve differently. A mismatch on a run with
+a non-zero seq_gap_count is those numbers mattering, not a bug here.
 
-Reads the wide CSV written by wide_csv_storage.py: one row per frame,
-`seq`/`t` then one column per channel. Empty cells mean the channel wasn't
-in that frame and are omitted from the reconstructed frame, so a Bound
-sees a genuinely absent channel as absent (Bound.evaluate returns None)
-rather than as a zero.
+Reads the wide CSV from wide_csv_storage.py. An empty cell is omitted from the
+reconstructed frame, so a Bound sees an absent channel as absent rather than
+as a zero.
 """
 from __future__ import annotations
 
