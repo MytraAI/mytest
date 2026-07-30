@@ -14,8 +14,8 @@ import asyncio
 
 from protocol.paths import run_telemetry_path
 from protocol.verdict import BoundsResult, Lifecycle, Verdict, read_verdict, write_verdict
-from protocol.wire import TaggedTelemetryFrame
 from telemetry_engine.replay import compare_with_verdict, read_frames, replay
+from telemetry_engine.storage import WriteItem
 from telemetry_engine.wide_csv_storage import WideCsvTelemetryStorage
 from testcases.asimov.live_rulebook_runner import LiveRulebookRunner
 from testcases.asimov.rulebook import Bound, Rulebook
@@ -28,15 +28,19 @@ RULEBOOK = Rulebook(
 
 
 class FakePublisher:
+    """Stands in for RunStatePublisher - the runner only sets state and reads a
+    snapshot back to merge into what it evaluates."""
+
     def set_state(self, name, value):
         pass
+
+    def state_snapshot(self):
+        return {}
 
 
 def frames_for(values, device="odrive", test_id="run1"):
     return [
-        TaggedTelemetryFrame(
-            test_id=test_id, test_name="t", seq=i, t=float(i), channels={"ibus": v}, device=device
-        )
+        WriteItem(device=device, seq=i, t=float(i), channels={"ibus": v}, test_id=test_id)
         for i, v in enumerate(values)
     ]
 
@@ -117,13 +121,12 @@ def test_values_survive_the_csv_round_trip_with_their_types(tmp_path):
 
     async def scenario():
         await storage.write(
-            TaggedTelemetryFrame(
-                test_id="run1",
-                test_name="t",
+            WriteItem(
+                device="odrive",
                 seq=0,
                 t=1.5,
                 channels={"num": 12.5, "count": 7, "flag": True, "state": "IDLE"},
-                device="odrive",
+                test_id="run1",
             )
         )
         await storage.close()
@@ -145,14 +148,10 @@ def test_absent_channel_stays_absent_rather_than_becoming_zero(tmp_path):
 
     async def scenario():
         await storage.write(
-            TaggedTelemetryFrame(
-                test_id="run1", test_name="t", seq=0, t=0.0, channels={"a": 1.0, "b": 2.0}, device="odrive"
-            )
+            WriteItem(device="odrive", seq=0, t=0.0, channels={"a": 1.0, "b": 2.0}, test_id="run1")
         )
         await storage.write(
-            TaggedTelemetryFrame(
-                test_id="run1", test_name="t", seq=1, t=1.0, channels={"a": 1.0}, device="odrive"
-            )
+            WriteItem(device="odrive", seq=1, t=1.0, channels={"a": 1.0}, test_id="run1")
         )
         await storage.close()
 

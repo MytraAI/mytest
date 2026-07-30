@@ -18,7 +18,7 @@ import json
 import pytest
 
 from protocol import heartbeat
-from testcases.base import RecordingLost, TestCase
+from testcases.base import DeviceNotRecorded, RecordingLost, TestCase
 
 
 class MinimalTest(TestCase):
@@ -185,3 +185,58 @@ def test_require_engine_false_keeps_an_explicitly_set_output_dir(beat_path, tmp_
     test._resolve_output_dir()
 
     assert test._output_dir == tmp_path / "demo_dir"
+
+
+# ---- the device roster the heartbeat carries -------------------------------
+#
+# A run declares which devices it claims (TestCase.DEVICES). The engine
+# advertises which it is subscribed to. If a test declares one the engine
+# isn't recording, nothing would capture that device's frames and the run
+# directory would come out quietly missing it - so that fails before setup,
+# the same way a declared-but-absent channel does.
+
+
+class TwoDeviceTest(MinimalTest):
+    TEST_NAME = "two_device_test"
+    DEVICES = ("odrive", "daq")
+
+
+def test_heartbeat_carries_the_engines_device_roster(beat_path, tmp_path):
+    heartbeat.write_heartbeat(tmp_path / "data", ["odrive", "daq"])
+
+    beat = heartbeat.read_heartbeat()
+    assert beat is not None
+    assert beat.devices == ["odrive", "daq"]
+
+
+def test_an_engine_with_no_roster_reads_back_as_empty_not_missing(beat_path, tmp_path):
+    """Older heartbeats, and any writer that doesn't pass devices, must still
+    parse - the field is additive, not required."""
+    heartbeat.write_heartbeat(tmp_path / "data")
+
+    beat = heartbeat.read_heartbeat()
+    assert beat is not None and beat.devices == []
+
+
+def test_starting_is_refused_when_a_declared_device_is_not_recorded(beat_path, tmp_path):
+    heartbeat.write_heartbeat(tmp_path / "data", ["odrive"])  # daq is missing
+    test_case = TwoDeviceTest()
+
+    with pytest.raises(DeviceNotRecorded) as excinfo:
+        test_case.require_recording_started()
+
+    assert excinfo.value.missing == ["daq"]
+    assert "daq" in str(excinfo.value)
+
+
+def test_starting_proceeds_when_every_declared_device_is_recorded(beat_path, tmp_path):
+    heartbeat.write_heartbeat(tmp_path / "data", ["odrive", "daq", "power_supply"])
+
+    TwoDeviceTest().require_recording_started()  # extra coverage is fine; missing coverage isn't
+
+
+def test_a_test_declaring_no_devices_is_never_blocked(beat_path, tmp_path):
+    """The base cases and the demos declare nothing, and must still run."""
+    heartbeat.write_heartbeat(tmp_path / "data", [])
+
+    MinimalTest().require_recording_started()

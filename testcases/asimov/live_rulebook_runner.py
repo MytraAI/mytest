@@ -17,10 +17,15 @@ own - see step.py.
 
 evaluate() uses wall-clock time (time.time()) for persistence_s
 debounce - fine live, since a frame's own timestamp is itself stamped
-via time.time() on the driver side. Post-hoc evaluation
-(telemetry_engine.evaluation.Evaluator) instead passes each frame's own
-recorded timestamp explicitly, since replay has no relation to real
-time.
+via time.time() on the driver side. Offline replay
+(telemetry_engine/replay.py) instead passes each frame's own recorded
+timestamp explicitly, since replay has no relation to real time.
+
+Evaluation runs against the union of the device's frame and the test's own
+published state, read in-process from the state publisher - which is what lets
+a Bound gate on a flag a step published. The frames arriving here are a
+device's raw stream and carry no test state, so without that merge such a
+bound could never fire and would be silently skipped on every frame.
 """
 from __future__ import annotations
 
@@ -33,7 +38,7 @@ from typing import Any, Callable, Dict, List, Optional
 from hardware.clients.telemetry_client import TelemetryClient, TelemetryTimeout
 from protocol.verdict import BoundsResult, Violation
 
-from ..telemetry_publisher import TelemetryPublisher
+from ..state_publisher import RunStatePublisher
 from .rulebook import Rulebook, RulebookEvaluator, UnevaluableBoundError
 
 logger = logging.getLogger(__name__)
@@ -114,7 +119,7 @@ class LiveRulebookRunner:
         self,
         test_id: str,
         rulebooks: List[Rulebook],
-        publisher: TelemetryPublisher,
+        publisher: RunStatePublisher,
         trigger_event: Optional[Callable[[str], None]] = None,
     ):
         self._test_id = test_id
@@ -171,7 +176,16 @@ class LiveRulebookRunner:
                 if self._stop.is_set():
                     return
                 try:
-                    self.evaluate(dict(frame.channels), seq=frame.seq, frame_t=frame.t)
+                    # Evaluate against the device's channels *plus* whatever the
+                    # test has published. The frames arriving here are a
+                    # device's raw stream, which by construction carries no
+                    # test state - so without this merge a Bound gating on a
+                    # published flag could never fire, and would be silently
+                    # skipped on every frame while the run reported a clean
+                    # pass. Read in-process from the publisher: nothing crosses
+                    # the wire and nothing is lost.
+                    channels = {**frame.channels, **self._publisher.state_snapshot()}
+                    self.evaluate(channels, seq=frame.seq, frame_t=frame.t)
                 except FatalBoundViolation as exc:
                     logger.error("test %s: fatal breach - stopping evaluation", self._test_id)
                     self.fatal_violation = exc

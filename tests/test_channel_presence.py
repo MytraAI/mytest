@@ -185,6 +185,9 @@ def test_runner_makes_an_unevaluable_bound_fatal_instead_of_dying():
         def set_state(self, name, value):
             pass
 
+        def state_snapshot(self):
+            return {}
+
     class Client:
         def frames(self):
             for i in range(10):

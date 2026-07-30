@@ -11,7 +11,7 @@ imports directly from mock_channels.py, not from here, and positively
 confirms both against the live driver process - see its docstring.
 
 DEFAULT_STATE: test-published state channels (via
-TelemetryPublisher.set_state()) that aren't present until some step
+TestCase.set_state()) that aren't present until some step
 first sets them. Seeded with these defaults at test start (see
 BaseExampleDutTest.pre_test_setup()), so every channel exists in the
 stream from frame 1 instead of appearing incrementally as steps happen

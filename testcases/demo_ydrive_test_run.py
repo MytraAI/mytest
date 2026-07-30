@@ -3,11 +3,11 @@
 Runs BaseYdriveTest - the base case with no test sequence logic -
 through its full three-phase lifecycle, against MockOdriveBackend
 (use_mock=True; no real ODrive is required to run this demo). While the
-test runs, this demo concurrently prints tagged frames arriving on the
-Telemetry Publisher's output, proving the publisher runs alongside
-MainExecution and republishes test-tagged ODrive telemetry
-independently of the test case's own in-sequence telemetry
-subscription - even with no actual test logic.
+test runs, this demo concurrently prints the run-state frames arriving
+on the state publisher's output, proving the run announces itself - its
+identity, the devices it claims, and every value its steps publish -
+alongside MainExecution and independently of the test case's own
+in-sequence telemetry subscription, even with no actual test logic.
 
 Note: unlike hardware/demos/demo_odrive.py, this one does NOT wrap the
 test case in a separate `with YdriveTestbed():`. BaseYdriveTest already
@@ -23,18 +23,18 @@ import threading
 
 import zmq
 
-from protocol.wire import DEFAULT_TAGGED_TELEMETRY_ENDPOINT, TAGGED_TELEMETRY_TOPIC, TaggedTelemetryFrame
+from protocol.wire import DEFAULT_RUN_STATE_ENDPOINT, RUN_STATE_TOPIC, RunStateFrame
 
 from .ydrive.testcases.base_ydrive_test import BaseYdriveTest
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
-def print_tagged_frames(stop: threading.Event) -> None:
+def print_state_frames(stop: threading.Event) -> None:
     ctx = zmq.Context.instance()
     sub = ctx.socket(zmq.SUB)
-    sub.setsockopt(zmq.SUBSCRIBE, TAGGED_TELEMETRY_TOPIC)
-    sub.connect(DEFAULT_TAGGED_TELEMETRY_ENDPOINT)
+    sub.setsockopt(zmq.SUBSCRIBE, RUN_STATE_TOPIC)
+    sub.connect(DEFAULT_RUN_STATE_ENDPOINT)
     poller = zmq.Poller()
     poller.register(sub, zmq.POLLIN)
     try:
@@ -44,8 +44,8 @@ def print_tagged_frames(stop: threading.Event) -> None:
             if sub not in events:
                 continue
             _, raw = sub.recv_multipart()
-            frame = TaggedTelemetryFrame.from_bytes(raw)
-            print("tagged:", frame.test_id, frame.seq, round(frame.t, 3), frame.channels["pos_estimate"])
+            frame = RunStateFrame.from_bytes(raw)
+            print("state:", frame.test_id, frame.devices, round(frame.t, 3), frame.state)
             printed += 1
     finally:
         sub.close(linger=0)
@@ -53,7 +53,7 @@ def print_tagged_frames(stop: threading.Event) -> None:
 
 def main() -> None:
     stop_printer = threading.Event()
-    printer = threading.Thread(target=print_tagged_frames, args=(stop_printer,), daemon=True)
+    printer = threading.Thread(target=print_state_frames, args=(stop_printer,), daemon=True)
     printer.start()
 
     test_case = BaseYdriveTest(use_mock=True, require_engine=False)

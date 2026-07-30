@@ -6,12 +6,14 @@ generic idle/arm/run/abort/complete state machine sketched in the
 architecture doc - this component uses the three-phase model
 exclusively.
 
-- PreTestSetup connects to the hardware driver, subscribes to telemetry,
-  and starts the Telemetry Publisher.
+- PreTestSetup connects to the hardware driver, subscribes to telemetry, and
+  wires up rule evaluation. run() has already announced the run on the state
+  stream by this point, so the telemetry engine knows where this run's frames
+  belong before any driver exists.
 - MainExecution runs the test's own sequence logic. Any pass/fail decision
   that affects the live sequence is made here, from the test's own
   telemetry subscription: no *evaluation result* computed downstream of the
-  Telemetry Publisher can influence this process. (The engine's liveness
+  state publisher can influence this process. (The engine's liveness
   heartbeat is not such a result - see check_recording_alive.)
 - PostTestTeardown returns the system to a state where another test can
   start.
@@ -37,13 +39,14 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 from protocol import heartbeat
 from protocol.paths import DEFAULT_OUTPUT_DIR
 from protocol.verdict import BoundsResult, Lifecycle, Verdict, write_verdict
 
 from .asimov.live_rulebook_runner import FatalBoundViolation, LiveRulebookRunner
+from .state_publisher import RunStatePublisher
 from .utils import Stopwatch, spawn_operator_dashboard
 
 logger = logging.getLogger(__name__)
@@ -81,8 +84,42 @@ class StopRequested(Exception):
         self.test_id = test_id
 
 
+class DeviceNotRecorded(Exception):
+    """Raised before a run starts when it declares a device the telemetry
+    engine isn't subscribed to, so nothing would record that device's frames.
+
+    The same principle as declared channels having to exist: a test naming a
+    device it expects data from must fail loudly at setup, not produce a run
+    directory that is quietly missing one. The engine advertises its
+    subscriptions on the heartbeat - see protocol/heartbeat.py."""
+
+    def __init__(self, test_id: str, missing: Sequence[str], recorded: Sequence[str]):
+        super().__init__(
+            f"test {test_id}: declares device(s) the telemetry engine is not recording: "
+            f"{sorted(missing)} - the engine is subscribed to {sorted(recorded)}"
+        )
+        self.test_id = test_id
+        self.missing = sorted(missing)
+
+
 class TestCase(ABC):
     """Abstract three-phase test case: PreTestSetup, MainExecution, PostTestTeardown."""
+
+    DEVICES: Tuple[str, ...] = ()
+    """Which devices this test claims, as protocol/wire.py DEVICE_* names.
+
+    Assembled by a concrete base test case from the declarations of the things
+    that actually own the driver processes - its testbed's DEVICES and, when
+    the DUT has its own electronics, its DUT façade's DEVICES. Neither of those
+    two learns about the other, which is what keeps the testbed/DUT split
+    intact (see AI/mytest-vs-forge.md §7).
+
+    Two jobs: the telemetry engine records frames from these devices into this
+    run's directory and leaves every other device in the continuous per-session
+    record, and require_recording_started() refuses to start if the engine
+    isn't subscribed to one of them. A class attribute rather than a property
+    because it must be knowable before anything is instantiated - the run is
+    announced before PreTestSetup."""
 
     def __init__(self, test_id: Optional[str] = None, require_engine: bool = True):
         self.test_id = test_id or uuid.uuid4().hex
@@ -100,6 +137,23 @@ class TestCase(ABC):
         with the engine's own output dir, read from its heartbeat, so the
         two processes can't disagree even if the engine was started with
         --output-dir."""
+        self._publisher = RunStatePublisher(
+            test_id=self.test_id,
+            test_name=getattr(self, "TEST_NAME", "unknown"),
+            devices=self.DEVICES,
+        )
+        """This run's state publisher.
+
+        Constructed here and *started* by run(), deliberately in two steps.
+        Constructing it opens no socket and starts no thread - it only holds the
+        state dict - so pre_test_setup() can seed state and hand it to the
+        evaluator without depending on run() having been called first. Building
+        it in run() instead made that ordering load-bearing, and set_state()
+        silently did nothing when it wasn't met, which is the failure mode this
+        codebase refuses everywhere else.
+
+        A bonus of the split: state set before run() starts publishing is
+        carried on the very first frame rather than missed."""
         self._tearing_down = False
         """True once post_test_teardown() starts, which switches off
         check_recording_alive(). Teardown steps go through @step like any
@@ -110,8 +164,9 @@ class TestCase(ABC):
 
     @abstractmethod
     def pre_test_setup(self) -> None:
-        """Connect to the hardware driver, subscribe to telemetry, start
-        the Telemetry Publisher, and start acquisition."""
+        """Connect to the hardware driver, subscribe to telemetry, wire up
+        rule evaluation, and start acquisition. The run is already announced
+        on the state stream by the time this is called."""
 
     @abstractmethod
     def main_execution(self) -> None:
@@ -157,6 +212,12 @@ class TestCase(ABC):
 
         self.require_recording_started()
         self._resolve_output_dir()
+
+        # Announce the run before anything else starts. The engine attributes a
+        # device's frames to this run only while this stream is live, so
+        # publishing first means no frame can be produced before the engine
+        # knows where it belongs.
+        self._publisher.start()
 
         dashboard = spawn_operator_dashboard(self.test_id, getattr(self, "TEST_NAME", "unknown"))
         linger = False
@@ -225,6 +286,10 @@ class TestCase(ABC):
             logger.info("test %s: post_test_teardown", self.test_id)
             self._tearing_down = True  # teardown must run to completion even with no recorder
             self.post_test_teardown()
+            # Stop announcing only once teardown is done: the state stream going
+            # quiet is what tells the engine this run is over, and frames
+            # produced while teardown is still safing hardware belong to it.
+            self.teardown_step("stop state publisher", self._publisher.stop)
             if dashboard is not None:
                 if verdict is not None and verdict.bounds_result == BoundsResult.FAIL:
                     # A bound violated at some point, so the run failed even if
@@ -380,9 +445,11 @@ class TestCase(ABC):
             raise RecordingLost(self.test_id, f"engine heartbeat is {beat.age_s():.0f}s stale")
 
     def require_recording_started(self) -> None:
-        """Refuse to start if nothing is recording. Called by run() before
-        pre_test_setup(), so a run that would produce no record fails
-        immediately instead of moving hardware for nothing."""
+        """Refuse to start if nothing is recording, or if anything this run
+        declares isn't being recorded. Called by run() before
+        pre_test_setup(), so a run that would produce no record - or an
+        incomplete one - fails immediately instead of moving hardware for
+        nothing."""
         if not self.require_engine:
             return
         beat = heartbeat.read_heartbeat()
@@ -392,7 +459,13 @@ class TestCase(ABC):
                 "no telemetry engine is running (start it with `python -m telemetry_engine.main`, "
                 "or pass require_engine=False to run without a record)",
             )
-        logger.info("test %s: telemetry engine recording to %s (pid %s)", self.test_id, beat.output_dir, beat.pid)
+        missing = [device for device in self.DEVICES if device not in beat.devices]
+        if missing:
+            raise DeviceNotRecorded(self.test_id, missing, beat.devices)
+        logger.info(
+            "test %s: telemetry engine recording to %s (pid %s), covering %s",
+            self.test_id, beat.output_dir, beat.pid, ", ".join(self.DEVICES) or "(no declared devices)",
+        )
 
     def wait_for(self, duration_s: float) -> None:
         """Paced wait for duration_s, calling check_fatal_violation(),
@@ -404,6 +477,18 @@ class TestCase(ABC):
             self.check_fatal_violation()
             self.check_stop_requested()
             self.check_recording_alive()
+
+    def set_state(self, name: str, value: Any) -> None:
+        """Publish a named state value - a step name, a rule's status, a
+        derived quantity - onto this run's state stream from now on.
+
+        This is the one sanctioned way for test steps and the @step decorator
+        to record test-case state: callers never see the publisher. The engine
+        merges these into every row it writes for this run's devices, so they
+        land in the recorded telemetry alongside real hardware channels, and
+        the live evaluator can gate a Bound on them (see
+        RunStatePublisher.state_snapshot)."""
+        self._publisher.set_state(name, value)
 
     def teardown_step(self, description: str, action: Callable[[], None]) -> None:
         """Run one teardown action, logging (not raising) on failure so

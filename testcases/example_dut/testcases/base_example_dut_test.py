@@ -5,9 +5,10 @@ Handles the shared setup any example_dut test needs:
   also gives us a ready-to-use power supply command client
 - powers the DUT via the testbed's power supply
 - starts the DUT itself
-- tags the DUT's own telemetry (position/velocity/current) via the
-  Telemetry Publisher
-- wires up live Rulebook evaluation
+- declares all three devices via DEVICES, so the engine records every one
+  of them into this run's directory
+- wires up live Rulebook evaluation against the DUT's own telemetry
+  (position/velocity/current)
 
 It has no test sequence logic of its own.
 
@@ -22,12 +23,14 @@ with no test logic proves the setup/teardown/telemetry-tagging/
 evaluation-wiring plumbing works before any real test sequence is
 layered on top of it.
 
-Note: TelemetryPublisher here is pointed at the DUT's raw telemetry
-stream (not the DAQ's) via raw_endpoint. The DUT's own
-position/velocity/current are what's evaluated for this DUT's tests,
-not the DAQ's generic channels. The DAQ still runs as part of the
-testbed - it's an instrument this test stand always has available,
-this test just doesn't happen to watch it.
+Note what this test claims versus what it evaluates. DEVICES covers all
+three driver processes - the DAQ and power supply from the testbed, the DUT
+from its façade - so the telemetry engine records all three into this run's
+directory. Live rule evaluation is a separate choice: the runner is handed
+the DUT's telemetry client, because the DUT's own position/velocity/current
+are what these tests judge, not the DAQ's generic channels. Recording
+breadth and evaluation focus are independent, and this test uses different
+sets for each on purpose.
 
 Also seeds a default for every state channel a subclass's steps might
 publish (see ../channels.py and _seed_channels() below), so the full
@@ -37,14 +40,12 @@ incrementally as steps happen to compute things.
 from __future__ import annotations
 
 import logging
-from typing import Any, List, Optional
+from typing import List, Optional
 
-from protocol.wire import DEFAULT_DUT_TELEMETRY_ENDPOINT
 from testbeds.example_testbed.example_testbed import ExampleTestbed
 from testcases.asimov.live_rulebook_runner import LiveRulebookRunner
 from testcases.asimov.rulebook import Rulebook
 from testcases.base import TestCase
-from testcases.telemetry_publisher import TelemetryPublisher
 
 from ..channels import DEFAULT_STATE
 from ..dut.example_dut import ExampleDut
@@ -58,6 +59,11 @@ class BaseExampleDutTest(TestCase):
     TEST_NAME = "base_example_dut_test"
     RULEBOOKS: List[Rulebook] = []
 
+    DEVICES = ExampleTestbed.DEVICES + ExampleDut.DEVICES
+    """The union of what the testbed owns (DAQ, power supply) and what the DUT
+    façade owns (the DUT). Each declares only its own, so neither has to know
+    about the other - see testcases/base.py's DEVICES."""
+
     POWER_SUPPLY_VOLTAGE = 24.0
     POWER_SUPPLY_CURRENT = 2.0
 
@@ -65,8 +71,6 @@ class BaseExampleDutTest(TestCase):
         super().__init__(test_id, require_engine=require_engine)
         self.testbed: Optional[ExampleTestbed] = None
         self.dut: Optional[ExampleDut] = None
-        self._publisher: Optional[TelemetryPublisher] = None
-        self._publisher_started = False
         self._runner_started = False
 
     def pre_test_setup(self) -> None:
@@ -80,13 +84,6 @@ class BaseExampleDutTest(TestCase):
         self.dut = ExampleDut()
         self.dut.start()
 
-        self._publisher = TelemetryPublisher(
-            test_id=self.test_id,
-            test_name=self.TEST_NAME,
-            raw_endpoint=DEFAULT_DUT_TELEMETRY_ENDPOINT,
-        )
-        self._publisher.start()
-        self._publisher_started = True
         self._seed_channels()
 
         self.runner = LiveRulebookRunner(
@@ -96,16 +93,6 @@ class BaseExampleDutTest(TestCase):
         )
         self.runner.start(self.dut.telemetry)
         self._runner_started = True
-
-    def set_state(self, name: str, value: Any) -> None:
-        """Publish a named state value (e.g. current_step, a derived
-        channel, a gating flag) merged into every tagged telemetry
-        frame from now on.
-
-        This is the one sanctioned way for test steps and the @step
-        decorator to record test-case state - callers never need to
-        see the underlying TelemetryPublisher."""
-        self._publisher.set_state(name, value)
 
     def _seed_channels(self) -> None:
         """Publish a default for every state channel this test can
@@ -117,12 +104,12 @@ class BaseExampleDutTest(TestCase):
         hand-listed, since the Rulebook is already the single source
         of truth for bound names."""
         for name, default in DEFAULT_STATE.items():
-            self._publisher.set_state(name, default)
+            self.set_state(name, default)
 
-        self._publisher.set_state("test_status", "PASS")
+        self.set_state("test_status", "PASS")
         for rulebook in self.RULEBOOKS:
             for bound in rulebook.bounds:
-                self._publisher.set_state(f"{bound.label}_status", "PASS")
+                self.set_state(f"{bound.label}_status", "PASS")
 
     def main_execution(self) -> None:
         logger.info("test %s: base case has no test logic - completing immediately", self.test_id)
@@ -133,9 +120,6 @@ class BaseExampleDutTest(TestCase):
             # it relies on telemetry still flowing to notice the stop signal
             # promptly (see LiveRulebookRunner._run()).
             self.teardown_step("stop rulebook runner", self.runner.stop)
-
-        if self._publisher_started:
-            self.teardown_step("stop telemetry publisher", self._publisher.stop)
 
         if self.dut is not None:
             self.teardown_step("stop DUT", self.dut.stop)

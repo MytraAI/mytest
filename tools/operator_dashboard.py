@@ -25,18 +25,19 @@ and it needs no device-specific or DUT-specific knowledge at all.
 
 Separately, while the test is still running, the page also reflects the
 Rulebook's own *live* pass/fail state - the aggregate test_status
-LiveRulebookRunner already publishes on the tagged telemetry stream on
+LiveRulebookRunner already publishes onto the run-state stream on
 every frame (see testcases/asimov/live_rulebook_runner.py), which can
 go PASS/FAIL well before the test itself reaches any final conclusion
 (a non-fatal bound violating doesn't raise anything - see
 check_fatal_violation()'s docstring - so run()'s own try/except never
 sees it). This is a second, independent data path from set_status()/
 set_error() above: a small background thread here subscribes to the
-tagged stream directly (the same one tools/manual_gui.py already reads
-test_id/test_name from) and filters for frames matching this test's
-own test_id, purely to read that one channel - it still needs no
-device-specific knowledge, since test_status is generic Rulebook output,
-not a hardware channel.
+run-state stream directly (the same one tools/stop_test.py reads a
+test_id from) and filters for frames matching this test's own test_id,
+purely to read that one value - it still needs no device-specific
+knowledge, since test_status is generic Rulebook output, not a hardware
+channel. That stream carries only state, so this reads one small message
+rather than filtering every telemetry frame to find it.
 
 A finished test lingers on its dashboard until the operator closes it
 out (see TestCase.run()'s _wait_until_interrupted()) - but an operator
@@ -67,7 +68,7 @@ from typing import Optional
 
 import zmq
 
-from protocol.wire import DEFAULT_TAGGED_TELEMETRY_ENDPOINT, TAGGED_TELEMETRY_TOPIC, TaggedTelemetryFrame
+from protocol.wire import DEFAULT_RUN_STATE_ENDPOINT, RUN_STATE_TOPIC, RunStateFrame
 
 from .stop_test import request_stop
 
@@ -310,7 +311,7 @@ class OperatorDashboard:
         test_name: str,
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
-        tagged_endpoint: str = DEFAULT_TAGGED_TELEMETRY_ENDPOINT,
+        state_endpoint: str = DEFAULT_RUN_STATE_ENDPOINT,
     ):
         self._test_id = test_id
         self._test_name = test_name
@@ -371,10 +372,10 @@ class OperatorDashboard:
         except OSError as exc:
             logger.warning("test %s: couldn't write dashboard lock file: %s", test_id, exc)
 
-        self._tagged_endpoint = tagged_endpoint
-        self._tagged_stop_event = threading.Event()
-        self._tagged_thread = threading.Thread(
-            target=self._watch_tagged_telemetry, daemon=True, name="operator-dashboard-tagged-watch"
+        self._state_endpoint = state_endpoint
+        self._state_stop_event = threading.Event()
+        self._state_thread = threading.Thread(
+            target=self._watch_run_state, daemon=True, name="operator-dashboard-state-watch"
         )
 
     @property
@@ -383,7 +384,7 @@ class OperatorDashboard:
 
     def start(self, open_browser: bool = True) -> None:
         self._thread.start()
-        self._tagged_thread.start()
+        self._state_thread.start()
         if open_browser:
             try:
                 webbrowser.open(self.url)
@@ -404,12 +405,12 @@ class OperatorDashboard:
         with self._lock:
             self._error = message
 
-    def _watch_tagged_telemetry(self) -> None:
+    def _watch_run_state(self) -> None:
         """Background thread: reads this test's own live test_status off
-        the tagged telemetry stream - see this module's docstring for
-        why that's a separate data path from set_status()/set_error().
+        the run-state stream - see this module's docstring for why that's
+        a separate data path from set_status()/set_error().
 
-        Polls with a timeout and checks _tagged_stop_event itself, rather
+        Polls with a timeout and checks _state_stop_event itself, rather
         than blocking in recv_multipart() and relying on stop() to close
         the socket out from under it: closing a zmq socket from a
         different thread than the one blocked reading it is a real crash
@@ -422,19 +423,19 @@ class OperatorDashboard:
         to stop - avoids that class of race entirely."""
         ctx = zmq.Context.instance()
         socket = ctx.socket(zmq.SUB)
-        socket.setsockopt(zmq.SUBSCRIBE, TAGGED_TELEMETRY_TOPIC)
-        socket.connect(self._tagged_endpoint)
+        socket.setsockopt(zmq.SUBSCRIBE, RUN_STATE_TOPIC)
+        socket.connect(self._state_endpoint)
         poller = zmq.Poller()
         poller.register(socket, zmq.POLLIN)
         try:
-            while not self._tagged_stop_event.is_set():
+            while not self._state_stop_event.is_set():
                 if not poller.poll(timeout=200):  # ms; re-checks the stop event this often
                     continue
                 _, raw = socket.recv_multipart()
-                frame = TaggedTelemetryFrame.from_bytes(raw)
+                frame = RunStateFrame.from_bytes(raw)
                 if frame.test_id != self._test_id:
                     continue
-                test_status = frame.channels.get("test_status")
+                test_status = frame.state.get("test_status")
                 if test_status in ("PASS", "FAIL"):
                     with self._lock:
                         self._live_result = test_status
@@ -442,8 +443,8 @@ class OperatorDashboard:
             socket.close(linger=0)
 
     def stop(self) -> None:
-        self._tagged_stop_event.set()
-        self._tagged_thread.join(timeout=2.0)
+        self._state_stop_event.set()
+        self._state_thread.join(timeout=2.0)
         self._server.shutdown()
         self._server.server_close()
         try:

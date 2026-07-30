@@ -1,15 +1,27 @@
 """Telemetry engine entry point - the recording process, the architecture
 doc's process #5.
 
-Three jobs, and deliberately no others:
+Four jobs, and deliberately no others:
 
-1. **Record telemetry.** Every merged frame is queued to a writer task and
-   written wide, one file per device per run. See wide_csv_storage.py.
-2. **Stamp completeness.** Per run, count frames, per-device seq gaps and
-   writer drops, and amend that run's verdict once its stream goes quiet -
-   or synthesize one if the test process died. See run_recorder.py.
-3. **Advertise that it's recording.** A heartbeat a test checks before
-   starting and while running. See protocol/heartbeat.py.
+1. **Subscribe to every device.** One socket per device in
+   protocol/wire.py's TELEMETRY_ENDPOINTS, plus the testcase process's
+   run-state stream. See aggregator.py.
+2. **Attribute and record.** Each frame is routed - into the open run's
+   directory if that run declared its device, otherwise into the continuous
+   per-session record - then queued to a writer task and written wide, one
+   file per device. Exactly one destination per frame, so nothing is written
+   twice and nothing falls in a gap. See run_recorder.py for the routing rule
+   and wide_csv_storage.py for the files.
+3. **Stamp completeness.** Per run, count frames, per-device seq gaps and
+   writer drops, and amend that run's verdict once its state stream goes quiet
+   - or synthesize one if the test process died. See run_recorder.py.
+4. **Advertise that it's recording, and what it covers.** A heartbeat a test
+   checks before starting and while running, carrying the device set so a test
+   can't declare a device nothing is recording. See protocol/heartbeat.py.
+
+Note what the engine does *not* do: no telemetry is relayed to it by the
+testcase process. Frames arrive straight from each driver, so a test that
+crashes costs its state context and nothing else.
 
 It deliberately does *not* evaluate Rulebooks. Pass/fail has one author, the
 test process, which records its own transition timeline in the verdict; a
@@ -28,14 +40,15 @@ import logging
 import signal
 from datetime import datetime
 from pathlib import Path
+from typing import Sequence
 
 from protocol import heartbeat
 from protocol.paths import DEFAULT_OUTPUT_DIR
-from protocol.wire import TaggedTelemetryFrame
+from protocol.wire import RunStateFrame
 
 from .aggregator import Aggregator
 from .run_recorder import RunRecorder
-from .storage import MergedItem
+from .storage import WriteItem
 from .wide_csv_storage import WideCsvTelemetryStorage
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -58,40 +71,62 @@ source of a stall in the first place."""
 RECONCILE_INTERVAL_S = 1.0
 
 
-async def _consume(aggregator: Aggregator, queue: "asyncio.Queue[MergedItem]", recorder: RunRecorder) -> None:
-    """Read the merged stream and hand frames to the writer.
+async def _consume(aggregator: Aggregator, queue: "asyncio.Queue[WriteItem]", recorder: RunRecorder) -> None:
+    """Read the merged stream, decide where each frame belongs, and hand it
+    to the writer.
 
-    Accounting happens here rather than in the writer so that a frame
-    dropped for want of queue space is still counted against its run - the
-    engine knows it received it, which is the distinction completeness
-    reports.
+    This is where attribution happens. A run-state frame updates the
+    recorder's view of which run is open and what it has published; a device
+    frame is then routed by asking the recorder whether the open run claims
+    that device. State is merged into the row here, which is why the recorded
+    file still shows what the test was doing on every frame even though no
+    telemetry passes through the test process.
+
+    Accounting happens here rather than in the writer so that a frame dropped
+    for want of queue space is still counted against its run - the engine knows
+    it received it, which is the distinction completeness reports.
     """
-    dropped_raw = 0
-    next_raw_warning = 1
+    dropped_unattributed = 0
+    next_warning = 1
     async for item in aggregator.merged_stream():
-        if isinstance(item, TaggedTelemetryFrame):
-            recorder.observe(item)
+        if isinstance(item, RunStateFrame):
+            recorder.observe_state(item)
+            continue
+
+        routed = recorder.route(item.device)
+        channels = dict(item.channels)
+        test_id = None
+        if routed is not None:
+            # The open run's published state rides along on every row it
+            # claims, alongside the device's own channels.
+            test_id, state = routed
+            channels.update(state)
+            recorder.observe(item, test_id)
+
+        write_item = WriteItem(
+            device=item.device, seq=item.seq, t=item.t, channels=channels, test_id=test_id
+        )
         try:
-            queue.put_nowait(item)
+            queue.put_nowait(write_item)
         except asyncio.QueueFull:
-            if isinstance(item, TaggedTelemetryFrame):
-                recorder.note_dropped(item)  # reported per run in the verdict's completeness
+            if test_id is not None:
+                recorder.note_dropped(test_id)  # reported per run in the verdict's completeness
             else:
-                # Raw frames belong to no run, so there's nowhere to record
-                # them but the log - and sustained backpressure would mean
-                # thousands of identical lines a second, which makes the
+                # An unattributed frame belongs to no run, so there's nowhere
+                # to record it but the log - and sustained backpressure would
+                # mean thousands of identical lines a second, which makes the
                 # stall worse. Warn on an exponentially growing threshold so
                 # the first drop is immediate and the scale stays visible.
-                dropped_raw += 1
-                if dropped_raw >= next_raw_warning:
+                dropped_unattributed += 1
+                if dropped_unattributed >= next_warning:
                     logger.warning(
-                        "write queue full - %d raw frame(s) dropped so far (latest from %s)",
-                        dropped_raw, item.device,
+                        "write queue full - %d unattributed frame(s) dropped so far (latest from %s)",
+                        dropped_unattributed, item.device,
                     )
-                    next_raw_warning *= 10
+                    next_warning *= 10
 
 
-async def _write_loop(queue: "asyncio.Queue[MergedItem]", storage: WideCsvTelemetryStorage) -> None:
+async def _write_loop(queue: "asyncio.Queue[WriteItem]", storage: WideCsvTelemetryStorage) -> None:
     """Drain the queue into storage, flushing periodically."""
     last_flush = asyncio.get_running_loop().time()
     while True:
@@ -109,12 +144,20 @@ async def _write_loop(queue: "asyncio.Queue[MergedItem]", storage: WideCsvTeleme
 
 
 async def _reconcile_loop(
-    recorder: RunRecorder, output_dir: Path, stop: asyncio.Event, interval_s: float = RECONCILE_INTERVAL_S
+    recorder: RunRecorder,
+    output_dir: Path,
+    devices: Sequence[str],
+    stop: asyncio.Event,
+    interval_s: float = RECONCILE_INTERVAL_S,
 ) -> None:
     """Tick the recorder and refresh the heartbeat ~once a second, waking
-    promptly when stop is set rather than sleeping the full interval."""
+    promptly when stop is set rather than sleeping the full interval.
+
+    The heartbeat advertises which devices this engine is subscribed to, so a
+    test can confirm before it starts that everything it declares is actually
+    being recorded (see protocol/heartbeat.py)."""
     while not stop.is_set():
-        heartbeat.write_heartbeat(output_dir)
+        heartbeat.write_heartbeat(output_dir, devices)
         try:
             await recorder.reconcile()
         except Exception:
@@ -136,7 +179,7 @@ async def main(output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
     aggregator = Aggregator()
     storage = WideCsvTelemetryStorage(output_dir, session)
     recorder = RunRecorder(output_dir, storage)
-    queue: "asyncio.Queue[MergedItem]" = asyncio.Queue(maxsize=WRITE_QUEUE_SIZE)
+    queue: "asyncio.Queue[WriteItem]" = asyncio.Queue(maxsize=WRITE_QUEUE_SIZE)
 
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
@@ -148,14 +191,18 @@ async def main(output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
 
     # Publish liveness before anything else, so a test started immediately
     # after this process comes up doesn't lose the race and refuse to run.
-    heartbeat.write_heartbeat(output_dir)
-    logger.info("telemetry engine recording to %s (session %s)", output_dir, session)
+    heartbeat.write_heartbeat(output_dir, aggregator.devices)
+    logger.info(
+        "telemetry engine recording to %s (session %s), devices: %s",
+        output_dir, session, ", ".join(aggregator.devices),
+    )
 
     tasks = [
         asyncio.create_task(_consume(aggregator, queue, recorder), name="telemetry_engine_consume"),
         asyncio.create_task(_write_loop(queue, storage), name="telemetry_engine_write"),
         asyncio.create_task(
-            _reconcile_loop(recorder, output_dir, stop), name="telemetry_engine_reconcile"
+            _reconcile_loop(recorder, output_dir, aggregator.devices, stop),
+            name="telemetry_engine_reconcile",
         ),
     ]
     try:

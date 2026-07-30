@@ -25,11 +25,12 @@ preserves each device's native rate and leaves aligning them a deliberate
 query on `t`. Subdirectories rather than filename suffixes, so a device can
 gain more artifact types (status/error logs) without renaming anything.
 
-The raw stream lives outside runs/ because it carries no test_id - only the
-Telemetry Publisher tags frames - so routing it per run would mean inventing
-the raw/tagged seq correlation the architecture doc leaves open. It's the
-continuous instrument record whose point is not depending on the test
-process; recover a run's slice by time range from the verdict.
+The per-session files live outside runs/ because they hold exactly the frames
+that belong to no run: everything a device published while no test claimed it,
+including the window after a test process died and its state stream went quiet.
+A frame is written to one place or the other, never both - the engine decides
+which from the open run's declared devices (see
+telemetry_engine/run_recorder.py). Recover an unattributed slice by time range.
 """
 from __future__ import annotations
 

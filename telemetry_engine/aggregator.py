@@ -1,41 +1,49 @@
 """Telemetry Aggregator.
 
-Merges the hardware driver's raw telemetry stream with the testcase
-execution process's tagged stream into one in-process feed for
-evaluation/storage to consume.
+Subscribes to every device's telemetry stream and to the testcase process's
+run-state stream, and multiplexes them into one in-process feed for the
+engine to consume.
 
-No correlation/joining by seq happens here. Raw and tagged frames are
-multiplexed as they arrive, not paired up. A tagged frame always
-arrives after its raw counterpart, since it has to hop one extra leg
-(driver -> publisher -> aggregator, vs. driver -> aggregator directly
-for raw frames). Joining them here would mean buffering raw frames
-against a timeout - real design work that nothing needs solved yet,
-since no consumer of joined data exists. This stays a dumb multiplexer,
-same spirit as the driver's telemetry server staying "fast and dumb on
-purpose".
+One socket per device rather than one socket connected to many endpoints.
+A single ZeroMQ SUB socket can connect to several publishers and would deliver
+all of their frames, which is less code - but then a silent stream is only
+detectable as "nothing at all is arriving". Per-socket pumps keep the useful
+question answerable: *which* device went quiet while the others kept
+publishing. On a long-lived recording service that observability is worth N
+sockets.
+
+No correlation or joining happens here. Frames are multiplexed as they
+arrive; the engine decides where each one belongs by asking the run recorder,
+which learns the open run and its declared devices from the state stream.
+This stays a dumb multiplexer, same spirit as the driver's telemetry server
+staying "fast and dumb on purpose".
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Mapping, Tuple, Union
 
 import zmq
 import zmq.asyncio
 
 from protocol.wire import (
     DEFAULT_TELEMETRY_HWM,
-    DEFAULT_TAGGED_TELEMETRY_ENDPOINT,
-    DEFAULT_TELEMETRY_ENDPOINT,
-    TAGGED_TELEMETRY_TOPIC,
+    DEFAULT_RUN_STATE_ENDPOINT,
+    TELEMETRY_ENDPOINTS,
     TELEMETRY_TOPIC,
-    TaggedTelemetryFrame,
+    RUN_STATE_TOPIC,
     TelemetryFrame,
+    RunStateFrame,
 )
 
-from .storage import MergedItem
-
 logger = logging.getLogger(__name__)
+
+StreamItem = Union[TelemetryFrame, RunStateFrame]
+"""What merged_stream() yields: device frames, and the testcase process's own
+state announcements. Defined here rather than in storage.py - it is this
+component's output type, and storage never sees either of them (the engine
+turns frames into WriteItems first)."""
 
 _STALENESS_TIMEOUT_S = 5.0
 """How long a pump waits for a frame before logging that its stream has
@@ -44,57 +52,73 @@ test), the aggregator is a long-lived service: a silent stream here just
 means there's nothing to aggregate right now, so each pump logs a
 staleness warning and keeps looping, recovering on its own when frames
 resume. Bounding the receive is also what lets the pump notice
-cancellation promptly on shutdown."""
+cancellation promptly on shutdown.
+
+A device that simply isn't running is the normal case for an engine that
+subscribes to every known device, so this warns once per silent spell rather
+than per poll - see _pump's `stale` latch."""
 _STALENESS_TIMEOUT_MS = int(_STALENESS_TIMEOUT_S * 1000)
 
 
 class Aggregator:
-    """Merges the raw and tagged telemetry streams into one async feed."""
+    """Merges every device's telemetry and the run-state stream into one async feed."""
 
     def __init__(
         self,
-        raw_endpoint: str = DEFAULT_TELEMETRY_ENDPOINT,
-        tagged_endpoint: str = DEFAULT_TAGGED_TELEMETRY_ENDPOINT,
+        telemetry_endpoints: Mapping[str, str] = TELEMETRY_ENDPOINTS,
+        state_endpoint: str = DEFAULT_RUN_STATE_ENDPOINT,
     ):
-        self._raw_endpoint = raw_endpoint
-        self._tagged_endpoint = tagged_endpoint
+        self._telemetry_endpoints = dict(telemetry_endpoints)
+        self._state_endpoint = state_endpoint
         self._ctx = zmq.asyncio.Context.instance()
 
-    async def merged_stream(self) -> AsyncIterator[MergedItem]:
-        """Yield raw and tagged frames as they arrive, multiplexed, unjoined."""
-        queue: asyncio.Queue[MergedItem] = asyncio.Queue()
-        raw_task = asyncio.create_task(self._pump_raw(queue), name="aggregator-pump-raw")
-        tagged_task = asyncio.create_task(self._pump_tagged(queue), name="aggregator-pump-tagged")
+    @property
+    def devices(self) -> Tuple[str, ...]:
+        """Which devices this aggregator is subscribed to, and therefore
+        recording. Published on the engine's heartbeat so a test can confirm
+        its own declared devices are covered before it starts - see
+        protocol/heartbeat.py."""
+        return tuple(self._telemetry_endpoints)
+
+    async def merged_stream(self) -> AsyncIterator[StreamItem]:
+        """Yield device frames and run-state frames as they arrive, multiplexed."""
+        queue: asyncio.Queue[StreamItem] = asyncio.Queue()
+        tasks = [
+            asyncio.create_task(
+                self._pump_telemetry(device, endpoint, queue), name=f"aggregator-pump-{device}"
+            )
+            for device, endpoint in self._telemetry_endpoints.items()
+        ]
+        tasks.append(asyncio.create_task(self._pump_state(queue), name="aggregator-pump-state"))
         try:
             while True:
                 yield await queue.get()
         finally:
-            raw_task.cancel()
-            tagged_task.cancel()
-            await asyncio.gather(raw_task, tagged_task, return_exceptions=True)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _pump_raw(self, queue: "asyncio.Queue[MergedItem]") -> None:
+    async def _pump_telemetry(self, device: str, endpoint: str, queue: "asyncio.Queue[StreamItem]") -> None:
         socket = self._ctx.socket(zmq.SUB)
         socket.setsockopt(zmq.SUBSCRIBE, TELEMETRY_TOPIC)
         socket.setsockopt(zmq.RCVHWM, DEFAULT_TELEMETRY_HWM)
-        socket.connect(self._raw_endpoint)
-        logger.info("aggregator subscribed to raw stream at %s", self._raw_endpoint)
-        await self._pump(socket, "raw", self._raw_endpoint, queue, TelemetryFrame.from_bytes)
+        socket.connect(endpoint)
+        logger.info("aggregator subscribed to %s telemetry at %s", device, endpoint)
+        await self._pump(socket, device, endpoint, queue, TelemetryFrame.from_bytes)
 
-    async def _pump_tagged(self, queue: "asyncio.Queue[MergedItem]") -> None:
+    async def _pump_state(self, queue: "asyncio.Queue[StreamItem]") -> None:
         socket = self._ctx.socket(zmq.SUB)
-        socket.setsockopt(zmq.SUBSCRIBE, TAGGED_TELEMETRY_TOPIC)
+        socket.setsockopt(zmq.SUBSCRIBE, RUN_STATE_TOPIC)
         socket.setsockopt(zmq.RCVHWM, DEFAULT_TELEMETRY_HWM)
-        socket.connect(self._tagged_endpoint)
-        logger.info("aggregator subscribed to tagged stream at %s", self._tagged_endpoint)
-        await self._pump(socket, "tagged", self._tagged_endpoint, queue, TaggedTelemetryFrame.from_bytes)
+        socket.connect(self._state_endpoint)
+        logger.info("aggregator subscribed to the run-state stream at %s", self._state_endpoint)
+        await self._pump(socket, "test state", self._state_endpoint, queue, RunStateFrame.from_bytes)
 
     async def _pump(self, socket, label, endpoint, queue, decode) -> None:
-        """Shared pump loop for both streams: poll with a staleness
-        deadline instead of blocking forever in recv_multipart(). When a
-        stream goes silent past _STALENESS_TIMEOUT_S, log once and keep
-        looping (recovering when frames resume) rather than raising -
-        see _STALENESS_TIMEOUT_S. The `stale` latch keeps it to one
+        """Shared pump loop: poll with a staleness deadline instead of
+        blocking forever in recv_multipart(). When a stream goes silent past
+        _STALENESS_TIMEOUT_S, log once and keep looping (recovering when
+        frames resume) rather than raising. The `stale` latch keeps it to one
         warning per silent spell, and one info line when it recovers."""
         poller = zmq.asyncio.Poller()
         poller.register(socket, zmq.POLLIN)
@@ -105,13 +129,12 @@ class Aggregator:
                 if socket not in events:
                     if not stale:
                         logger.warning(
-                            "aggregator: %s stream silent for >%.1fs at %s",
-                            label, _STALENESS_TIMEOUT_S, endpoint,
+                            "aggregator: %s silent for >%.1fs at %s", label, _STALENESS_TIMEOUT_S, endpoint
                         )
                         stale = True
                     continue
                 if stale:
-                    logger.info("aggregator: %s stream resumed at %s", label, endpoint)
+                    logger.info("aggregator: %s resumed at %s", label, endpoint)
                     stale = False
                 _, payload = await socket.recv_multipart()
                 await queue.put(decode(payload))

@@ -13,19 +13,27 @@ import asyncio
 
 from protocol.paths import verdict_path
 from protocol.verdict import BoundsResult, Lifecycle, Verdict, read_verdict, write_verdict
-from protocol.wire import TaggedTelemetryFrame
+from protocol.wire import TelemetryFrame, RunStateFrame
 from telemetry_engine.run_recorder import RunRecorder
 from telemetry_engine.wide_csv_storage import WideCsvTelemetryStorage
 
 
-def frame(seq, test_id="run1", device="odrive", t=None, channels=None):
-    return TaggedTelemetryFrame(
+def frame(seq, device="odrive", t=None, channels=None):
+    """One device frame. Frames no longer carry a test_id - the engine
+    attributes them, so the run is passed to observe() separately."""
+    return TelemetryFrame(
+        seq=seq, t=float(seq) if t is None else t, channels=channels or {"a": 1.0}, device=device
+    )
+
+
+def state(test_id="run1", devices=("odrive", "daq"), values=None, t=0.0):
+    """One run-state frame - what tells the recorder a run is open."""
+    return RunStateFrame(
         test_id=test_id,
         test_name="endurance_cycle_test",
-        seq=seq,
-        t=float(seq) if t is None else t,
-        channels=channels or {"a": 1.0},
-        device=device,
+        devices=list(devices),
+        state=values or {},
+        t=t,
     )
 
 
@@ -50,9 +58,10 @@ def a_verdict(test_id="run1", **overrides):
 def test_completeness_is_stamped_onto_the_tests_own_verdict(tmp_path):
     recorder, _ = make_recorder(tmp_path)
     write_verdict(a_verdict(), tmp_path)
+    recorder.observe_state(state(), now=100.0)
 
     for seq in range(5):
-        recorder.observe(frame(seq), now=100.0)
+        recorder.observe(frame(seq), "run1", now=100.0)
     asyncio.run(recorder.reconcile(now=200.0))  # well past staleness
 
     verdict = read_verdict(verdict_path(tmp_path, "run1"))
@@ -65,9 +74,10 @@ def test_completeness_is_stamped_onto_the_tests_own_verdict(tmp_path):
 def test_seq_gaps_are_counted(tmp_path):
     recorder, _ = make_recorder(tmp_path)
     write_verdict(a_verdict(), tmp_path)
+    recorder.observe_state(state(), now=100.0)
 
     for seq in (0, 1, 5, 6):  # 2,3,4 lost in transit
-        recorder.observe(frame(seq), now=100.0)
+        recorder.observe(frame(seq), "run1", now=100.0)
     asyncio.run(recorder.reconcile(now=200.0))
 
     completeness = read_verdict(verdict_path(tmp_path, "run1")).completeness
@@ -80,10 +90,11 @@ def test_seq_is_tracked_per_device_not_globally(tmp_path):
     invent gaps every time two devices' frames interleave."""
     recorder, _ = make_recorder(tmp_path)
     write_verdict(a_verdict(), tmp_path)
+    recorder.observe_state(state(), now=100.0)
 
     for seq in range(3):
-        recorder.observe(frame(seq, device="odrive"), now=100.0)
-        recorder.observe(frame(seq, device="daq"), now=100.0)
+        recorder.observe(frame(seq, device="odrive"), "run1", now=100.0)
+        recorder.observe(frame(seq, device="daq"), "run1", now=100.0)
     asyncio.run(recorder.reconcile(now=200.0))
 
     completeness = read_verdict(verdict_path(tmp_path, "run1")).completeness
@@ -97,10 +108,11 @@ def test_writer_drops_are_counted_separately_from_transit_loss(tmp_path):
     """Two loss sources with different fixes, so they stay distinct."""
     recorder, _ = make_recorder(tmp_path)
     write_verdict(a_verdict(), tmp_path)
+    recorder.observe_state(state(), now=100.0)
 
-    recorder.observe(frame(0), now=100.0)
-    recorder.observe(frame(2), now=100.0)  # one lost in transit
-    recorder.note_dropped(frame(3))  # received but unwritable
+    recorder.observe(frame(0), "run1", now=100.0)
+    recorder.observe(frame(2), "run1", now=100.0)  # one lost in transit
+    recorder.note_dropped("run1")  # received but unwritable
     asyncio.run(recorder.reconcile(now=200.0))
 
     completeness = read_verdict(verdict_path(tmp_path, "run1")).completeness
@@ -112,9 +124,10 @@ def test_crashed_is_synthesized_when_no_verdict_was_written(tmp_path):
     """A test process killed outright never writes one - the run must still
     leave a record."""
     recorder, _ = make_recorder(tmp_path)
+    recorder.observe_state(state(), now=100.0)
 
-    recorder.observe(frame(0, t=50.0), now=100.0)
-    recorder.observe(frame(1, t=60.0), now=100.0)
+    recorder.observe(frame(0, t=50.0), "run1", now=100.0)
+    recorder.observe(frame(1, t=60.0), "run1", now=100.0)
     asyncio.run(recorder.reconcile(now=200.0))
 
     verdict = read_verdict(verdict_path(tmp_path, "run1"))
@@ -130,7 +143,8 @@ def test_a_late_verdict_is_not_shadowed_by_a_synthesized_one(tmp_path):
     records. Existence is now the whole check, so the test's own verdict
     wins whenever it lands."""
     recorder, _ = make_recorder(tmp_path)
-    recorder.observe(frame(0), now=100.0)
+    recorder.observe_state(state(), now=100.0)
+    recorder.observe(frame(0), "run1", now=100.0)
 
     # Teardown is still running at the moment staleness elapses...
     write_verdict(a_verdict(reason="stopped by operator"), tmp_path)
@@ -145,7 +159,8 @@ def test_a_late_verdict_is_not_shadowed_by_a_synthesized_one(tmp_path):
 def test_a_run_is_finalized_only_once(tmp_path):
     recorder, _ = make_recorder(tmp_path)
     write_verdict(a_verdict(), tmp_path)
-    recorder.observe(frame(0), now=100.0)
+    recorder.observe_state(state(), now=100.0)
+    recorder.observe(frame(0), "run1", now=100.0)
 
     asyncio.run(recorder.reconcile(now=200.0))
     asyncio.run(recorder.reconcile(now=300.0))  # must not synthesize a second record
@@ -155,7 +170,8 @@ def test_a_run_is_finalized_only_once(tmp_path):
 
 def test_an_active_run_is_left_alone(tmp_path):
     recorder, _ = make_recorder(tmp_path)
-    recorder.observe(frame(0), now=100.0)
+    recorder.observe_state(state(), now=100.0)
+    recorder.observe(frame(0), "run1", now=100.0)
 
     asyncio.run(recorder.reconcile(now=105.0))  # inside the staleness window
 
@@ -167,7 +183,8 @@ def test_corrupt_verdict_is_left_for_a_human_not_overwritten(tmp_path):
     path = verdict_path(tmp_path, "run1")
     path.parent.mkdir(parents=True)
     path.write_text("{corrupt")
-    recorder.observe(frame(0), now=100.0)
+    recorder.observe_state(state(), now=100.0)
+    recorder.observe(frame(0), "run1", now=100.0)
 
     asyncio.run(recorder.reconcile(now=200.0))
 
@@ -178,8 +195,8 @@ def test_flush_stamps_completeness_but_never_synthesizes(tmp_path):
     """At engine shutdown a run with no verdict may simply still be
     running, so it must not be declared crashed."""
     recorder, _ = make_recorder(tmp_path)
-    recorder.observe(frame(0, test_id="finished"), now=100.0)
-    recorder.observe(frame(0, test_id="ongoing"), now=100.0)
+    recorder.observe(frame(0), "finished", now=100.0)
+    recorder.observe(frame(0), "ongoing", now=100.0)
     write_verdict(a_verdict(test_id="finished"), tmp_path)
 
     asyncio.run(recorder.flush())
@@ -196,13 +213,14 @@ def test_a_straggler_frame_cannot_overwrite_a_finalized_record(tmp_path):
     Regression test: found in review, not by a failing run."""
     recorder, _ = make_recorder(tmp_path)
     write_verdict(a_verdict(), tmp_path)
+    recorder.observe_state(state(), now=100.0)
     for seq in range(5):
-        recorder.observe(frame(seq), now=100.0)
+        recorder.observe(frame(seq), "run1", now=100.0)
     asyncio.run(recorder.reconcile(now=200.0))
     assert read_verdict(verdict_path(tmp_path, "run1")).completeness["frame_count"] == 5
 
-    recorder.observe(frame(99), now=300.0)  # straggler
-    recorder.note_dropped(frame(100))
+    recorder.observe(frame(99), "run1", now=300.0)  # straggler
+    recorder.note_dropped("run1")
     asyncio.run(recorder.reconcile(now=400.0))
 
     assert read_verdict(verdict_path(tmp_path, "run1")).completeness["frame_count"] == 5

@@ -22,10 +22,17 @@ A Bound checks one channel against up to three constraints:
 
 Any combination may be set; all that are set are ANDed together (the
 bound is satisfied only if every constraint that's set holds). A Bound
-may also be gated on another channel's value (e.g. a test-case-published
-flag): it's only evaluated on frames where the gate condition holds.
-Frames where the gate doesn't hold, or where the bound's own channel is
-absent, simply produce no result for that frame (see Bound.evaluate()).
+may also be gated on another channel's value - a hardware channel, or a flag
+the test published via set_state(). It's only evaluated on frames where the
+gate condition holds; frames where the gate holds a different value, or where
+the bound's own channel is absent, simply produce no result for that frame. A
+gate channel that doesn't exist *at all* raises rather than silently skipping
+forever - see Bound.evaluate().
+
+Live evaluation sees both kinds of gate channel because LiveRulebookRunner
+evaluates against the union of the device's frame and the test's published
+state, read in-process from the state publisher. State never has to travel
+over the wire to be gated on.
 
 A Bound may also require `persistence_s` seconds of continuous
 violation before it actually trips (e.g. a current bound that only
@@ -105,16 +112,32 @@ class Bound:
 
     def evaluate(self, channels: Dict[str, Any]) -> Optional[bool]:
         """Return True if violated, False if satisfied, or None if this
-        bound doesn't apply to this frame (gate not met, or its channel
-        isn't present).
+        bound doesn't apply to this frame (gate held a different value, or its
+        channel isn't present).
 
         Raises UnevaluableBoundError if the channel is present but carries a
-        value that can't be compared against this bound's limits - see that
-        exception for why this must be loud rather than skipped. Note an
-        `expected`-only bound needs no ordering, so it accepts any type and
-        never raises."""
-        if self.gate_channel is not None and channels.get(self.gate_channel) != self.gate_value:
-            return None
+        value that can't be compared against this bound's limits, or if this
+        bound's `gate_channel` doesn't exist at all - see that exception for
+        why this must be loud rather than skipped. Note an `expected`-only
+        bound needs no ordering, so it accepts any type and never raises.
+
+        The gate distinction matters: a gate channel that *exists* and holds
+        some other value means the bound legitimately doesn't apply right now,
+        which is the whole point of gating. A gate channel that exists nowhere
+        means the bound can never apply, so it would sit there being silently
+        skipped on every frame while the run reported a clean pass - the same
+        false-supervision failure as a declared-but-absent channel."""
+        if self.gate_channel is not None:
+            if self.gate_channel not in channels:
+                raise UnevaluableBoundError(
+                    self.label,
+                    self.gate_channel,
+                    None,
+                    "its gate channel is not present in the frame or the test's published state, "
+                    "so this bound could never be evaluated",
+                )
+            if channels[self.gate_channel] != self.gate_value:
+                return None
         if self.channel not in channels:
             return None
 

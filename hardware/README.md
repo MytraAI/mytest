@@ -39,7 +39,7 @@ imports of each other's internals.
 ```
 Mytest/
   protocol/
-    wire.py                     shared wire schemas (CommandRequest/Reply, TelemetryFrame, TaggedTelemetryFrame) + endpoint constants
+    wire.py                     shared wire schemas (CommandRequest/Reply, TelemetryFrame, RunStateFrame) + endpoint constants
     verdict.py                  per-test verdict record shared by the testcase process and the telemetry engine
   hardware/
     backend.py                  abstract HardwareBackend interface (universal core + execute())

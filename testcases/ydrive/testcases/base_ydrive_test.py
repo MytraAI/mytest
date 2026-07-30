@@ -1,8 +1,8 @@
-"""Base test case for ydrive: starts the ODrive testbed, tags its
-telemetry via the Telemetry Publisher, and constructs (but does not
-start) a LiveRulebookRunner against RULEBOOKS. No test sequence logic
-of its own - unlike example_dut, there's no separate DUT abstraction
-here, since the ODrive IS the test's entire hardware interface.
+"""Base test case for ydrive: starts the ODrive testbed, seeds this run's
+state channels, and constructs (but does not start) a LiveRulebookRunner
+against RULEBOOKS. No test sequence logic of its own - unlike example_dut,
+there's no separate DUT abstraction here, since the ODrive IS the test's
+entire hardware interface, so DEVICES is just the testbed's.
 
 pre_test_setup() deliberately does not call self.runner.start() - a
 concrete subclass decides when live evaluation begins by calling
@@ -21,14 +21,12 @@ without hardware attached - defaults to False (real hardware).
 from __future__ import annotations
 
 import logging
-from typing import Any, List, Optional
+from typing import List, Optional
 
-from protocol.wire import DEFAULT_ODRIVE_TELEMETRY_ENDPOINT
 from testbeds.ydrive_testbed.ydrive_testbed import YdriveTestbed
 from testcases.asimov.live_rulebook_runner import LiveRulebookRunner
 from testcases.asimov.rulebook import Rulebook
 from testcases.base import TestCase
-from testcases.telemetry_publisher import TelemetryPublisher
 
 from ..channels import DEFAULT_STATE
 from ..rulebooks.ydrive_rulebook import YDRIVE_RULEBOOK
@@ -41,25 +39,20 @@ class BaseYdriveTest(TestCase):
 
     TEST_NAME = "base_ydrive_test"
     RULEBOOKS: List[Rulebook] = [YDRIVE_RULEBOOK]
+    DEVICES = YdriveTestbed.DEVICES
+    """Just the testbed's devices: ydrive is purely mechanical, so there is no
+    DUT façade with a device of its own to union in (see this module's
+    docstring)."""
 
     def __init__(self, test_id: Optional[str] = None, use_mock: bool = False, require_engine: bool = True):
         super().__init__(test_id, require_engine=require_engine)
         self._use_mock = use_mock
         self.testbed: Optional[YdriveTestbed] = None
-        self._publisher: Optional[TelemetryPublisher] = None
-        self._publisher_started = False
 
     def pre_test_setup(self) -> None:
         self.testbed = YdriveTestbed(use_mock=self._use_mock)
         self.testbed.start()
 
-        self._publisher = TelemetryPublisher(
-            test_id=self.test_id,
-            test_name=self.TEST_NAME,
-            raw_endpoint=DEFAULT_ODRIVE_TELEMETRY_ENDPOINT,
-        )
-        self._publisher.start()
-        self._publisher_started = True
         self._seed_channels()
 
         # Constructed here so it's ready the moment MainExecution starts, but
@@ -72,16 +65,6 @@ class BaseYdriveTest(TestCase):
             publisher=self._publisher,
         )
 
-    def set_state(self, name: str, value: Any) -> None:
-        """Publish a named state value (e.g. current_step, a derived
-        channel, a gating flag) merged into every tagged telemetry
-        frame from now on.
-
-        This is the one sanctioned way for test steps and the @step
-        decorator to record test-case state - callers never need to
-        see the underlying TelemetryPublisher."""
-        self._publisher.set_state(name, value)
-
     def _seed_channels(self) -> None:
         """Publish a default for every state channel this test can
         produce, so each one exists in the stream from frame 1 instead
@@ -92,12 +75,12 @@ class BaseYdriveTest(TestCase):
         hand-listed, since the Rulebook is already the single source
         of truth for bound names."""
         for name, default in DEFAULT_STATE.items():
-            self._publisher.set_state(name, default)
+            self.set_state(name, default)
 
-        self._publisher.set_state("test_status", "PASS")
+        self.set_state("test_status", "PASS")
         for rulebook in self.RULEBOOKS:
             for bound in rulebook.bounds:
-                self._publisher.set_state(f"{bound.label}_status", "PASS")
+                self.set_state(f"{bound.label}_status", "PASS")
 
     def main_execution(self) -> None:
         logger.info("test %s: base case has no test logic - completing immediately", self.test_id)
@@ -109,9 +92,6 @@ class BaseYdriveTest(TestCase):
             # promptly (see LiveRulebookRunner._run()). Safe to call even if a
             # subclass's main_execution() never called runner.start().
             self.teardown_step("stop rulebook runner", self.runner.stop)
-
-        if self._publisher_started:
-            self.teardown_step("stop telemetry publisher", self._publisher.stop)
 
         if self.testbed is not None:
             self.teardown_step("stop testbed", self.testbed.stop)

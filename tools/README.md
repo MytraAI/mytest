@@ -61,8 +61,10 @@ python -m tools.stop_test --test-id <test_id>
 ```
 
 With no `--test-id`, discovers whichever test is currently running via the
-tagged telemetry stream (there's only ever one) rather than requiring the
-operator to already know its auto-generated `test_id`. Cannot stop a test
+run-state stream (there's only ever one) rather than requiring the operator
+to already know its auto-generated `test_id`. That stream carries nothing but
+the run's identity and published state, so discovery reads one small message
+rather than filtering telemetry to find it. Cannot stop a test
 that's been killed via Task Manager, a bare `taskkill /F`, or `SIGKILL` -
 those bypass all in-process code on any OS, by design; this only helps if
 it's what's actually used to stop a test, instead of a raw kill.
@@ -70,9 +72,8 @@ it's what's actually used to stop a test, instead of a raw kill.
 Also works with `--test-id` against a test that's *already finished* but
 still lingering on its operator status page (see `operator_dashboard.py`
 below) - closes it out the same way. Auto-discovery doesn't work for that
-case, though: by the time a test is done, `post_test_teardown()` has
-already stopped its `TelemetryPublisher`, so there's no tagged frame left
-to discover a test_id from.
+case, though: by the time a test is done its run-state publisher has been
+stopped, so there's no state frame left to discover a `test_id` from.
 
 ## operator_dashboard.py
 
@@ -99,7 +100,7 @@ The header reads "Mytest Status: Running/Complete/Aborted" ("Mytest" in the
 brand's purple), and the page background/a "Result: Pass/Fail" line reflect
 pass/fail state - light green and "Pass" when passing, light red and "Fail"
 when failing. While the test is still running, both are driven by the
-Rulebook's own *live* `test_status` off the tagged telemetry stream (a
+Rulebook's own *live* `test_status` off the run-state stream (a
 non-fatal bound violating doesn't raise anything, so this can go PASS/FAIL
 before the test reaches its own conclusion); once the test finishes, its
 actual outcome takes over. A large ASCII animation in the middle of the
@@ -138,7 +139,7 @@ whatever keys show up in an incoming frame, and a command device's available
 actions are discovered live via `list_actions()` - so it works unmodified
 against any current or future testcase, including hardware this repo doesn't
 support yet. See the module's own docstring for the full design rationale
-(per-device telemetry vs. the shared tagged stream, why command values are
+(per-device telemetry vs. the run-state stream, why command values are
 edited as JSON rather than bare values, the live graph's buffering/pause
 semantics).
 
@@ -152,8 +153,9 @@ Typical session: start a test case first (e.g.
 `python -m tools.run_test --test ydrive.manual`), then launch the GUI,
 add the device's command endpoint (e.g. `tcp://127.0.0.1:5580` for the
 ODrive) via the "Add devices" panel, check channels to graph them or command
-channels to send to them. The tagged-telemetry stream (test-level context -
-`test_id`/`test_name`/Rulebook bound-status) auto-connects on startup; no
+channels to send to them. The run-state stream (test-level context -
+`test_id`/`test_name`/Rulebook bound-status/`current_step`) auto-connects on
+startup; no
 test case needs to be running for the GUI itself to open, or for raw
 per-device telemetry/command connections to work. When you're done, stop the
 test case with `python -m tools.stop_test` in a separate terminal rather than
