@@ -9,15 +9,14 @@ no device-specific knowledge anywhere in this file, so the same tool
 works unmodified against any current or future testcase, including
 hardware this repo doesn't support yet.
 
-Telemetry is deliberately per-device, not one shared stream: the tagged
-stream (protocol/wire.py's DEFAULT_TAGGED_TELEMETRY_ENDPOINT) is
-still subscribed by default - it's the only place test-level context
-(test_id/test_name, Rulebook bound-status, current_step) lives - but
-it's just one more sub-group among however many raw per-device
-telemetry subscriptions get added, since a shared/tagged stream has no
-established way to disambiguate channels across more than one device
-(that's an open architecture question above this tool's scope - see
-AI/Mytest.md). A per-device raw subscription is unambiguous by
+Telemetry is deliberately per-device: each device's own raw stream is
+subscribed separately, and the run-state stream (protocol/wire.py's
+DEFAULT_RUN_STATE_ENDPOINT) is subscribed alongside them by default as
+the one place test-level context (test_id/test_name, Rulebook
+bound-status, current_step) lives. State and telemetry are different
+streams now rather than one merged feed, which is what makes multiple
+devices unambiguous: a value's device is whichever raw subscription it
+arrived on. A per-device raw subscription is unambiguous by
 construction and works even with no test case running at all.
 
 Every telemetry channel shows its current value as plain text next to its
@@ -84,10 +83,10 @@ import zmq  # noqa: E402
 
 from hardware.clients.command_client import CommandClient, CommandClientError  # noqa: E402
 from protocol.wire import (  # noqa: E402
-    DEFAULT_TAGGED_TELEMETRY_ENDPOINT,
-    TAGGED_TELEMETRY_TOPIC,
+    DEFAULT_RUN_STATE_ENDPOINT,
+    RUN_STATE_TOPIC,
     TELEMETRY_TOPIC,
-    TaggedTelemetryFrame,
+    RunStateFrame,
     TelemetryFrame,
 )
 
@@ -96,7 +95,7 @@ from .stop_test import request_stop  # noqa: E402
 POLL_INTERVAL_MS = 100
 PLOT_REDRAW_MS = 250
 COMMAND_TIMEOUT_MS = 5000
-TAGGED_STREAM_LABEL = "tagged stream (test context)"
+RUN_STATE_LABEL = "test state (test context)"
 
 MAX_HISTORY_S = 600.0  # always buffer the largest window (10 min), regardless of what's currently displayed
 WINDOW_OPTIONS = (("10 s", 10.0), ("30 s", 30.0), ("1 min", 60.0), ("10 min", 600.0))
@@ -108,33 +107,34 @@ PLOT_COLORS = (
 
 @dataclass
 class TelemetryUpdate:
-    """One decoded frame's worth of channels, from either the tagged
+    """One decoded frame's worth of values, from either the test-state
     stream or a raw per-device subscription - both subscriber classes
     below enqueue these onto the same shared queue so the GUI thread
     handles them uniformly regardless of source."""
 
     device_label: str
     channels: Dict[str, Any]
-    test_context: Optional[Tuple[str, str]] = None  # (test_id, test_name) - tagged stream only
+    test_context: Optional[Tuple[str, str]] = None  # (test_id, test_name) - state stream only
 
 
-class TaggedTelemetrySubscriber:
-    """Subscribes to the tagged telemetry stream - there is only ever
-    one (see protocol/wire.py's DEFAULT_TAGGED_TELEMETRY_ENDPOINT),
-    carrying test-level context alongside whichever single device's raw
-    channels that test happens to be watching. Runs on a background
-    thread; Tkinter isn't thread-safe, so decoded updates are pushed
-    onto update_queue rather than touching widgets directly - see
-    ManualGuiApp._poll."""
+class RunStateSubscriber:
+    """Subscribes to the run-state stream - there is only ever one (see
+    protocol/wire.py's DEFAULT_RUN_STATE_ENDPOINT), carrying the running
+    test's identity and everything it has published: current step, per-bound
+    status, derived values. No hardware channels, which is why this is a
+    separate sub-group from the per-device raw subscriptions rather than a
+    merged feed. Runs on a background thread; Tkinter isn't thread-safe, so
+    decoded updates are pushed onto update_queue rather than touching widgets
+    directly - see ManualGuiApp._poll."""
 
     def __init__(self, endpoint: str, update_queue: "queue.Queue[TelemetryUpdate]"):
         self._ctx = zmq.Context.instance()
         self._socket = self._ctx.socket(zmq.SUB)
-        self._socket.setsockopt(zmq.SUBSCRIBE, TAGGED_TELEMETRY_TOPIC)
+        self._socket.setsockopt(zmq.SUBSCRIBE, RUN_STATE_TOPIC)
         self._socket.connect(endpoint)
         self._update_queue = update_queue
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True, name="tagged-telemetry-subscriber")
+        self._thread = threading.Thread(target=self._run, daemon=True, name="test-state-subscriber")
 
     def start(self) -> None:
         self._thread.start()
@@ -149,15 +149,15 @@ class TaggedTelemetrySubscriber:
                 _, raw = self._socket.recv_multipart()
             except zmq.ZMQError:
                 return
-            frame = TaggedTelemetryFrame.from_bytes(raw)
+            frame = RunStateFrame.from_bytes(raw)
             self._update_queue.put(
-                TelemetryUpdate(TAGGED_STREAM_LABEL, frame.channels, (frame.test_id, frame.test_name))
+                TelemetryUpdate(RUN_STATE_LABEL, frame.state, (frame.test_id, frame.test_name))
             )
 
 
 class RawTelemetrySubscriber:
     """Subscribes directly to one device's own raw telemetry stream
-    (TELEMETRY_TOPIC/TelemetryFrame - not the tagged one). Unambiguous
+    (TELEMETRY_TOPIC/TelemetryFrame - not the state stream). Unambiguous
     by construction: tied to exactly one device's endpoint, added the
     same way command devices are. Works even with no test case running
     at all, since the raw stream comes straight from the hardware
@@ -193,7 +193,7 @@ class RawTelemetrySubscriber:
 @dataclass
 class ChannelGroup:
     """One collapsible sub-group in the available-channels list - one
-    per device/endpoint (or the tagged stream), under either the
+    per device/endpoint (or the run-state stream), under either the
     Telemetry or Command top-level section. collapsed is remembered
     independently per group and is never forced back open by a redraw -
     only an explicit click on its own header toggles it."""
@@ -260,13 +260,13 @@ class ManualGuiApp:
         self._section_collapsed = {"telemetry": False, "command": False}
         self._current_test_id: Optional[str] = None
 
-        self._telemetry_groups[TAGGED_STREAM_LABEL] = ChannelGroup(label=TAGGED_STREAM_LABEL)
+        self._telemetry_groups[RUN_STATE_LABEL] = ChannelGroup(label=RUN_STATE_LABEL)
 
         self._build_ui(root)
 
-        tagged_subscriber = TaggedTelemetrySubscriber(self._tagged_endpoint_var.get(), self._update_queue)
-        tagged_subscriber.start()
-        self._telemetry_subscribers[TAGGED_STREAM_LABEL] = tagged_subscriber
+        state_subscriber = RunStateSubscriber(self._state_endpoint_var.get(), self._update_queue)
+        state_subscriber.start()
+        self._telemetry_subscribers[RUN_STATE_LABEL] = state_subscriber
 
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         root.after(POLL_INTERVAL_MS, self._poll)
@@ -293,12 +293,12 @@ class ManualGuiApp:
             side="left", padx=(8, 0)
         )
 
-        tagged_row = ttk.Frame(left)
-        tagged_row.pack(fill="x", pady=(0, 4))
-        ttk.Label(tagged_row, text="tagged endpoint:").pack(side="left")
-        self._tagged_endpoint_var = tk.StringVar(value=DEFAULT_TAGGED_TELEMETRY_ENDPOINT)
-        ttk.Entry(tagged_row, textvariable=self._tagged_endpoint_var, width=22).pack(side="left", padx=4)
-        ttk.Button(tagged_row, text="Reconnect", command=self._reconnect_tagged).pack(side="left")
+        state_row = ttk.Frame(left)
+        state_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(state_row, text="run-state endpoint:").pack(side="left")
+        self._state_endpoint_var = tk.StringVar(value=DEFAULT_RUN_STATE_ENDPOINT)
+        ttk.Entry(state_row, textvariable=self._state_endpoint_var, width=22).pack(side="left", padx=4)
+        ttk.Button(state_row, text="Reconnect", command=self._reconnect_state).pack(side="left")
 
         self._build_add_rows(left)
         self._build_channel_list(left)
@@ -623,29 +623,29 @@ class ManualGuiApp:
 
     # --- adding devices ---
 
-    def _reconnect_tagged(self) -> None:
-        """Stops and restarts the tagged-stream subscription against
+    def _reconnect_state(self) -> None:
+        """Stops and restarts the test-state subscription against
         whatever endpoint is currently in the field - there's only ever
         one of these (see this module's docstring), so unlike raw
         telemetry/command devices this replaces the existing
         subscription rather than adding another one."""
-        endpoint = self._tagged_endpoint_var.get().strip()
+        endpoint = self._state_endpoint_var.get().strip()
         if not endpoint:
             return
         try:
-            subscriber = TaggedTelemetrySubscriber(endpoint, self._update_queue)
+            subscriber = RunStateSubscriber(endpoint, self._update_queue)
             subscriber.start()
         except Exception as exc:
-            self._add_error_var.set(f"couldn't reconnect tagged stream to {endpoint}: {exc}")
+            self._add_error_var.set(f"couldn't reconnect run-state stream to {endpoint}: {exc}")
             return
-        old = self._telemetry_subscribers.get(TAGGED_STREAM_LABEL)
+        old = self._telemetry_subscribers.get(RUN_STATE_LABEL)
         if old is not None:
             old.stop()
-        self._telemetry_subscribers[TAGGED_STREAM_LABEL] = subscriber
+        self._telemetry_subscribers[RUN_STATE_LABEL] = subscriber
         self._add_error_var.set("")
 
     def _on_stop_test(self) -> None:
-        """Requests a clean stop of whichever test_id the tagged stream
+        """Requests a clean stop of whichever test_id the state stream
         last reported - reuses tools/stop_test.py's own request_stop()
         rather than re-implementing the marker-file convention here, so
         this button and the standalone stop_test.py CLI can never drift

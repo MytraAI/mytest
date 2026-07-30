@@ -1,5 +1,6 @@
-"""Wire schemas and endpoint constants for the command server (REQ/REP)
-and telemetry server/publisher (PUB/SUB).
+"""Wire schemas and endpoint constants for the command server (REQ/REP),
+the per-device telemetry servers (PUB/SUB), and the testcase process's
+run-state stream (PUB/SUB).
 
 Both speak JSON payloads over ZeroMQ. Keeping the schemas in one module
 means every process on the wire - hardware drivers, the testcase
@@ -7,14 +8,23 @@ execution process, the telemetry engine - imports the same contract
 instead of hand-rolling its own message shapes.
 
 Lives under protocol/ rather than hardware/ because most of what's here
-isn't hardware-specific: TaggedTelemetryFrame and
-DEFAULT_TAGGED_TELEMETRY_ENDPOINT are a contract between the testcase
-execution process (which publishes) and the telemetry engine (which
-consumes), neither of which is a hardware driver. protocol/ is the one
-home for anything two processes have to agree on - see the package's
-sibling verdict.py, and AI/Mytest.md's process architecture, whose rule
-is that processes communicate only through defined interfaces, never by
-importing each other.
+isn't hardware-specific: RunStateFrame and DEFAULT_RUN_STATE_ENDPOINT
+are a contract between the testcase execution process (which publishes)
+and the telemetry engine and operator tooling (which consume), none of
+which is a hardware driver. protocol/ is the one home for anything two
+processes have to agree on - see the package's sibling verdict.py, and
+AI/Mytest.md's process architecture, whose rule is that processes
+communicate only through defined interfaces, never by importing each
+other.
+
+**Telemetry is relayed by nobody.** Each driver publishes its own frames
+once; the telemetry engine subscribes to every device directly and
+attributes frames to a run itself, using the run-state stream to learn
+which run is open and which devices belong to it. The testcase process
+therefore never republishes telemetry - it only publishes its own small
+state stream. That is why there is no "tagged" frame type here: the
+engine merges state into the rows it writes, so the relay hop, and the
+double-write it implied, don't exist.
 """
 from __future__ import annotations
 
@@ -22,14 +32,20 @@ import json
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 # Default ZeroMQ endpoints. Override via CLI args / config for
 # multi-stand deployments or when client and server run on different
 # hosts.
 DEFAULT_COMMAND_ENDPOINT = "tcp://127.0.0.1:5555"
 DEFAULT_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5556"
-DEFAULT_TAGGED_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5557"
+
+# The testcase execution process's own state stream - one small message at
+# STATE_PUBLISH_INTERVAL_S carrying the open run's identity, the devices it
+# claims, and whatever the test has published via set_state(). Consumed by the
+# telemetry engine (to attribute frames to a run) and by operator tooling (to
+# show live status and to discover the running test's id).
+DEFAULT_RUN_STATE_ENDPOINT = "tcp://127.0.0.1:5557"
 
 # A power supply is a separate device/process from the DAQ above, so it
 # gets its own port pair - both can run simultaneously.
@@ -54,9 +70,22 @@ DEFAULT_ODRIVE_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5581"
 # subscriber ever needs to filter server-side.
 TELEMETRY_TOPIC = b"telem"
 
-# Topic used on the Telemetry Publisher's tagged PUB socket - the testcase
-# execution process's outbound feed to the Telemetry Aggregator.
-TAGGED_TELEMETRY_TOPIC = b"telem_tagged"
+# Topic used on the testcase process's test-state PUB socket.
+RUN_STATE_TOPIC = b"run_state"
+
+STATE_PUBLISH_INTERVAL_S = 0.05
+"""How often the testcase process republishes its state, unconditionally.
+
+Deliberately not change-triggered. Publishing on a fixed tick makes one
+mechanism serve three purposes at once: it propagates a change (within one
+tick), it is the keepalive that tells the engine the run is still open, and it
+heals ZeroMQ's slow-joiner drop - a subscriber that missed the first message
+gets the next one 50 ms later rather than waiting for the test to change
+something.
+
+20 Hz is well above any device's frame rate here, so the state the engine
+merges into a row is never more than one tick stale, and the traffic is a few
+hundred bytes per message against telemetry measured in kilobytes per frame."""
 
 # Which device a telemetry frame came from, carried on the frame itself
 # rather than inferred from which endpoint a subscriber happened to
@@ -76,6 +105,25 @@ DEVICE_DAQ = "daq"
 DEVICE_POWER_SUPPLY = "power_supply"
 DEVICE_DUT = "dut"
 DEVICE_ODRIVE = "odrive"
+
+# Every device this stand knows about, and where it publishes telemetry.
+#
+# One mapping rather than a constant per device, because two callers need to
+# enumerate rather than name: the telemetry engine subscribes to *all* of them
+# (its record's job is breadth - it records whatever is streaming, test or no
+# test), and a test's declared device set is validated against these keys
+# before it starts, so a test can't declare a device nothing is recording.
+#
+# A testbed or DUT façade declares which of these devices it owns (see their
+# DEVICES tuples); it never names an endpoint, because a port is transport
+# detail and the device name is what already travels on every frame and names
+# the device's output directory.
+TELEMETRY_ENDPOINTS: Dict[str, str] = {
+    DEVICE_DAQ: DEFAULT_TELEMETRY_ENDPOINT,
+    DEVICE_POWER_SUPPLY: DEFAULT_POWER_SUPPLY_TELEMETRY_ENDPOINT,
+    DEVICE_DUT: DEFAULT_DUT_TELEMETRY_ENDPOINT,
+    DEVICE_ODRIVE: DEFAULT_ODRIVE_TELEMETRY_ENDPOINT,
+}
 
 # High-water marks. ZeroMQ's default is 1000 *messages* on both ends, and
 # PUB silently drops once its queue is full. Expressed here in seconds of
@@ -167,55 +215,52 @@ class TelemetryFrame:
 
 
 @dataclass
-class TaggedTelemetryFrame:
-    """A TelemetryFrame republished by the Telemetry Publisher with
-    test-case context attached.
+class RunStateFrame:
+    """The testcase execution process's periodic announcement of itself.
 
-    `seq` is carried over unchanged from the originating TelemetryFrame
-    (not reassigned), so a subscriber can correlate a tagged frame with
-    its raw counterpart directly.
+    Published at STATE_PUBLISH_INTERVAL_S for the whole life of a run, from
+    before PreTestSetup until after PostTestTeardown, and consumed by two
+    kinds of reader:
 
-    `test_id` is a random identifier unique to one test run. `test_name`
-    is the stable identifier of the test *type* (e.g. a TestCase
-    subclass's TEST_NAME) - evaluation looks up which Rulebooks apply to
-    a frame by `test_name`, since `test_id` differs on every run.
+    - The telemetry engine, which uses it to decide where a device's frames
+      belong. `test_id` names the open run's directory, `devices` is the set of
+      devices that run claims, and `state` is merged into the rows the engine
+      writes - so the recorded file still shows what the test was doing on
+      every frame without any telemetry passing through the test process.
+    - Operator tooling, which wants only this: the dashboard reads
+      `state["test_status"]`, the stop tool reads `test_id`, the manual GUI
+      reads test identity and per-bound status.
 
-    `channels` may include test-case-published state values (e.g. a
-    gating flag) merged in alongside real hardware channels - see
-    TelemetryPublisher.set_state()."""
+    The stream's *existence* is what says a run is open; its absence is what
+    says the run is over. There is deliberately no start or end marker: the
+    verdict file already distinguishes a clean end from a crash, more reliably
+    than a message could, and finalizing on a marker would truncate frames
+    still in the engine's write queue. See run_recorder.py.
+
+    `test_name` is the stable identifier of the test *type* (a TestCase
+    subclass's TEST_NAME); `test_id` is random per run. Both travel because
+    offline replay looks up rulebooks by name while storage keys by id."""
 
     test_id: str
     test_name: str
-    seq: int
+    devices: List[str]
+    state: Dict[str, Any]
     t: float
-    channels: Dict[str, Any]
-    device: str = UNKNOWN_DEVICE
 
     def to_bytes(self) -> bytes:
         return json.dumps(asdict(self)).encode("utf-8")
 
     @classmethod
-    def from_bytes(cls, raw: bytes) -> "TaggedTelemetryFrame":
+    def from_bytes(cls, raw: bytes) -> "RunStateFrame":
         data = json.loads(raw.decode("utf-8"))
         return cls(
             test_id=data["test_id"],
             test_name=data["test_name"],
-            seq=data["seq"],
+            devices=list(data.get("devices", ())),
+            state=data.get("state", {}),
             t=data["t"],
-            channels=data["channels"],
-            device=data.get("device", UNKNOWN_DEVICE),
         )
 
     @classmethod
-    def from_telemetry_frame(
-        cls, frame: TelemetryFrame, test_id: str, test_name: str, extra_channels: Optional[Dict[str, Any]] = None
-    ) -> "TaggedTelemetryFrame":
-        channels = {**frame.channels, **(extra_channels or {})}
-        return cls(
-            test_id=test_id,
-            test_name=test_name,
-            seq=frame.seq,
-            t=frame.t,
-            channels=channels,
-            device=frame.device,
-        )
+    def now(cls, test_id: str, test_name: str, devices: Sequence[str], state: Dict[str, Any]) -> "RunStateFrame":
+        return cls(test_id=test_id, test_name=test_name, devices=list(devices), state=dict(state), t=time.time())

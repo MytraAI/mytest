@@ -16,9 +16,12 @@ instead of a raw kill - that's a real limitation to know about, not
 something more code here can fix.
 
 With no --test-id, discovers whichever test is currently running via
-the tagged telemetry stream (there's only ever one - see
-protocol/wire.py's DEFAULT_TAGGED_TELEMETRY_ENDPOINT) rather than
-requiring the operator to already know its auto-generated test_id.
+the run-state stream (there's only ever one - see protocol/wire.py's
+DEFAULT_RUN_STATE_ENDPOINT) rather than requiring the operator to
+already know its auto-generated test_id. That stream exists for the
+whole life of a run and carries nothing but the run's identity and
+state, so discovery is one small message rather than filtering a
+telemetry firehose.
 
 Lives in tools/, not testcases/, alongside run_test.py and
 manual_gui.py - the operator-facing entry points, as opposed to
@@ -38,7 +41,7 @@ from pathlib import Path
 
 import zmq
 
-from protocol.wire import DEFAULT_TAGGED_TELEMETRY_ENDPOINT, TAGGED_TELEMETRY_TOPIC, TaggedTelemetryFrame
+from protocol.wire import DEFAULT_RUN_STATE_ENDPOINT, RUN_STATE_TOPIC, RunStateFrame
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -47,24 +50,24 @@ DEFAULT_DISCOVERY_TIMEOUT_S = 5.0
 
 
 def discover_running_test_id(endpoint: str, timeout_s: float) -> str:
-    """Blocks for one tagged telemetry frame and returns its test_id -
-    there's only ever one test running at a time on this test stand, so
-    whichever test_id shows up first is the one to stop."""
+    """Blocks for one run-state frame and returns its test_id - there's
+    only ever one test running at a time on this test stand, so whichever
+    test_id shows up first is the one to stop."""
     ctx = zmq.Context.instance()
     socket = ctx.socket(zmq.SUB)
-    socket.setsockopt(zmq.SUBSCRIBE, TAGGED_TELEMETRY_TOPIC)
+    socket.setsockopt(zmq.SUBSCRIBE, RUN_STATE_TOPIC)
     socket.setsockopt(zmq.RCVTIMEO, int(timeout_s * 1000))
     socket.connect(endpoint)
     try:
         _, raw = socket.recv_multipart()
     except zmq.error.Again as exc:
         raise RuntimeError(
-            f"no tagged telemetry frame seen within {timeout_s:.1f}s on {endpoint} - "
+            f"no run-state frame seen within {timeout_s:.1f}s on {endpoint} - "
             "is a test case actually running? pass --test-id explicitly if you already know it"
         ) from exc
     finally:
         socket.close(linger=0)
-    return TaggedTelemetryFrame.from_bytes(raw).test_id
+    return RunStateFrame.from_bytes(raw).test_id
 
 
 def request_stop(test_id: str) -> Path:
@@ -80,17 +83,17 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--test-id", default=None, help="stop this specific test_id instead of auto-discovering it")
     parser.add_argument(
-        "--tagged-endpoint",
-        default=DEFAULT_TAGGED_TELEMETRY_ENDPOINT,
-        help="tagged telemetry endpoint to discover the running test_id from, if --test-id isn't given",
+        "--state-endpoint",
+        default=DEFAULT_RUN_STATE_ENDPOINT,
+        help="run-state endpoint to discover the running test_id from, if --test-id isn't given",
     )
     parser.add_argument("--discovery-timeout", type=float, default=DEFAULT_DISCOVERY_TIMEOUT_S)
     args = parser.parse_args()
 
     test_id = args.test_id
     if test_id is None:
-        logger.info("no --test-id given - discovering the running test from %s", args.tagged_endpoint)
-        test_id = discover_running_test_id(args.tagged_endpoint, args.discovery_timeout)
+        logger.info("no --test-id given - discovering the running test from %s", args.state_endpoint)
+        test_id = discover_running_test_id(args.state_endpoint, args.discovery_timeout)
 
     path = request_stop(test_id)
     logger.info("stop requested for test %s (%s)", test_id, path)

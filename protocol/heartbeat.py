@@ -25,8 +25,9 @@ import os
 import tempfile
 import time
 from dataclasses import dataclass
+from dataclasses import field as dataclasses_field
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,16 @@ class EngineHeartbeat:
     pid: int
     output_dir: str
     updated_at: float
+    devices: List[str] = dataclasses_field(default_factory=list)
+    """Which devices this engine is subscribed to and therefore recording.
+
+    A test validates its own declared device set against this before it starts
+    (TestCase.require_recording_started), so declaring a device nothing is
+    recording fails at setup rather than producing a run directory that is
+    quietly missing that device - the same principle as declared channels
+    having to exist. Like output_dir, this is infrastructure state the engine is
+    the authority on, not a result computed about the DUT, which is why it can
+    travel on the heartbeat without violating the no-feedback rule above."""
 
     def age_s(self, now: Optional[float] = None) -> float:
         return (time.time() if now is None else now) - self.updated_at
@@ -58,13 +69,15 @@ class EngineHeartbeat:
         return self.age_s(now) < stale_after_s
 
 
-def write_heartbeat(output_dir: Path, path: Optional[Path] = None) -> None:
+def write_heartbeat(output_dir: Path, devices: Sequence[str] = (), path: Optional[Path] = None) -> None:
     """Publish/refresh the heartbeat. Atomic (write-temp-then-replace) so
     a reader never sees a half-written file. Best-effort: logs rather than
     raises, since failing to advertise liveness must not take down an
     otherwise healthy engine."""
     target = heartbeat_path() if path is None else path
-    payload = EngineHeartbeat(pid=os.getpid(), output_dir=str(output_dir), updated_at=time.time())
+    payload = EngineHeartbeat(
+        pid=os.getpid(), output_dir=str(output_dir), updated_at=time.time(), devices=list(devices)
+    )
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(f".{os.getpid()}.tmp")
@@ -83,7 +96,10 @@ def read_heartbeat(path: Optional[Path] = None) -> Optional[EngineHeartbeat]:
     try:
         data = json.loads(target.read_text())
         return EngineHeartbeat(
-            pid=int(data["pid"]), output_dir=str(data["output_dir"]), updated_at=float(data["updated_at"])
+            pid=int(data["pid"]),
+            output_dir=str(data["output_dir"]),
+            updated_at=float(data["updated_at"]),
+            devices=[str(device) for device in data.get("devices", ())],
         )
     except (OSError, ValueError, KeyError, TypeError):
         return None

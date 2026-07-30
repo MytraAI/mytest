@@ -19,13 +19,17 @@ from testcases.asimov.rulebook import Bound, Rulebook
 
 
 class FakePublisher:
-    """Stands in for TelemetryPublisher - the runner only calls set_state."""
+    """Stands in for RunStatePublisher - the runner sets state and reads a
+    snapshot back to merge into what it evaluates."""
 
     def __init__(self):
         self.state = {}
 
     def set_state(self, name, value):
         self.state[name] = value
+
+    def state_snapshot(self):
+        return dict(self.state)
 
 
 def make_runner(*bounds):

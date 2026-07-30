@@ -8,15 +8,18 @@ and the long form repeated the test_id and channel name for every value.
 Measured ~15x smaller on a ~100-channel device, and it opens in a
 spreadsheet without a pivot.
 
-Routing. One instance fans out: tagged frames to
-<output>/runs/<test_id>/<device>/telemetry.csv, raw (untagged) frames to
-<output>/raw/<device>/telemetry_<session>.csv (see protocol/paths.py). Files
-open lazily and in append mode, so an engine restart mid-run keeps adding to
-the same file rather than truncating it or starting a second one.
+Routing. One instance fans out on the destination each WriteItem already
+names: items carrying a test_id go to
+<output>/runs/<test_id>/<device>/telemetry.csv, items without one go to
+<output>/raw/<device>/telemetry_<session>.csv (see protocol/paths.py). This
+layer does not decide which - the engine does, from the open run's declared
+devices (see run_recorder.py). Files open lazily and in append mode, so an
+engine restart mid-run keeps adding to the same file rather than truncating it
+or starting a second one.
 
 The header problem. A wide file's columns are fixed when the header is
-written, but the full channel set isn't knowable from frame one - the tagged
-stream merges in test-published state channels that appear only once
+written, but the full channel set isn't knowable from frame one - a
+run-attributed row carries test-published state channels that appear only once
 something sets them. So each writer buffers HEADER_SAMPLE_FRAMES frames,
 takes the union of their channel names, then writes header and buffer. After
 that the schema is fixed: a later channel is logged once and dropped, and a
@@ -31,9 +34,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, TextIO, Tuple
 
 from protocol.paths import raw_telemetry_path, run_telemetry_path
-from protocol.wire import UNKNOWN_DEVICE, TaggedTelemetryFrame
+from protocol.wire import UNKNOWN_DEVICE
 
-from .storage import MergedItem, TelemetryStorage
+from .storage import TelemetryStorage, WriteItem
 
 logger = logging.getLogger(__name__)
 
@@ -172,9 +175,9 @@ class WideCsvTelemetryStorage(TelemetryStorage):
             self._record(writer)
         return {str(path): rows for path, rows in sorted(self._written.items())}
 
-    async def write(self, item: MergedItem) -> None:
-        device = getattr(item, "device", UNKNOWN_DEVICE) or UNKNOWN_DEVICE
-        test_id = item.test_id if isinstance(item, TaggedTelemetryFrame) else None
+    async def write(self, item: WriteItem) -> None:
+        device = item.device or UNKNOWN_DEVICE
+        test_id = item.test_id
         writer = self._writers.get((test_id, device))
         if writer is None:
             path = (
@@ -193,7 +196,13 @@ class WideCsvTelemetryStorage(TelemetryStorage):
     def close_run(self, test_id: str) -> None:
         """Close just this run's files, once its stream has gone quiet, so
         a finished run's record is complete on disk without waiting for
-        the engine itself to shut down."""
+        the engine itself to shut down.
+
+        A frame for this run still sitting in the engine's write queue when this
+        runs will recreate its writer and append to the same file - correct, not
+        a leak of data, but that writer then stays open until engine shutdown
+        and row_counts() will report only the rows written after the reopen.
+        Harmless today; worth knowing before anyone treats close_run as final."""
         for key in [k for k in self._writers if k[0] == test_id]:
             writer = self._writers.pop(key)
             writer.close()

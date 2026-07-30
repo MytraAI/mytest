@@ -16,9 +16,10 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from hardware.mock_power_supply.mock_power_supply_command_client import PowerSupplyCommandClient
+from protocol.wire import DEVICE_DAQ, DEVICE_POWER_SUPPLY
 
 STARTUP_DELAY_S = 0.5
 
@@ -33,6 +34,15 @@ class ExampleTestbed:
             testbed.power_supply.enable_output(True)
             ...  # drivers are up, and the power supply is controllable, for the duration of this block
     """
+
+    DEVICES: Tuple[str, ...] = (DEVICE_DAQ, DEVICE_POWER_SUPPLY)
+    """The devices whose driver processes this testbed owns. Declared here
+    because this is what starts them; the test case unions this with its DUT
+    façade's declaration and publishes the result, so the telemetry engine
+    records these devices into the run's directory. Deliberately not including
+    the DUT - that's ExampleDut's to declare, and this testbed knowing about it
+    would breach the split it exists to maintain. See testcases/base.py's
+    DEVICES."""
 
     def __init__(self) -> None:
         self._processes: List[subprocess.Popen] = []

@@ -16,12 +16,16 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from hardware.clients.telemetry_client import TelemetryClient
 from hardware.odrive.odrive_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
 from hardware.odrive.odrive_command_client import OdriveCommandClient
-from protocol.wire import DEFAULT_ODRIVE_COMMAND_ENDPOINT, DEFAULT_ODRIVE_TELEMETRY_ENDPOINT
+from protocol.wire import (
+    DEFAULT_ODRIVE_COMMAND_ENDPOINT,
+    DEFAULT_ODRIVE_TELEMETRY_ENDPOINT,
+    DEVICE_ODRIVE,
+)
 
 STARTUP_DELAY_S = 0.5
 
@@ -36,6 +40,13 @@ class YdriveTestbed:
             testbed.command.set_axis_state("CLOSED_LOOP_CONTROL")
             ...  # the driver is up, and the ODrive is controllable, for the duration of this block
     """
+
+    DEVICES: Tuple[str, ...] = (DEVICE_ODRIVE,)
+    """The devices whose driver processes this testbed owns. Declared here
+    because this is what starts them; the test case unions this with its DUT
+    façade's declaration (there is none for ydrive) and publishes the result, so
+    the telemetry engine knows whose frames belong to the run. See
+    testcases/base.py's DEVICES."""
 
     def __init__(self, use_mock: bool = False, serial_number: Optional[str] = None) -> None:
         self._use_mock = use_mock

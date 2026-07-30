@@ -43,12 +43,12 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from hardware.mock_dut.mock_dut_command_client import DutCommandClient
 from hardware.clients.telemetry_client import TelemetryClient
 from hardware.mock_dut.mock_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
-from protocol.wire import DEFAULT_DUT_TELEMETRY_ENDPOINT
+from protocol.wire import DEFAULT_DUT_TELEMETRY_ENDPOINT, DEVICE_DUT
 
 STARTUP_DELAY_S = 0.5
 
@@ -63,6 +63,12 @@ class ExampleDut:
             dut.set_gains(position_gain=2.0, velocity_gain=5.0, velocity_integrator=0.1)
             print(dut.get_position(), dut.get_velocity(), dut.get_current())
     """
+
+    DEVICES: Tuple[str, ...] = (DEVICE_DUT,)
+    """The device whose driver process this façade owns - the product under
+    test itself. Declared here because this is what starts it; the test case
+    unions this with its testbed's declaration. See testcases/base.py's
+    DEVICES."""
 
     def __init__(self) -> None:
         self._process: Optional[subprocess.Popen] = None
