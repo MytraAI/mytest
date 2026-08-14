@@ -15,7 +15,7 @@ This process is generic across device types, not DAQ-specific.
 generic `execute(action, **params)` for anything device-specific.
 `command_server.py`/`telemetry_server.py` never need to change no
 matter what device gets added; only a new backend (and, for
-ergonomics, a thin command-client subclass) is needed. Four device
+ergonomics, a thin command-client subclass) is needed. Five device
 folders exist today: `mock_daq`, `mock_power_supply`, and `mock_dut`
 each hold a single simulated backend (`MockDutBackend` being the DUT
 itself - a first-order position/velocity/current servo approximation,
@@ -24,9 +24,13 @@ readbacks). `odrive/` is the first real (non-simulated) device: it
 holds both `OdriveBackend` (real, talks to an actual ODrive motor
 controller over USB via the official `odrive` package) and
 `MockOdriveBackend` (simulated, for local development without hardware
-attached) side by side - see that folder's own section below. Each
-device runs as its own process, on its own ports - see "Running it"
-below.
+attached) side by side - see that folder's own section below.
+`cpx400dp/` is the second real device and the first reached over
+**ethernet** rather than a local bus: a TTi CPX400DP dual-output bench
+power supply, spoken to as line-oriented SCPI over a raw TCP socket.
+Unlike `odrive/` it has **no** mock backend - see its section below for
+why. Each device runs as its own process, on its own ports - see
+"Running it" below.
 
 ## Layout
 
@@ -67,6 +71,12 @@ Mytest/
       odrive_channels.py           TELEMETRY_CHANNELS/COMMAND_CHANNELS - curated (not exhaustive): 99 telemetry + 71 command channels a test author would realistically use or need for diagnosis, every one verified to exist on the real board at connect() - see its docstring for what was deliberately cut
       odrive_command_client.py     OdriveCommandClient - named sugar for ODrive actions, layered on the generic CommandClient
       main.py                      entry point: real backend by default, --mock to run MockOdriveBackend instead, calls runner.run()
+    cpx400dp/
+      cpx400dp_backend.py          Cpx400dpBackend - REAL, a TTi CPX400DP dual-output bench supply over ethernet (raw socket, port 9221). No mock counterpart.
+      transport.py                 TtiSocketTransport - the line protocol alone (LF out, CRLF back), serialized on one lock; the seam tests substitute
+      cpx400dp_channels.py         TELEMETRY_CHANNELS/COMMAND_CHANNELS - 41 telemetry channels in four acquisition tiers, and all 66 documented commands
+      cpx400dp_command_client.py   Cpx400dpCommandClient - named sugar per command channel; 10 s default timeout, since `with verify` blocks 5 s
+      main.py                      entry point: always real hardware, --host/--port/--max-voltage/--max-current/--interface-lock, calls runner.run()
     clients/
       command_client.py            generic CommandClient - universal core + execute() + verify_actions()
       telemetry_client.py          Telemetry Client/subscriber - fully generic + verify_channels(), no device-specific subclasses needed
@@ -136,6 +146,7 @@ python -m hardware.mock_power_supply.main    # power supply
 python -m hardware.mock_dut.main             # DUT
 python -m hardware.odrive.main --mock        # ODrive, simulated
 python -m hardware.odrive.main               # ODrive, REAL hardware over USB
+python -m hardware.cpx400dp.main             # CPX400DP, REAL hardware over ethernet
 ```
 
 Each device is its own OS process with its own dedicated entry-point
@@ -149,6 +160,87 @@ type). ODrive ports default to `tcp://127.0.0.1:5580`/`5581`.
 `odrive.find_any()`), so running it without hardware attached will
 fail at connect. Pass `--serial-number` if more than one ODrive is on
 the same machine.
+
+## `cpx400dp/` - the CPX400DP power supply, over ethernet
+
+A TTi CPX400DP dual-output bench supply, driven as line-oriented SCPI
+over a raw TCP socket on port 9221. Ports default to
+`tcp://127.0.0.1:5590`/`5591`.
+
+**No mock backend, on purpose.** The ODrive keeps a real and a
+simulated backend side by side because its risk was wrong attribute
+paths, which a mock can mirror faithfully. This driver's risk is
+different: it is **response parsing**. The instrument replies to
+`OVP1?` with `VP1 66.00` and to `OCP1?` with `CP1 22.00` - not the
+mnemonics that were sent - measured readbacks carry unit suffixes
+(`-0.005V`), and `OP1?` answers a bare integer. A backend-level mock
+would replace exactly the code most likely to be wrong. So the seam
+for testing is the *transport*, not the backend: `tests/test_cpx400dp.py`
+substitutes a fake instrument whose replies are byte-exact transcripts
+from the real device, and everything above it is the real
+implementation. The consequence is that `main.py` has no `--mock` flag
+and needs a real supply.
+
+**Four telemetry tiers.** All 41 declared channels appear in every
+frame, but they are acquired four different ways, and the differences
+are load-bearing rather than cosmetic:
+
+1. **State** (4 queries/frame) - output on/off and the limit status
+   register. Instrument state, which changes at the speed of the events
+   causing it. Polling this fast is what caught an OVP trip inside a
+   single frame period.
+2. **Metered** (4 queries, at 5 Hz) - measured voltage and current.
+   These are capped by the instrument itself: its specification gives
+   a **4 Hz meter reading rate**, with 10 mV / 10 mA resolution and
+   0.1% / 0.3% of reading ±2 digits accuracy. Polling them per frame
+   re-read a register refreshed four times a second - visible directly
+   in our capture, where a decaying output read back as a staircase
+   holding each value across 6-10 consecutive polls. They are now read
+   at 5 Hz (a deliberate margin over 4 Hz, so the poll cannot sit just
+   behind the instrument's unsynchronised update) and held in between.
+   A repeated value in consecutive recorded rows may therefore be a
+   held reading rather than a re-measured one - as it already was when
+   the instrument itself returned the duplicates.
+3. **Cached** - setpoints, OVP/OCP, step sizes, tracking config,
+   address. Settings that only this driver writes, read once at connect
+   and refreshed after a command that changes them, then carried in
+   every frame from memory at no round-trip cost. This rests on the
+   assumption that nobody turns the front-panel knobs mid-run.
+4. **Not telemetry** - the read-and-clear error registers (`EER?`,
+   `QER?`, `*ESR?`), consumed by the driver's own post-write check.
+   Streaming them would race that check for a single-copy value. They
+   are reachable as explicit actions instead.
+
+Note the 4 Hz ceiling is a *reporting* rate, not a control or
+protection one - the supply reacts far faster than it reports. OVP is
+specified at ~1 ms and tripped inside one 19 ms frame; OCP is
+"measure-and-compare implemented in firmware" at ~500 ms, about two
+meter updates, consistent with that comparison being fed by the same
+measurement path.
+
+**Every write is checked.** The instrument accepts writes it then
+silently discards: `V2 999` leaves the setpoint untouched, sends
+nothing back, and reports itself only as `EER?` = 100. Both registers
+are read after every command because they catch different failures - a
+range error sets `EER?` and `*ESR?` bit 4, an unrecognised mnemonic
+sets only `*ESR?` bit 5.
+
+**Connect and disconnect are passive.** `connect()` opens the link,
+confirms the model in `*IDN?`, clears its own error registers, verifies
+every declared channel answers, reads the cached tier, and logs the
+output state it inherited. It does not enable an output, disable one it
+finds on, or set protection levels. `disconnect()` closes the link and
+releases an interface lock if it took one; it does **not** switch
+outputs off. Energized-state safety that does not depend on this
+process belongs to the instrument's own OVP/OCP, which this driver
+exposes but never asserts.
+
+**Optional guards, both off by default.** `--max-voltage`/`--max-current`
+are a driver-side ceiling: they change nothing on the instrument, they
+make this process refuse to *command* a setpoint above them. That
+catches the failure the instrument cannot - a value well inside its own
+60 V range and fatal to the load. `--interface-lock` takes `IFLOCK` at
+connect so the web page and VXI-11 cannot change settings mid-run.
 
 ## Adding a new device type
 
@@ -330,3 +422,120 @@ module, a stub attribute-graph object, and a backend whose
   other device's `demo_<device>.py` convention (always `--mock`); this
   session's other verification had all been one-off scratch scripts
   that didn't persist in the repo.
+
+`hardware.cpx400dp.main` was run end-to-end against the real
+instrument - Thurlby Thandar CPX400DP, serial 599542, firmware
+2.03-4.12, on a link-local ethernet link. The driver process launched,
+`Cpx400dpCommandClient.verify_actions()` passed for all 66 declared
+command channels and `TelemetryClient.verify_channels()` for all 41
+telemetry channels, live frames carried exactly the 41 declared keys
+with every tier populated, a checked write round-tripped
+(`set_voltage(1, 2.5)` -> `setpoint_voltage_1` = 2.5), the driver-side
+ceiling refused 48 V before anything reached the wire, and an
+instrument-refused write (`OVP1 999`) surfaced as `EER 100 - range
+error` instead of silently succeeding. Teardown exited 0.
+
+The command set and every response format were derived from the
+instrument itself and its manual, not assumed: a full read-only query
+sweep recorded byte-exact replies (which is where `VP1`/`CP1` and the
+unit suffixes came from), and `tests/test_cpx400dp.py`'s fake replies
+are those transcripts. `RANGE<n>?`, `SENSE<n>?`, `DAMPING<n>?` and
+`EXR?` were confirmed **absent** on this firmware - they belong to
+other TTi models - and are not declared. Timing was measured over 200
+back-to-back frames, before and after the meter tier was split out of
+the per-frame poll: median frame cost fell from 18.9 ms to **9.4 ms**,
+back-to-back throughput rose from 29.5 Hz to **63.2 Hz**, and the
+published rate at `sample_interval_s = 0.02` from ~19 Hz to ~28 Hz. The
+meters lost nothing by it - held staleness stayed bounded at the
+intended 200 ms (max observed 199 ms, mean 87 ms), against an
+instrument that only refreshes them every 250 ms anyway. The frame
+period is still not steady: the worst frame in both runs was ~250 ms,
+an intermittent stall in the instrument that no tuning here removes, so
+a consumer should read frame `t` rather than assume a period.
+
+Behaviour confirmed on hardware that the manual gets wrong or omits:
+- `LSR<n>?` bit 0 is a **level, not an edge**. The manual says "Set
+  when output *enters* voltage limit"; measured, the register clears on
+  read and is set again on the very next read for as long as the output
+  regulates. Hence `in_cv_<n>` rather than `entered_cv_<n>`.
+- The error registers **outlive the socket**. A deliberate `V2 999` on
+  one connection was still readable as `EER?` = 100 and `*ESR?` = 16
+  from a *new* connection - so a fresh driver would otherwise attribute
+  a dead process's failure to its own first write. `connect()` issues
+  `*CLS` for exactly this reason.
+- An interface lock also outlives its socket, but is **recoverable**: a
+  reconnecting client inherits ownership (`IFLOCK?` = 1) and can
+  release it, so a crashed driver cannot strand the instrument.
+- Only **one** raw-socket connection is accepted; a second is refused
+  while the first is open. The manual's "two TCP socket interfaces"
+  evidently counts VXI-11 (port 111 is open). This is why `connect()`
+  is idempotent - `runner.run()` connects at process start and every
+  client then sends `connect` over the wire, and a second `open()`
+  would fail on a link that is working.
+- A `with verify` command blocks the link for the full documented 5 s
+  (measured 5.01 s) when the output cannot reach the target, which is
+  why the transport's read timeout is 8 s and the command client's
+  default is 10 s.
+- The output **ramps** (4.515 V a quarter-second after enabling at
+  5 V), switching off does **not** mean zero volts (2.748 V still
+  present immediately after, decaying into an open circuit), and
+  `current_<n>` reads a nonzero offset at zero (0.019 A on output 1,
+  0.053 A on output 2, with nothing connected).
+
+A second round of hardware tests then exercised the trip and
+regulation paths that the first could not, three of them into a
+deliberate short across output 2 at a 0.1 A limit:
+
+- **Constant current** (`in_cc_<n>`): shorted, the output regulated at
+  its current limit with `in_cv` false and `in_cc` true, held as a
+  level across every poll.
+- **OVP trip** (`tripped_ov_<n>`): with OVP below the setpoint,
+  enabling the output tripped it **within one frame period** - the
+  first poll after `OP2 1` already showed `output_enabled_2` false,
+  with the terminal voltage decaying 3.93 -> 1.32 -> 0.34 -> 0 V. This
+  is the case that justifies streaming `output_enabled` rather than
+  caching it: the instrument switched its own output off with no
+  command from us.
+- **OCP trip** (`tripped_oc_<n>`): lowering OCP below the current being
+  drawn tripped it the same way, `LSR` reading 10 (in CC *and*
+  over-current) before settling to 8.
+- **Neither trip set bit 6** (`tripped_latching_<n>`), so both are soft
+  trips needing no front-panel reset. Bit 6 and `in_power_limit_<n>`
+  remain the only unverified channels; nothing reachable from software
+  provoked either.
+- **Error 104** decoded correctly from real hardware: changing `CONFIG`
+  with output 2 on was refused with "command not valid while the output
+  is on". Voltage-tracking mode works on the setpoint - `V1` at 4.0 V
+  drove `V2` to 2.0 V at a 50% ratio.
+- **SIGKILL recovery**: a driver killed with `-9` while streaming and
+  holding the interface lock left both the socket and the lock behind.
+  A fresh driver connected cleanly, **inherited** the lock (`IFLOCK?` =
+  1), streamed again, and released it on clean teardown, after which a
+  third driver saw `IFLOCK?` = 0. The crash story is measured, not
+  argued.
+
+**`TRIPRST` does not clear a trip**, despite being documented as
+"attempt to clear all trip conditions" - it had no observable effect in
+any case tried, and the two trips need *different* recovery. An OVP
+trip cleared as soon as `ovp_<n>` was raised back above the voltage
+setpoint, with no `TRIPRST` involved. An OCP trip ignored both a raised
+`ocp_<n>` and `TRIPRST`, and cleared only on an explicit
+`enable_output_<n>(False)` - even though the trip had already switched
+the output off. A recovery step should therefore remove the cause,
+explicitly command the output off, and re-enable; a step that calls
+`trip_reset` and waits for the trip to clear will wait forever.
+
+That result also settles the shape of the limit-status channels: every
+bit is a **level**, not an event, verified for CV, CC, OVP and OCP. The
+`limit_status_latched_<n>` channel is still needed, and for a sharper
+reason than "trips latch" - since nothing latches in the instrument, a
+condition beginning and ending between two frames leaves no trace at
+all unless the driver keeps one.
+
+One measurement caveat worth knowing before writing a Bound:
+`current_<n>` is not accurate to better than a few tens of milliamps at
+the bottom of its range, and not as a subtractable offset. It read
+0.019 A (output 1) and 0.053 A (output 2) with nothing connected and
+the output off, and 0.115 A while genuinely regulating at a 0.100 A
+limit - consistent with a 20 A-class instrument's readback resolution
+rather than a calibration error.

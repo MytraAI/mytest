@@ -64,6 +64,15 @@ DEFAULT_DUT_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5571"
 DEFAULT_ODRIVE_COMMAND_ENDPOINT = "tcp://127.0.0.1:5580"
 DEFAULT_ODRIVE_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5581"
 
+# The CPX400DP bench power supply, a second real device and the first
+# reached over ethernet rather than USB (see hardware/cpx400dp/). Its own
+# port pair, so it runs alongside every other driver above. Note these are
+# this driver's *ZeroMQ* endpoints on localhost - the instrument's own
+# address on the lab network is a different kind of fact and lives in
+# hardware/cpx400dp/cpx400dp_backend.py, not here.
+DEFAULT_CPX400DP_COMMAND_ENDPOINT = "tcp://127.0.0.1:5590"
+DEFAULT_CPX400DP_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5591"
+
 # Single topic used on the telemetry PUB socket, kept as one constant
 # rather than per-channel topics because subscribers currently want
 # the full frame. Splitting by channel is an easy future change if a
@@ -105,6 +114,13 @@ DEVICE_DAQ = "daq"
 DEVICE_POWER_SUPPLY = "power_supply"
 DEVICE_DUT = "dut"
 DEVICE_ODRIVE = "odrive"
+DEVICE_CPX400DP = "cpx400dp"
+"""The real TTi CPX400DP bench supply. Deliberately not DEVICE_POWER_SUPPLY:
+that name belongs to the generic simulated supply, whose channel surface is
+two channels wide, while this instrument streams a dual-output surface that
+shares none of those names. Since a device name keys a directory of recorded
+output, two backends publishing different channel sets under one name would
+make a stored run ambiguous about which supply produced it."""
 
 # Every device this stand knows about, and where it publishes telemetry.
 #
@@ -123,6 +139,7 @@ TELEMETRY_ENDPOINTS: Dict[str, str] = {
     DEVICE_POWER_SUPPLY: DEFAULT_POWER_SUPPLY_TELEMETRY_ENDPOINT,
     DEVICE_DUT: DEFAULT_DUT_TELEMETRY_ENDPOINT,
     DEVICE_ODRIVE: DEFAULT_ODRIVE_TELEMETRY_ENDPOINT,
+    DEVICE_CPX400DP: DEFAULT_CPX400DP_TELEMETRY_ENDPOINT,
 }
 
 # High-water marks. ZeroMQ's default is 1000 *messages* on both ends, and
