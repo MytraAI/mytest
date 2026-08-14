@@ -9,6 +9,7 @@ from typing import Any, AsyncIterator, List
 import pytest
 
 from hardware.backend import HardwareBackend, HardwareError, to_jsonable
+from hardware.cpx400dp.cpx400dp_backend import Cpx400dpBackend
 from hardware.mock_daq.mock_backend import MockDaqBackend
 from hardware.mock_dut.mock_backend import MockDutBackend
 from hardware.mock_power_supply.mock_backend import MockPowerSupplyBackend
@@ -22,6 +23,7 @@ ALL_BACKENDS = [
     MockPowerSupplyBackend,
     MockOdriveBackend,
     OdriveBackend,
+    Cpx400dpBackend,
 ]
 
 
