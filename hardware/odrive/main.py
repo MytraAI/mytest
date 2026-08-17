@@ -18,13 +18,13 @@ Run with (from the repo root):
 from __future__ import annotations
 
 import argparse
-import asyncio
 import logging
 
 from protocol.wire import DEFAULT_ODRIVE_COMMAND_ENDPOINT, DEFAULT_ODRIVE_TELEMETRY_ENDPOINT, DEVICE_ODRIVE
 
 from ..driver_logging import add_logging_args, configure as configure_logging
 from ..runner import run
+from protocol import asyncio_compat
 from .mock_backend import MockOdriveBackend
 from .odrive_backend import DEFAULT_DISCOVERY_TIMEOUT_S, OdriveBackend
 
@@ -54,4 +54,4 @@ if __name__ == "__main__":
     else:
         backend = OdriveBackend(serial_number=args.serial_number, discovery_timeout_s=args.discovery_timeout)
 
-    asyncio.run(run(backend, args.command_endpoint, args.telemetry_endpoint))
+    asyncio_compat.run(run(backend, args.command_endpoint, args.telemetry_endpoint))

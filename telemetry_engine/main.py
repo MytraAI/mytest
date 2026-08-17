@@ -42,7 +42,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Sequence
 
-from protocol import heartbeat
+from protocol import asyncio_compat, heartbeat
 from protocol.paths import DEFAULT_OUTPUT_DIR, ensure_output_dir
 from protocol.wire import RunStateFrame
 
@@ -231,4 +231,4 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     args = parser.parse_args()
-    asyncio.run(main(args.output_dir))
+    asyncio_compat.run(main(args.output_dir))

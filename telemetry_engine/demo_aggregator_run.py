@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from protocol import asyncio_compat
 from protocol.wire import RunStateFrame
 from testcases.example_dut.testcases.halt_tests import CycleDutPositionTest
 
@@ -51,4 +52,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio_compat.run(main())

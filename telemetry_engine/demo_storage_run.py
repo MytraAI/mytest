@@ -24,6 +24,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from protocol import asyncio_compat
 from protocol.paths import runs_dir
 from testcases.example_dut.testcases.halt_tests import CycleDutPositionTest
 
@@ -72,4 +73,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio_compat.run(main())
