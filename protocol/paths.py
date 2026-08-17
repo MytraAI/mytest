@@ -46,6 +46,18 @@ RUNS_DIRNAME = "runs"
 RAW_DIRNAME = "raw"
 VERDICT_FILENAME = "verdict.json"
 TELEMETRY_FILENAME = "telemetry.csv"
+DRIVER_LOG_FILENAME = "logs.txt"
+"""A driver process's own detailed log, written next to the telemetry it
+produced. This is the second artifact type a device directory holds, and the
+reason the layout above uses subdirectories rather than filename suffixes.
+
+Written by the hardware driver process, which is the only participant that can
+see its own device's failures in detail - a decoded ODrive fault, a refused
+setpoint, a reconnect. None of that fits a telemetry channel: it is text, it is
+episodic rather than sampled, and a column carrying it would be empty in almost
+every row. Landing it in the run directory is what makes a recorded run
+self-explaining, so "what happened at 03:12" is answerable from the stored
+output alone rather than from whatever scrolled past in a terminal."""
 
 
 def runs_dir(output_dir: Path) -> Path:
@@ -74,3 +86,14 @@ def raw_telemetry_path(output_dir: Path, device: str, session: str) -> Path:
     """The continuous, untagged per-device record. One file per engine
     session, since the raw stream has no test to be keyed by."""
     return Path(output_dir) / RAW_DIRNAME / device / f"telemetry_{session}.csv"
+
+
+def driver_log_path(output_dir: Path, test_id: str, device: str) -> Path:
+    """A driver's detailed log for one run, beside that device's telemetry.
+
+    Composed here rather than by the driver, because a driver process knows
+    nothing about runs and must not learn: it is handed a path to write and
+    stays ignorant of what the directory means. Whoever starts the driver -
+    a testbed, in PreTestSetup - is the participant that has both the run's
+    test_id and the engine's output dir."""
+    return device_dir(output_dir, test_id, device) / DRIVER_LOG_FILENAME

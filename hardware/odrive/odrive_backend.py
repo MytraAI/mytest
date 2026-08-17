@@ -38,6 +38,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from ..backend import HardwareBackend, HardwareError, MissingChannelError, to_jsonable
 from protocol.wire import DEVICE_ODRIVE
 
+from . import odrive_errors
 from .odrive_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,11 @@ not a driver one. Whatever it's set to, the publisher's high-water mark is
 sized from it (see protocol/wire.py's hwm_for_interval), so the buffer stays
 proportional to the intended rate."""
 DEFAULT_DISCOVERY_TIMEOUT_S = 10.0  # how long connect() waits for odrive.find_any() to see a matching device
+
+_UNSET = object()
+"""Distinguishes "this channel has not been seen yet" from any real value, so
+the first frame can report a pre-existing fault without announcing every
+channel that is simply reading zero."""
 
 _AXIS_STATE_NAMES = ("IDLE", "CLOSED_LOOP_CONTROL")
 _CONTROL_MODE_NAMES = ("POSITION_CONTROL", "VELOCITY_CONTROL", "TORQUE_CONTROL")
@@ -321,8 +327,27 @@ class OdriveBackend(HardwareBackend):
         self._odrv = None  # the odrive package's device handle, once connected
         self._AxisState = None
         self._ControlMode = None
+        self._last_watched: Dict[str, Any] = {}
+        """Last seen value of each channel in odrive_errors.WATCHED_CHANNELS, so
+        error logging can fire on change rather than on every frame."""
 
     async def connect(self) -> None:
+        # Connecting twice is the normal path, not a caller error: runner.run()
+        # connects when the driver process starts, and a client then sends
+        # `connect` over the wire, as every testbed here does. Re-running
+        # discovery is not merely wasteful - it calls find_any() in a worker
+        # thread while stream_samples() is still reading channels off the
+        # existing handle, and two concurrent users of the same USB device wedge
+        # it. Observed on a real ODrive Pro (fw 0.6.12): the second connect
+        # completed, telemetry then stopped permanently, and the testbed blocked
+        # forever waiting for a frame that never came.
+        if self.is_connected:
+            logger.debug(
+                "already connected to ODrive serial_number=%s, ignoring redundant connect",
+                getattr(self._odrv, "serial_number", None),
+            )
+            return
+
         try:
             import odrive
             from odrive.enums import AxisState, ControlMode
@@ -459,8 +484,54 @@ class OdriveBackend(HardwareBackend):
     async def stream_samples(self) -> AsyncIterator[dict]:
         while True:
             if self._odrv is not None:
-                yield await asyncio.to_thread(self._read_all_channels)
+                frame = await asyncio.to_thread(self._read_all_channels)
+                self._log_error_transitions(frame)
+                yield frame
             await asyncio.sleep(SAMPLE_INTERVAL_S)
+
+    def _log_error_transitions(self, frame: Dict[str, Any]) -> None:
+        """Log a decoded line whenever a watched error or state channel changes.
+
+        Edge-triggered, not level-triggered. A standing fault would otherwise
+        log at the frame rate and bury everything else, so this fires once when
+        the value appears and once when it clears - which is also the shape a
+        person reads a log in: what changed, and when.
+
+        The value of doing this in the driver at all is that the raw number is
+        the only thing the recorded telemetry can carry. `active_errors` = 1056
+        in a CSV needs a lookup; `DRV_FAULT | MOTOR_FAILED` in the log beside it
+        does not. See hardware/odrive/odrive_errors.py.
+
+        Deliberately never raises: a decode problem must not take down the
+        telemetry stream, which runner.py would rightly treat as a device
+        failure."""
+        try:
+            for channel in odrive_errors.WATCHED_CHANNELS:
+                if channel not in frame:
+                    continue
+                current = frame[channel]
+                previous = self._last_watched.get(channel, _UNSET)
+                if previous == current:
+                    continue
+                self._last_watched[channel] = current
+                if previous is _UNSET:
+                    # First frame: report only what is already wrong, so a clean
+                    # start does not announce eight channels reading zero.
+                    if odrive_errors.is_fault(channel, current):
+                        logger.warning(
+                            "%s is already set at startup: %s (%s)",
+                            channel, current, odrive_errors.describe(channel, current),
+                        )
+                    continue
+                line = odrive_errors.format_transition(channel, previous, current)
+                if odrive_errors.is_fault(channel, current):
+                    logger.warning("ODrive fault: %s", line)
+                elif odrive_errors.is_fault(channel, previous):
+                    logger.info("ODrive fault cleared: %s", line)
+                else:
+                    logger.info("ODrive %s", line)
+        except Exception:
+            logger.exception("failed to log an ODrive error transition, continuing to stream")
 
     def _read_all_channels(self) -> dict:
         axis = self._odrv.axis0

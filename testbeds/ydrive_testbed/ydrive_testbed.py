@@ -16,11 +16,13 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
-from typing import Dict, Optional, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 from hardware.clients.telemetry_client import TelemetryClient
 from hardware.odrive.odrive_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
 from hardware.odrive.odrive_command_client import OdriveCommandClient
+from protocol.paths import driver_log_path
 from protocol.wire import (
     DEFAULT_ODRIVE_COMMAND_ENDPOINT,
     DEFAULT_ODRIVE_TELEMETRY_ENDPOINT,
@@ -48,16 +50,37 @@ class YdriveTestbed:
     the telemetry engine knows whose frames belong to the run. See
     testcases/base.py's DEVICES."""
 
-    def __init__(self, use_mock: bool = False, serial_number: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        use_mock: bool = False,
+        serial_number: Optional[str] = None,
+        output_dir: Optional[Path] = None,
+        test_id: Optional[str] = None,
+    ) -> None:
+        """output_dir/test_id: given both, the driver writes its detailed log to
+        `<output_dir>/runs/<test_id>/odrive/logs.txt`, beside the telemetry it
+        produced - which is where a decoded ODrive fault goes (see
+        hardware/odrive/odrive_errors.py). A test case passes `self._output_dir`
+        and `self.test_id` from PreTestSetup. Omitted, the driver logs to its
+        console, which for a subprocess is nowhere anybody reads."""
         self._use_mock = use_mock
         self._serial_number = serial_number
+        self._output_dir = output_dir
+        self._test_id = test_id
         self._process: Optional[subprocess.Popen] = None
         self._command: Optional[OdriveCommandClient] = None
         self._telemetry: Optional[TelemetryClient] = None
         self._sync_telemetry: Optional[TelemetryClient] = None
 
+    def _log_args(self) -> List[str]:
+        """`--log-file` for the ODrive driver, or nothing if this testbed wasn't
+        told which run it belongs to."""
+        if self._output_dir is None or self._test_id is None:
+            return []
+        return ["--log-file", str(driver_log_path(self._output_dir, self._test_id, DEVICE_ODRIVE))]
+
     def start(self) -> None:
-        args = [sys.executable, "-m", "hardware.odrive.main"]
+        args = [sys.executable, "-m", "hardware.odrive.main", *self._log_args()]
         if self._use_mock:
             args.append("--mock")
         elif self._serial_number is not None:

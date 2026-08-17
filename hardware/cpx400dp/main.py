@@ -26,17 +26,22 @@ import argparse
 import asyncio
 import logging
 
-from protocol.wire import DEFAULT_CPX400DP_COMMAND_ENDPOINT, DEFAULT_CPX400DP_TELEMETRY_ENDPOINT
+from protocol.wire import (
+    DEFAULT_CPX400DP_COMMAND_ENDPOINT,
+    DEFAULT_CPX400DP_TELEMETRY_ENDPOINT,
+    DEVICE_CPX400DP,
+)
 
+from ..driver_logging import add_logging_args, configure as configure_logging
 from ..runner import run
 from .cpx400dp_backend import DEFAULT_CPX400DP_HOST, Cpx400dpBackend
 from .transport import DEFAULT_PORT
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    add_logging_args(parser)
     parser.add_argument("--command-endpoint", default=DEFAULT_CPX400DP_COMMAND_ENDPOINT)
     parser.add_argument("--telemetry-endpoint", default=DEFAULT_CPX400DP_TELEMETRY_ENDPOINT)
     parser.add_argument(
@@ -55,6 +60,7 @@ if __name__ == "__main__":
         help="take exclusive control (IFLOCK) at connect, so the web page and VXI-11 cannot change settings mid-run",
     )
     args = parser.parse_args()
+    configure_logging(args.log_file, device=DEVICE_CPX400DP)
 
     backend = Cpx400dpBackend(
         host=args.host,
