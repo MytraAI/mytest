@@ -77,7 +77,7 @@ from .cpx400dp_channels import (
     STATE_CHANNELS,
     TELEMETRY_CHANNELS,
 )
-from .transport import DEFAULT_PORT, TtiSocketTransport
+from .transport import CONNECT_DRAIN_TIMEOUT_S, DEFAULT_PORT, TtiSocketTransport
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,13 @@ link-local address. It moves if a DHCP server appears or on an address
 collision. A testbed is expected to pass an explicit host from its own config
 rather than rely on this; it exists so `python -m hardware.cpx400dp.main` works
 standalone. connect() verifies the model in `*IDN?` precisely because a moving
-address could otherwise point this driver at a different instrument."""
+address could otherwise point this driver at a different instrument.
+
+An mDNS name also works and is a stabler identity: this instrument advertises
+itself as `t<serial number>.local` (`t599542.local` here), verified to answer
+identically. It needs an mDNS responder on the host, which macOS has built in
+and a Windows or CentOS stand may not, so it is offered rather than assumed -
+see testbeds/zdrive_testbed/config/instruments.py for the tradeoff."""
 
 SAMPLE_INTERVAL_S = 0.02
 """Sleep *between* frames, not the frame period - and on this instrument the
@@ -442,6 +448,12 @@ class Cpx400dpBackend(HardwareBackend):
 
         await self._transport.open()
         try:
+            # Before trusting a single reply, throw away anything a previous
+            # client left behind. A stale reply outlives the connection that
+            # abandoned it, so without this a driver killed mid-transaction
+            # makes the *next* startup read every answer one behind - measured,
+            # with `*IDN?` answering `0`.
+            await self._transport.drain("at connect", timeout_s=CONNECT_DRAIN_TIMEOUT_S)
             await self._confirm_identity()
             # The error registers outlive the socket, so a previous process's
             # failure would otherwise be attributed to this driver's first

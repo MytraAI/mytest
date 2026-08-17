@@ -58,7 +58,15 @@ fail setup promptly; nothing about connecting is slow when the device is there
 DRAIN_TIMEOUT_S = 0.5
 """How long to wait for a late reply after a read has already timed out, so it
 can be discarded rather than mistaken for the answer to the *next* query - see
-_discard_late_reply()."""
+_discard_late_reply(). Generous, because that case means the instrument is
+already behaving slowly and the read it belongs to has been given up on."""
+
+CONNECT_DRAIN_TIMEOUT_S = 0.1
+"""How long to wait when draining at connect. Much shorter than the above,
+because a reply a dead client left behind is delivered as soon as the link is
+open - within one round-trip, measured at ~2.4 ms - so this is a 40x margin
+rather than a guess. It is paid on every connect, and the 0.5 s value cost half
+a second of every driver startup for nothing."""
 
 TERMINATOR = b"\r\n"
 """<RESPONSE MESSAGE TERMINATOR>: CR LF, per the manual."""
@@ -177,6 +185,38 @@ class TtiSocketTransport:
                 f"connection to {self.address} closed while awaiting a response to {command!r}"
             ) from exc
         return raw[: -len(TERMINATOR)].decode("ascii", errors="replace").strip()
+
+    async def drain(self, reason: str, timeout_s: Optional[float] = None) -> int:
+        """Read and discard anything already waiting on the link. Returns how
+        many replies were thrown away.
+
+        Needed at connect, because a stale reply survives the *connection*, not
+        just the read that abandoned it. Measured: a driver killed with SIGKILL
+        mid-transaction left one unread reply on the instrument, which was then
+        delivered to the next client's first query - so a fresh driver asked
+        `*IDN?` and was told `0`, and every read after that would have been one
+        behind. `_confirm_identity()` catches that and refuses to run, which is
+        right, but it would leave the stand unusable until someone cleared the
+        link by hand. Draining first makes an abrupt kill cost nothing.
+
+        Anything discarded here is logged at warning level: it is evidence that
+        a previous process died without finishing a transaction, which is worth
+        knowing even though this recovers from it."""
+        deadline = self._drain_timeout_s if timeout_s is None else timeout_s
+        discarded = 0
+        while True:
+            try:
+                stale = await asyncio.wait_for(self._reader.readuntil(TERMINATOR), timeout=deadline)
+            except (asyncio.TimeoutError, asyncio.IncompleteReadError, OSError):
+                if discarded:
+                    logger.warning(
+                        "discarded %d stale repl%s on %s (%s) - a previous client left the link "
+                        "mid-transaction; the link is now aligned",
+                        discarded, "y" if discarded == 1 else "ies", self.address, reason,
+                    )
+                return discarded
+            discarded += 1
+            logger.warning("discarding stale reply on %s (%s): %r", self.address, reason, stale)
 
     async def _discard_late_reply(self, command: str) -> None:
         """After a read has timed out, throw away anything that arrives late.

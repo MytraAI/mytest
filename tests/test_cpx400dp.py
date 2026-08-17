@@ -120,6 +120,13 @@ class FakeInstrument:
     def transaction(self):
         return self._lock
 
+    async def drain(self, reason: str, timeout_s: Optional[float] = None) -> int:
+        """Nothing is ever left buffered here - a fake has no socket to hold a
+        previous client's reply. Present because the backend calls it at
+        connect, and the fake stands in for the whole transport interface."""
+        self.drained = getattr(self, "drained", 0) + 1
+        return 0
+
     async def query(self, command: str) -> str:
         async with self._lock:
             return await self.query_in_transaction(command)
@@ -690,3 +697,52 @@ async def test_transport_explains_a_refused_connection_as_the_single_socket_limi
     transport = TtiSocketTransport("127.0.0.1", port)
     with pytest.raises(HardwareError, match="only one raw-socket connection"):
         await transport.open()
+
+
+@sync
+async def test_a_stale_reply_left_by_a_dead_client_is_drained_at_connect():
+    """A stale reply outlives the connection that abandoned it. Measured: a
+    driver killed with SIGKILL mid-transaction left one unread reply on the
+    instrument, which the next client's first query collected - so a fresh
+    driver asked *IDN? and was told '0'. Without draining, every read for the
+    rest of that run would have been one behind."""
+    from hardware.cpx400dp.transport import TtiSocketTransport
+
+    async def handler(reader, writer):
+        writer.write(b"0\r\n")  # the previous client's unread answer
+        await writer.drain()
+        while True:
+            line = await reader.readline()
+            if not line:
+                return
+            writer.write(IDENTITY.encode() + b"\r\n" if line.strip() == b"*IDN?" else b"0\r\n")
+            await writer.drain()
+
+    server, port = await _serve(handler)
+    transport = TtiSocketTransport("127.0.0.1", port, timeout_s=1.0, drain_timeout_s=0.2)
+    await transport.open()
+    assert await transport.drain("at connect") == 1, "the stale reply must be discarded"
+    assert await transport.query("*IDN?") == IDENTITY, "the link must be aligned afterwards"
+    await transport.close()
+    server.close()
+
+
+@sync
+async def test_draining_a_clean_link_discards_nothing():
+    from hardware.cpx400dp.transport import TtiSocketTransport
+
+    async def handler(reader, writer):
+        while True:
+            line = await reader.readline()
+            if not line:
+                return
+            writer.write(IDENTITY.encode() + b"\r\n")
+            await writer.drain()
+
+    server, port = await _serve(handler)
+    transport = TtiSocketTransport("127.0.0.1", port, timeout_s=1.0, drain_timeout_s=0.1)
+    await transport.open()
+    assert await transport.drain("at connect") == 0
+    assert await transport.query("*IDN?") == IDENTITY
+    await transport.close()
+    server.close()

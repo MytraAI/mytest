@@ -50,6 +50,7 @@ Mytest/
     command_server.py          ZeroMQ REP server, dispatches commands to the backend
     telemetry_server.py         ZeroMQ PUB server, forwards backend.stream_samples()
     runner.py                   shared process wiring (connect, run servers, signal-stop, disconnect) - device-agnostic
+    driver_logging.py           shared --log-file setup: console at INFO, a detailed DEBUG file beside that device's telemetry
     mock_daq/
       mock_backend.py             MockDaqBackend - simulated, sine waves + noise, no real hardware needed
       mock_channels.py             TELEMETRY_CHANNELS/COMMAND_CHANNELS - this backend's declared channel surface
@@ -69,6 +70,7 @@ Mytest/
       odrive_backend.py            OdriveBackend - REAL, talks to actual ODrive hardware over USB via the official odrive package (firmware 0.6.x / Pro/S1)
       mock_backend.py              MockOdriveBackend - simulated, same channel surface as the real backend
       odrive_channels.py           TELEMETRY_CHANNELS/COMMAND_CHANNELS - curated (not exhaustive): 99 telemetry + 71 command channels a test author would realistically use or need for diagnosis, every one verified to exist on the real board at connect() - see its docstring for what was deliberately cut
+      odrive_errors.py             decodes active_errors/disarm_reason/last_drv_fault and the state enums into words, from odrive.enums
       odrive_command_client.py     OdriveCommandClient - named sugar for ODrive actions, layered on the generic CommandClient
       main.py                      entry point: real backend by default, --mock to run MockOdriveBackend instead, calls runner.run()
     cpx400dp/

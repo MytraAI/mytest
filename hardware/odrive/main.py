@@ -21,17 +21,18 @@ import argparse
 import asyncio
 import logging
 
-from protocol.wire import DEFAULT_ODRIVE_COMMAND_ENDPOINT, DEFAULT_ODRIVE_TELEMETRY_ENDPOINT
+from protocol.wire import DEFAULT_ODRIVE_COMMAND_ENDPOINT, DEFAULT_ODRIVE_TELEMETRY_ENDPOINT, DEVICE_ODRIVE
 
+from ..driver_logging import add_logging_args, configure as configure_logging
 from ..runner import run
 from .mock_backend import MockOdriveBackend
 from .odrive_backend import DEFAULT_DISCOVERY_TIMEOUT_S, OdriveBackend
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    add_logging_args(parser)
     parser.add_argument("--command-endpoint", default=DEFAULT_ODRIVE_COMMAND_ENDPOINT)
     parser.add_argument("--telemetry-endpoint", default=DEFAULT_ODRIVE_TELEMETRY_ENDPOINT)
     parser.add_argument("--mock", action="store_true", help="run the simulated backend instead of real USB hardware")
@@ -45,6 +46,7 @@ if __name__ == "__main__":
         help="seconds to wait for odrive.find_any() before giving up (real hardware only)",
     )
     args = parser.parse_args()
+    configure_logging(args.log_file, device=DEVICE_ODRIVE)
 
     if args.mock:
         logger.warning("SIMULATED DEVICE - MockOdriveBackend, no real hardware connected")
