@@ -11,11 +11,16 @@ importing each other (see the package docstring in wire.py):
 
 Layout::
 
-    <output_dir>/
-      runs/<test_id>/
+    <output_dir>/                             ~/Desktop/mytestresults by default
+      runs/<test_id>/                         e.g. endurance_cycle_test_2026-08-17_14-30-12
         verdict.json              one authoritative record per test run
         <device>/telemetry.csv    wide: one row per frame, one column per channel
+        <device>/logs.txt         that driver process's own detailed log
       raw/<device>/telemetry_<session>.csv
+
+A run directory is named by its test_id, which new_test_id() composes from the
+test's name and the time it started, so a run is identifiable from the file
+tree alone.
 
 One directory per run, one subdirectory per device inside it. Per-device
 because devices sample at different rates, declare different channel sets,
@@ -34,13 +39,29 @@ telemetry_engine/run_recorder.py). Recover an unattributed slice by time range.
 """
 from __future__ import annotations
 
+import re
+from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
-DEFAULT_OUTPUT_DIR = Path("telemetry_engine/data")
+DEFAULT_OUTPUT_DIR = Path.home() / "Desktop" / "mytestresults"
 """Where the engine writes and where a test process looks for its run
-directory. A test never hardcodes this - it reads the engine's actual
-output dir out of the heartbeat file (see heartbeat.py), so the two
-can't disagree even if the engine was started with --output-dir."""
+directory.
+
+On the Desktop rather than inside the checkout, so an operator can find a run's
+output without knowing where the code lives. A test never hardcodes this - it
+reads the engine's actual output dir out of the heartbeat file (see
+heartbeat.py), so the two can't disagree even if the engine was started with
+--output-dir."""
+
+RUN_TIMESTAMP_FORMAT = "%Y-%m-%d_%H-%M-%S"
+"""How a run's start time is written into its directory name.
+
+Separated for reading, but with '-' rather than ':' between the hour, minute
+and second: a run directory has to survive being copied to a Windows machine or
+onto a USB stick, and Finder renders a ':' in a filename as '/'. Ordered
+largest unit first, so listing the results folder puts runs in the order they
+happened."""
 
 RUNS_DIRNAME = "runs"
 RAW_DIRNAME = "raw"
@@ -58,6 +79,37 @@ episodic rather than sampled, and a column carrying it would be empty in almost
 every row. Landing it in the run directory is what makes a recorded run
 self-explaining, so "what happened at 03:12" is answerable from the stored
 output alone rather than from whatever scrolled past in a terminal."""
+
+
+_UNSAFE_IN_PATH = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def new_test_id(test_name: str, when: Optional[datetime] = None) -> str:
+    """An id for one run: the test's name, then when it started.
+
+    This is the run directory's own name (see run_dir), so the test name is
+    reduced to characters that behave as a single path component - anything
+    else becomes '-'. The time carries seconds because the same test is
+    routinely run several times a day and each run needs its own directory.
+
+    Not a globally unique id: two runs of the same test starting within the
+    same second would share one, and the engine would record them as a single
+    run. Nothing in a manual test workflow produces that, but an automated
+    caller that might should pass its own id."""
+    stamp = (when or datetime.now()).strftime(RUN_TIMESTAMP_FORMAT)
+    safe_name = _UNSAFE_IN_PATH.sub("-", test_name).strip("-.") or "test"
+    return f"{safe_name}_{stamp}"
+
+
+def ensure_output_dir(output_dir: Path) -> Path:
+    """Create the output root, and return it.
+
+    Called by whoever writes into the tree first - in practice the engine at
+    startup, which is what makes the results folder appear on the Desktop
+    before any test has run."""
+    path = Path(output_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def runs_dir(output_dir: Path) -> Path:

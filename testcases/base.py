@@ -36,13 +36,12 @@ import signal
 import tempfile
 import threading
 import time
-import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 from protocol import heartbeat
-from protocol.paths import DEFAULT_OUTPUT_DIR
+from protocol.paths import DEFAULT_OUTPUT_DIR, new_test_id
 from protocol.verdict import BoundsResult, Lifecycle, Verdict, write_verdict
 
 from .asimov.live_rulebook_runner import FatalBoundViolation, LiveRulebookRunner
@@ -122,7 +121,11 @@ class TestCase(ABC):
     announced before PreTestSetup."""
 
     def __init__(self, test_id: Optional[str] = None, require_engine: bool = True):
-        self.test_id = test_id or uuid.uuid4().hex
+        self.test_id = test_id or new_test_id(getattr(self, "TEST_NAME", "unknown"))
+        """Identifies this run everywhere: on the state stream, in the stop
+        file, and as the name of the directory holding its output. Generated
+        from this test's name and the current time unless the caller supplies
+        one (see protocol/paths.py)."""
         self.runner: Optional[LiveRulebookRunner] = None
         self.require_engine = require_engine
         """Whether this run needs the telemetry engine to be recording:
