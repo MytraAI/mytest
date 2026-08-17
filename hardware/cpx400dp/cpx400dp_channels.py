@@ -42,22 +42,18 @@ distinctions are load-bearing rather than cosmetic:
      (0.39") LEDs. Reading rate 4 Hz", with meter resolution 10 mV / 10 mA and
      accuracy 0.1% of reading +-2 digits (voltage) and 0.3% +-2 digits
      (current). Polling them at frame rate re-reads a register the instrument
-     refreshes four times a second - measured directly here, where a
-     continuously decaying output read back as a staircase, each value held
-     across 6-10 consecutive polls before stepping.
+     refreshes four times a second, which shows up as a continuously changing
+     output reading back in steps rather than smoothly.
 
-     So these are read at a rate the instrument can actually support, and held
-     in between. A consequence worth knowing when reading a recorded run: a
-     repeated value in consecutive rows may be a held reading rather than a
-     re-measured one. That was already true before the driver held anything -
-     the instrument itself returned duplicates for the same reason - and frame
-     `t` against the known refresh rate is what separates the two.
+     So these are read at a rate the instrument can support, and held in between.
+     A consequence when reading a recorded run: a repeated value in consecutive
+     rows may be a held reading rather than a fresh one, and frame `t` against
+     the refresh rate is what separates the two.
 
-     Note this ceiling applies to the *reported* measurement, not to the
-     supply's behaviour. Regulation and protection are far faster: OVP is
-     specified at ~1 ms and tripped inside one 19 ms frame, while OCP is
-     "measure-and-compare implemented in firmware" at ~500 ms - about two meter
-     updates, which is consistent with the firmware comparison being fed by
+     The ceiling applies to the *reported* measurement, not to the supply's
+     behaviour. Regulation and protection are far faster: OVP is specified at
+     ~1 ms, while OCP is "measure-and-compare implemented in firmware" at
+     ~500 ms - about two meter updates, so that comparison is presumably fed by
      this same measurement path.
 
   3. CACHED_CHANNELS - read once at connect(), then re-read only after this
@@ -89,27 +85,23 @@ into one boolean channel per bit, plus the raw integer and a driver-side
 sticky latch.
 
 The manual describes these as edge events ("Set when output *enters* voltage
-limit"). Measured against a real CPX400DP (firmware 2.03-4.12), they are
-LEVELS: the register clears on read and is set again on the very next read for
-as long as the condition holds. Verified for bit 0 (output regulating in CV),
-bit 1 (regulating in CC, into a deliberate short), bit 2 (over-voltage trip)
-and bit 3 (over-current trip). So every bit here is named as a state
-(`in_cv_1`, `tripped_ov_1`), not an event. This contradicts the manual, and
-the measurement is the reason.
+limit"). On this instrument they are LEVELS: the register clears on read and is
+set again on the very next read for as long as the condition holds. So every bit
+here is named as a state (`in_cv_1`, `tripped_ov_1`) rather than an event, which
+contradicts the manual.
 
-Bit 6 - the trip class needing a front-panel or AC-power reset - was NOT set by
-either an OVP or an OCP trip, so both are soft trips. It remains unverified;
-nothing reachable from software provoked it.
+Bit 6 - the trip class needing a front-panel or AC-power reset - is set by
+neither an OVP nor an OCP trip, so both are soft trips. Nothing reachable from
+software sets it, so it is unverified.
 
-`limit_status_latched_<n>` still earns its place even though nothing latches in
-the instrument, and now for a sharper reason: since every bit is a level, a
-condition that begins and ends between two frames leaves no trace at all. The
-latch accumulates every bit ever seen, so a sub-frame trip is still visible.
-Clear it with `clear_limit_status_latch_<n>`.
+`limit_status_latched_<n>` earns its place even though nothing latches in the
+instrument: since every bit is a level, a condition beginning and ending between
+two frames leaves no trace at all. The latch accumulates every bit seen, so a
+sub-frame trip is still visible. Clear it with `clear_limit_status_latch_<n>`.
 
 CLEARING A TRIP - and `TRIPRST` is not the answer, despite being documented as
-"attempt to clear all trip conditions". Measured, it did nothing in every case
-tried. What actually cleared each trip differed by trip:
+"attempt to clear all trip conditions"; on this instrument it clears nothing.
+What does clear a trip differs by trip:
 
   - OVP: raising `ovp_<n>` back above the voltage setpoint cleared the bit on
     its own, with no `TRIPRST` at all. Removing the cause is the whole
@@ -129,13 +121,12 @@ both is accepted; the instrument then runs unregulated, which shows up here as
 `in_power_limit_<n>`.
 
 CURRENT READBACK ACCURACY AT LOW CURRENT. `current_<n>` is not trustworthy to
-better than a few tens of milliamps, and not as a fixed offset that could be
-subtracted out. With nothing connected and the output off it read 0.019 A on
-output 1 and 0.053 A on output 2; while genuinely regulating at a 0.100 A limit
-into a short, output 2 read 0.115 A. That is consistent with a 20 A-class
-instrument whose readback resolution is simply coarse down here, not with a
-calibration offset. A Bound on current near zero, or one distinguishing 100 mA
-from 150 mA, will not do what its author intends.
+better than a few tens of milliamps, and the error is not a fixed offset that
+could be subtracted out - it reads tens of milliamps with nothing connected, and
+is off by a similar amount while genuinely regulating at 100 mA. That is the
+readback resolution of a 20 A-class instrument rather than a calibration fault.
+A Bound on current near zero, or one distinguishing 100 mA from 150 mA, will not
+do what its author intends.
 """
 from __future__ import annotations
 
@@ -162,11 +153,9 @@ METER_CHANNELS can carry anything new, whatever rate the driver polls at."""
 STATE_CHANNELS: List[str] = [
     # Nominally a setting, polled every frame because the INSTRUMENT changes
     # it: an OVP or OCP trip switches the output off with no command from us,
-    # and this is the ground truth for that. Measured to trip within a single
-    # frame period, which is the whole reason this is not in the cached tier.
-    # Note it does not imply zero volts - 2.748 V was still present on the
-    # terminals immediately after switching off, decaying through the output
-    # capacitance.
+    # within a single frame period, which is why this is not in the cached tier.
+    # Note it does not imply zero volts - the terminals decay through the output
+    # capacitance after switching off.
     *_per_output("output_enabled"),  # bool - OP<n>?
     # LSR<n>? decoded. One query per output produces all of the below.
     *_per_output("limit_status"),  # bitmask int - LSR<n>? raw, as read this frame

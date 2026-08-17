@@ -22,4 +22,9 @@ from hardware.odrive.odrive_channels import TELEMETRY_CHANNELS as HARDWARE_CHANN
 DEFAULT_STATE: Dict[str, Any] = {
     "position_target": None,
     "current_step": None,
+    "brake_engaged": True,
+    # True, not None or False: the brake is magnet-applied, so it is holding from
+    # the moment the stand comes up and stays that way until a step powers its
+    # rail. Present from frame 1 so a recorded run reads as "engaged except
+    # during moves" rather than the channel appearing at the first dwell.
 }

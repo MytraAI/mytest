@@ -1,31 +1,21 @@
-"""Turn the ODrive's numeric error, fault and state channels into text a person
-can act on.
+"""Decodes the ODrive's numeric error, fault and state channels into names.
 
-`active_errors` reads 1056. That is `DRV_FAULT | MOTOR_FAILED`, and nothing in a
-recorded run says so - the number lands in the CSV, in `verdict.json`'s
-violation records, and in the driver's log, and a test engineer at 3am has to go
-and look it up. This module is the lookup, in code.
+`active_errors` = 1056 becomes `DRV_FAULT | DC_BUS_OVER_CURRENT`. Used by the
+driver to log a fault in words, and by anything reading a stored run.
 
-THE ENUM DEFINITIONS COME FROM THE `odrive` PACKAGE, not from a table copied
-into this repo. `odrive.enums` ships the real definitions for the firmware line
-the package targets, so decoding stays correct across an `odrive` upgrade
-instead of drifting from a hand-maintained copy that nobody re-checks. The
-import is guarded: this module is imported by offline tooling that may run
-where the package is absent, and a missing package degrades to showing the raw
-number rather than failing.
+Enum definitions come from the `odrive` package (`odrive.enums`) rather than a
+table in this repo, so they track the installed package. The import is guarded:
+this module imports fine without the package, and degrades to reporting raw
+numbers.
 
-BITMASKS ARE DECODED BIT BY BIT rather than by handing the value to `IntFlag`.
-Two reasons. An unrecognised bit - newer firmware than the installed package
-knows - is reported explicitly as `UNKNOWN_BIT_0x...` instead of being dropped
-or raising, which matters because that bit is exactly the one you would want to
-know about. And IntFlag's handling of undefined bits has changed across Python
-versions, so doing the masking here keeps the output stable.
+Bitmasks are decoded bit by bit rather than through `IntFlag`, so a bit the
+installed package does not know - newer firmware - is reported as
+`UNKNOWN_BIT_0x...` rather than dropped, and the output does not depend on the
+Python version's handling of undefined flag bits.
 
-WHAT THIS IS NOT: a telemetry channel. The raw integers stay in the frame, and
-the decoded text is produced on demand - by the driver when a value *changes*,
-and by whatever reads a stored run afterwards. Text belongs in a driver's log
-file (see protocol/paths.py's DRIVER_LOG_FILENAME), not in a column that would
-be empty in almost every row of every run.
+What this is NOT: a source of telemetry channels. The raw integers stay in the
+frame and the text is produced on demand, so nothing here adds a mostly-empty
+string column to every row of a run.
 """
 from __future__ import annotations
 
@@ -36,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 NO_ERROR = "none"
 """What a zero bitmask decodes to. A word rather than an empty string, so a log
-line reads `active_errors 1056 -> 0 (none)` instead of trailing off."""
+line reads `active_errors 1056 -> 0 (none)` rather than trailing off."""
 
 _UNAVAILABLE = "cannot decode: the 'odrive' package is not installed"
 
@@ -44,9 +34,8 @@ _UNAVAILABLE = "cannot decode: the 'odrive' package is not installed"
 def _enum_classes() -> Optional[Dict[str, Any]]:
     """The odrive enum classes needed here, or None if the package is absent.
 
-    Resolved on each call and cached on the function, so importing this module
-    never requires the package - offline tooling and unit tests import it
-    freely - while a driver that does have it pays the lookup once."""
+    Resolved on first call and cached, so importing this module never requires
+    the package."""
     cached = getattr(_enum_classes, "_cache", "unset")
     if cached != "unset":
         return cached
@@ -122,26 +111,22 @@ ERROR_CHANNELS: Tuple[str, ...] = (
 )
 
 STATE_CHANNELS: Tuple[str, ...] = ("axis_current_state",)
-"""Not a failure, but the transition a fault has to be read against: a
+"""Watched so a fault can be read against it rather than because it is wrong: a
 DISARMED procedure result means something different depending on whether the
 axis was in CLOSED_LOOP_CONTROL at the time."""
 
 WATCHED_CHANNELS: Tuple[str, ...] = ERROR_CHANNELS + STATE_CHANNELS
 
 _BENIGN_COMPONENT_STATUS: Tuple[int, ...] = (0, 9)
-"""ComponentStatus values that are not faults: NOMINAL, and RELATIVE_MODE.
+"""ComponentStatus values that are not faults: NOMINAL and RELATIVE_MODE.
 
-RELATIVE_MODE is here because of a measurement, not a reading of the docs. A
-real ODrive Pro (fw 0.6.12) reports `posvelmapper_status` = 9 steadily and
-healthily - it means the mapper is reporting position relative to startup, which
-is simply what an encoder with no absolute reference does. Treating it as a
-fault produced a warning on every single startup of the zdrive stand, which is
-how a log teaches people to ignore it.
+RELATIVE_MODE is a normal steady state, not a problem: it means the mapper
+reports position relative to startup, which is what an encoder with no absolute
+reference does.
 
-Every other ComponentStatus value is left classified as a fault. NOT_ENABLED in
-particular may turn out to be another benign steady state on a board that does
-not use one of the three mappers - but that has not been observed, and guessing
-at it would trade this false positive for a false negative."""
+Every other value is treated as a fault, including NOT_ENABLED - which may be a
+benign steady state on a board that does not use one of its three mappers, so
+expect to add it here if such a board turns up."""
 
 _BENIGN: Dict[str, Tuple[Any, ...]] = {
     "axis_procedure_result": (0,),  # SUCCESS
@@ -149,9 +134,9 @@ _BENIGN: Dict[str, Tuple[Any, ...]] = {
     "posvelmapper_status": _BENIGN_COMPONENT_STATUS,
     "encoder_onboard0_status": _BENIGN_COMPONENT_STATUS,
 }
-"""Values that mean "nothing wrong" for channels whose zero is not an empty
-bitmask. Used to decide whether a transition is a fault appearing or a fault
-clearing, which is the difference between a warning and an info line."""
+"""Values that mean "nothing wrong", for channels whose benign value is not
+simply an empty bitmask. Decides whether a transition is logged as a fault
+appearing, a fault clearing, or neither."""
 
 
 def decode_bitmask(value: Any, enum_name: str) -> str:
@@ -200,12 +185,12 @@ def decode_enum(value: Any, enum_name: str) -> str:
 
 
 def describe(channel: str, value: Any) -> Optional[str]:
-    """Human-readable text for one channel's value, or None if it has none.
+    """Human-readable text for one channel's value, or None if the channel has
+    nothing to decode.
 
-    None rather than str(value) for an ordinary numeric channel: a caller
-    formatting a report needs to know the difference between "this decodes to
-    text" and "this is just a number", and `None` says it without the caller
-    having to keep its own list."""
+    None rather than str(value), so a caller can tell "this decodes to text"
+    from "this is just a number" without keeping its own list of which is
+    which."""
     entry = _DECODABLE.get(channel)
     if entry is None:
         return None
@@ -225,11 +210,11 @@ def describe_frame(channels: Dict[str, Any]) -> Dict[str, str]:
 
 
 def is_fault(channel: str, value: Any) -> bool:
-    """Whether this value means something is wrong, for deciding a log level.
+    """Whether this value means something is wrong. Decides the log level.
 
-    Bitmask channels are faults when non-zero. Enum-valued ones have a specific
-    benign value (SUCCESS, NOMINAL) that is not always the same as zero-is-fine,
-    which is why they are listed rather than assumed."""
+    Bitmask channels are faults when non-zero. Enum-valued channels are checked
+    against their own benign values (see _BENIGN), since "not a fault" is not
+    always simply zero."""
     try:
         raw = int(value)
     except (TypeError, ValueError):
@@ -247,9 +232,9 @@ def is_fault(channel: str, value: Any) -> bool:
 def format_transition(channel: str, previous: Any, current: Any) -> str:
     """One log line for a channel that changed.
 
-    Carries the raw numbers as well as the decoded text on purpose: the number
-    is what appears in the telemetry CSV and in a verdict's violation record, so
-    a log line that dropped it could not be matched back to either."""
+    Carries the raw numbers alongside the decoded text, because the number is
+    what appears in the telemetry CSV and in a verdict's violation record - the
+    line has to be matchable against both."""
     text = describe(channel, current)
     if text is None:
         return f"{channel}: {previous} -> {current}"

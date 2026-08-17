@@ -3,11 +3,10 @@ one method per channel in cpx400dp_channels.py's COMMAND_CHANNELS. Each
 docstring names the real TTi mnemonic the call sends, so it can be looked up in
 the instrument's own manual for more detail than the one-liner gives.
 
-The default timeout is deliberately larger than CommandClient's. The `with
-verify` command family blocks the instrument's parser for up to 5 seconds
-(measured 5.01 s), and the generic client's 5000 ms default would time out
-*just* before such a command answered - marking the client permanently broken
-for a command that was about to succeed.
+The default timeout is larger than CommandClient's, because the `with verify`
+command family blocks the instrument's parser for up to 5 seconds - the generic
+client's 5000 ms default would expire just before such a command answered,
+marking the client permanently broken for a command about to succeed.
 """
 from __future__ import annotations
 
@@ -101,10 +100,9 @@ class Cpx400dpCommandClient(CommandClient):
     def enable_output(self, output: int, enabled: bool) -> None:
         """OP<n> - switch output <n> on or off.
 
-        Two measured caveats. The output ramps rather than stepping: a quarter
-        of a second after enabling at 5 V the readback was still 4.515 V. And
-        switching off does not mean zero volts - 2.748 V remained on the
-        terminals immediately afterwards, decaying through the output
+        Two caveats. The output ramps rather than stepping, so a readback taken
+        immediately after enabling is short of the setpoint. And switching off
+        does not mean zero volts: the terminals decay through the output
         capacitance."""
         self.execute(f"enable_output_{output}", value=1 if enabled else 0)
 
@@ -114,19 +112,18 @@ class Cpx400dpCommandClient(CommandClient):
         self.execute("enable_all_outputs", value=1 if enabled else 0)
 
     def trip_reset(self) -> None:
-        """TRIPRST - documented as "attempt to clear all trip conditions", and
-        measured to clear nothing.
+        """TRIPRST - documented as "attempt to clear all trip conditions", and on
+        this instrument it clears nothing.
 
-        It had no observable effect on either an OVP or an OCP trip on real
-        hardware. What actually cleared them differed: an OVP trip cleared when
-        `set_ovp()` was raised back above the voltage setpoint, needing no
-        TRIPRST at all; an OCP trip cleared only on an explicit
-        `enable_output(n, False)`, even though the trip had already switched the
-        output off, and ignored both a raised OCP level and TRIPRST.
+        What does clear a trip differs by trip. An OVP trip clears when `set_ovp()`
+        is raised back above the voltage setpoint, with no TRIPRST involved. An OCP
+        trip clears only on an explicit `enable_output(n, False)` - even though the
+        trip has already switched the output off - and ignores both a raised OCP
+        level and TRIPRST.
 
-        So a recovery step should remove the cause, explicitly command the
-        output off, and re-enable - that covers both. Do not write a step that
-        calls this and assumes the trip is gone; it will wait forever."""
+        A recovery step should therefore remove the cause, explicitly command the
+        output off, and re-enable. Do not write a step that calls this and waits
+        for the trip to clear; it will wait forever."""
         self.execute("trip_reset")
 
     def set_config_mode(self, mode: int) -> None:

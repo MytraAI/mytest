@@ -1,49 +1,116 @@
-"""Physical testbed for ydrive: starts/stops the ODrive driver process
-(hardware/odrive/) and owns ready-to-use command/telemetry clients -
-there's no separate DUT layer here, since the ODrive motor controller
-IS the entire hardware interface, both actuator and sensor.
+"""Physical testbed for ydrive: the ODrive driver process and a CPX400DP bench
+supply, with connected command/telemetry clients for both. There is no separate
+DUT layer - the ODrive is the entire actuator and sensor interface.
 
-Test steps use testbed.command/testbed.telemetry directly, and the
-named per-channel methods below (get_pos_estimate(), ...) for a
-synchronous point-read - these use a separate sync_telemetry client so
-they don't contend with whatever else is consuming .telemetry (e.g.
-LiveRulebookRunner, once started). command/telemetry/sync_telemetry
-raise RuntimeError if accessed before start(). Pass use_mock=True to
-run against MockOdriveBackend instead of real hardware.
+The supply feeds two rails: a 48 V motor bus on output 2 and a 24 V brake on
+output 1 (see MOTOR_BUS/BRAKE_BUS below).
+
+THE BRAKE IS MAGNET-APPLIED, AND SO FAIL-SAFE. A permanent magnet supplies the
+holding force, so the brake is engaged whenever its rail is unpowered; powering
+output 1 cancels that field and releases it. Losing the rail therefore holds the
+load rather than dropping it. power_brake_bus() is the only place that polarity
+is
+asserted - and it moves the rail alone. Pairing the rail with the axis state, so
+the motor never drives against an engaged brake and the brake never lets go of a
+load the controller has not taken, is engage_brake()/release_brake() in
+testcases/ydrive/teststeps/teststeps.py.
+
+What this does NOT do: energize anything in start(). Rail setpoints are
+configured with both outputs off, and powering the stand is a test's decision,
+taken in PreTestSetup. It also does not configure the ODrive, including
+`board_config_dc_bus_overvoltage_trip_level`, which is persistent device state.
+
+use_mock substitutes the ODrive only. The supply's driver has no mock backend, so
+a reachable CPX400DP is always needed.
+
+Test steps use testbed.command/testbed.telemetry directly, and the named
+per-channel methods (get_pos_estimate(), ...) for a synchronous point-read -
+those use a separate sync_telemetry client so they do not contend with whatever
+else is consuming .telemetry, such as LiveRulebookRunner. Every client accessor
+raises RuntimeError before start().
 """
 from __future__ import annotations
 
+import logging
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from hardware.clients.telemetry_client import TelemetryClient
+from hardware.cpx400dp.cpx400dp_channels import (
+    COMMAND_CHANNELS as CPX400DP_COMMAND_CHANNELS,
+    TELEMETRY_CHANNELS as CPX400DP_TELEMETRY_CHANNELS,
+)
+from hardware.cpx400dp.cpx400dp_backend import DEFAULT_CPX400DP_HOST
+from hardware.cpx400dp.cpx400dp_command_client import Cpx400dpCommandClient
+from hardware.cpx400dp.rails import Rail, deliverable_current_a
 from hardware.odrive.odrive_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
 from hardware.odrive.odrive_command_client import OdriveCommandClient
 from protocol.paths import driver_log_path
 from protocol.wire import (
+    DEFAULT_CPX400DP_COMMAND_ENDPOINT,
+    DEFAULT_CPX400DP_TELEMETRY_ENDPOINT,
     DEFAULT_ODRIVE_COMMAND_ENDPOINT,
     DEFAULT_ODRIVE_TELEMETRY_ENDPOINT,
+    DEVICE_CPX400DP,
     DEVICE_ODRIVE,
 )
 
-STARTUP_DELAY_S = 0.5
+logger = logging.getLogger(__name__)
+
+STARTUP_DELAY_S = 1.0
+"""Seconds allowed for both drivers to bind their sockets and connect. The
+supply's connect() checks identity, clears its error registers, probes all 27
+declared queries and reads its cached tier before it serves."""
+
+MOTOR_BUS = Rail(name="ydrive motor bus", output=2, voltage_v=48.0, current_limit_a=16.0)
+"""The ODrive's DC bus, on output 2.
+
+The 16 A limit is above what the supply can deliver at 48 V - its 420 W envelope
+caps this output at 8.75 A - so it does not act as a current limit. An overdraw
+makes the output go unregulated and the bus voltage sag; `in_power_limit_2` is
+the channel that reports it, not `current_2`. For the same reason
+`ydrive_rulebook`'s fatal `board_ibus` > 30 A bound cannot fire on this rail."""
+
+BRAKE_BUS = Rail(name="ydrive brake", output=1, voltage_v=24.0, current_limit_a=5.0)
+"""The ydrive brake, on output 1.
+
+Magnet-applied and fail-safe: the brake is engaged with this rail unpowered, and
+powering it RELEASES the brake. 120 W is inside the envelope, so this rail does
+get real current
+limiting."""
+
+RAILS = (BRAKE_BUS, MOTOR_BUS)
+"""Both rails, ordered by output number. start() iterates this to configure
+setpoints. It is not the teardown order - see stop()."""
+
+BRAKE_SETTLE_S = 0.25
+"""Seconds to wait after switching the brake rail, before moving or dwelling.
+
+A placeholder to be replaced with the brake's datasheet figure. A brake is not
+instantaneous: the coil field has to collapse before a magnet-applied brake
+grabs, and build before it lets go, and an output's terminal voltage decays
+through its capacitance rather than dropping.
+
+The risk is asymmetric. Too short before a dwell means dwelling briefly
+unbraked. Too short before a move means driving the axis into a brake that has
+not let go."""
 
 
 class YdriveTestbed:
-    """Starts/stops the ODrive driver process for ydrive, and owns connected command/telemetry clients.
+    """Starts/stops the ODrive and CPX400DP driver processes for ydrive, and owns connected clients for both.
 
     Use as a context manager:
 
         with YdriveTestbed() as testbed:
-            testbed.command.set_control_mode("VELOCITY_CONTROL")
-            testbed.command.set_axis_state("CLOSED_LOOP_CONTROL")
-            ...  # the driver is up, and the ODrive is controllable, for the duration of this block
+            testbed.power_motor_bus(True)
+            testbed.command.set_control_mode("POSITION_CONTROL")
+            ...  # both drivers are up; arming and the brake are a test's to sequence
     """
 
-    DEVICES: Tuple[str, ...] = (DEVICE_ODRIVE,)
+    DEVICES: Tuple[str, ...] = (DEVICE_ODRIVE, DEVICE_CPX400DP)
     """The devices whose driver processes this testbed owns. Declared here
     because this is what starts them; the test case unions this with its DUT
     façade's declaration (there is none for ydrive) and publishes the result, so
@@ -54,64 +121,252 @@ class YdriveTestbed:
         self,
         use_mock: bool = False,
         serial_number: Optional[str] = None,
+        cpx400dp_host: str = DEFAULT_CPX400DP_HOST,
         output_dir: Optional[Path] = None,
         test_id: Optional[str] = None,
     ) -> None:
-        """output_dir/test_id: given both, the driver writes its detailed log to
-        `<output_dir>/runs/<test_id>/odrive/logs.txt`, beside the telemetry it
-        produced - which is where a decoded ODrive fault goes (see
-        hardware/odrive/odrive_errors.py). A test case passes `self._output_dir`
-        and `self.test_id` from PreTestSetup. Omitted, the driver logs to its
-        console, which for a subprocess is nowhere anybody reads."""
+        """
+        cpx400dp_host: this stand's supply. Defaults to the driver's own
+            default, which is correct as long as only one stand is connected;
+            pass the instrument's address, or its `t<serial>.local` mDNS name,
+            for anything else.
+
+        output_dir/test_id: given both, each driver writes its detailed log to
+            `<output_dir>/runs/<test_id>/<device>/logs.txt`, beside the telemetry
+            it produced - which is where a decoded ODrive fault goes (see
+            hardware/odrive/odrive_errors.py). A test case passes
+            `self._output_dir` and `self.test_id` from PreTestSetup. Omitted, the
+            drivers log to their consoles, which for a subprocess is nowhere
+            anybody reads.
+        """
         self._use_mock = use_mock
         self._serial_number = serial_number
+        self._cpx400dp_host = cpx400dp_host
         self._output_dir = output_dir
         self._test_id = test_id
-        self._process: Optional[subprocess.Popen] = None
+        self._processes: List[subprocess.Popen] = []
         self._command: Optional[OdriveCommandClient] = None
         self._telemetry: Optional[TelemetryClient] = None
         self._sync_telemetry: Optional[TelemetryClient] = None
+        self._supply: Optional[Cpx400dpCommandClient] = None
+        self._supply_telemetry: Optional[TelemetryClient] = None
 
-    def _log_args(self) -> List[str]:
-        """`--log-file` for the ODrive driver, or nothing if this testbed wasn't
-        told which run it belongs to."""
+    def _log_args(self, device: str) -> List[str]:
+        """`--log-file` for one device's driver, or nothing if this testbed
+        wasn't told which run it belongs to."""
         if self._output_dir is None or self._test_id is None:
             return []
-        return ["--log-file", str(driver_log_path(self._output_dir, self._test_id, DEVICE_ODRIVE))]
+        return ["--log-file", str(driver_log_path(self._output_dir, self._test_id, device))]
 
     def start(self) -> None:
-        args = [sys.executable, "-m", "hardware.odrive.main", *self._log_args()]
+        """Bring both drivers up, verify their channel surfaces, and configure
+        both rails' setpoints - with the outputs left OFF.
+
+        Energizing is the test's decision, taken in PreTestSetup, not something
+        that happens because a testbed was constructed."""
+        odrive_args = [sys.executable, "-m", "hardware.odrive.main", *self._log_args(DEVICE_ODRIVE)]
         if self._use_mock:
-            args.append("--mock")
+            odrive_args.append("--mock")
         elif self._serial_number is not None:
-            args += ["--serial-number", self._serial_number]
-        self._process = subprocess.Popen(args)
-        time.sleep(STARTUP_DELAY_S)  # let the driver bind its sockets
+            odrive_args += ["--serial-number", self._serial_number]
+
+        # The driver's ceiling is per-backend rather than per-output, so the only
+        # values it can carry are the maxima across both rails. It is a coarse
+        # backstop against a gross typo, not per-rail protection: to the driver,
+        # 48 V on the 24 V brake rail is a legal command. check_rails() detects
+        # that after the fact.
+        supply_args = [
+            sys.executable, "-m", "hardware.cpx400dp.main",
+            "--host", self._cpx400dp_host,
+            "--max-voltage", str(max(rail.voltage_v for rail in RAILS)),
+            "--max-current", str(max(rail.current_limit_a for rail in RAILS)),
+            *self._log_args(DEVICE_CPX400DP),
+        ]
+
+        self._processes = [subprocess.Popen(odrive_args), subprocess.Popen(supply_args)]
+        time.sleep(STARTUP_DELAY_S)  # let both drivers bind their sockets
 
         self._command = OdriveCommandClient(endpoint=DEFAULT_ODRIVE_COMMAND_ENDPOINT)
         self._telemetry = TelemetryClient(endpoint=DEFAULT_ODRIVE_TELEMETRY_ENDPOINT)
         self._sync_telemetry = TelemetryClient(endpoint=DEFAULT_ODRIVE_TELEMETRY_ENDPOINT)
+        self._supply = Cpx400dpCommandClient(endpoint=DEFAULT_CPX400DP_COMMAND_ENDPOINT)
+        self._supply_telemetry = TelemetryClient(endpoint=DEFAULT_CPX400DP_TELEMETRY_ENDPOINT)
+
         self._command.connect_backend()
+        self._supply.connect_backend()
 
         self._command.verify_actions(COMMAND_CHANNELS)
         self._telemetry.verify_channels(TELEMETRY_CHANNELS)
+        self._supply.verify_actions(CPX400DP_COMMAND_CHANNELS)
+        self._supply_telemetry.verify_channels(CPX400DP_TELEMETRY_CHANNELS)
+
+        self._configure_rails()
+
+    def _configure_rails(self) -> None:
+        """Set both rails' voltage and current setpoints, refusing to do it
+        while an output is live.
+
+        Writing a setpoint to an energized output would step the rail under
+        whatever is connected. The supply's driver adopts, rather than resets,
+        the output state it finds, so this is the layer that notices - and it
+        raises rather than switching the output off, since something else
+        energized it deliberately and this testbed does not know what."""
+        live = [rail.name for rail in RAILS if self.rail_is_powered(rail)]
+        if live:
+            raise RuntimeError(
+                f"refusing to configure setpoints while these rails are already energized: {live}. "
+                "Something outside this testbed switched them on - the supply driver adopts, rather "
+                "than resets, the output state it finds. Switch them off before starting a run."
+            )
+
+        for rail in RAILS:
+            if not rail.is_within_envelope:
+                logger.warning(
+                    "%s: the configured %.1f A limit is above what this supply can deliver at "
+                    "%.1f V (%.2f A, from the 420 W envelope), so it will NOT act as a current "
+                    "limit. If the load draws more, the output goes unregulated and the rail "
+                    "voltage sags instead - watch in_power_limit_%d, not current_%d.",
+                    rail.name, rail.current_limit_a, rail.voltage_v,
+                    deliverable_current_a(rail.voltage_v), rail.output, rail.output,
+                )
+            self.supply.set_voltage(rail.output, rail.voltage_v)
+            self.supply.set_current(rail.output, rail.current_limit_a)
+            logger.info(
+                "%s configured on output %d: %.1f V, %.1f A limit (%.0f W)",
+                rail.name, rail.output, rail.voltage_v, rail.current_limit_a, rail.power_w,
+            )
+        self.check_rails()
+
+    SETPOINT_TOLERANCE = 0.02
+    """How far a read-back setpoint may sit from its configured value before
+    check_rails() calls it wrong. The instrument reports voltage setpoints to
+    10 mV and current to 1 mA, so this is a rounding allowance, not a band."""
+
+    def check_rails(self) -> None:
+        """Confirm both rails still hold their configured setpoints, raising if
+        not.
+
+        Called at the end of start(), because the supply accepts and then
+        silently discards a value it dislikes - a write is not evidence of a
+        setpoint. Also worth calling from a test wherever a rail's integrity
+        matters: the driver's ceiling is per-backend, so it cannot stop 48 V
+        being commanded onto the 24 V brake rail, and a test holds the same
+        supply client this testbed does."""
+        channels = self.get_supply_channels()
+        wrong = []
+        for rail in RAILS:
+            for quantity, expected, channel in (
+                ("voltage", rail.voltage_v, f"setpoint_voltage_{rail.output}"),
+                ("current limit", rail.current_limit_a, f"setpoint_current_{rail.output}"),
+            ):
+                actual = channels[channel]
+                if abs(float(actual) - expected) > self.SETPOINT_TOLERANCE:
+                    wrong.append(f"{rail.name} {quantity}: expected {expected}, instrument holds {actual}")
+        if wrong:
+            raise RuntimeError(
+                "the supply's rail setpoints do not match this stand's configuration:\n  "
+                + "\n  ".join(wrong)
+                + "\nSomething commanded a setpoint outside this testbed, or a write was refused. "
+                "See MOTOR_BUS/BRAKE_BUS in this module for what the rails should be."
+            )
 
     def stop(self) -> None:
-        if self._command is not None:
-            self._command.set_axis_state("IDLE")  # safe even if it was never armed
-            self._command.disconnect_backend()
-            self._command.close()
-            self._command = None
-        if self._telemetry is not None:
-            self._telemetry.close()
-            self._telemetry = None
-        if self._sync_telemetry is not None:
-            self._sync_telemetry.close()
-            self._sync_telemetry = None
-        if self._process is not None:
-            self._process.terminate()
-            self._process.wait(timeout=5)
-            self._process = None
+        """Tear the stand down in a safe order, and finish even if a step fails.
+
+        The order matters. The brake is magnet-applied, so dropping its rail
+        first makes the brake grab and hold the load before anything else
+        changes; only then is the axis disarmed and the motor bus removed. The
+        reverse order would leave the load unheld while the drive shuts down, and
+        a de-energized stand is one whose brake is holding.
+
+        Each step runs independently, logging a failure rather than raising, so
+        one wedged client cannot leave a 48 V bus energized."""
+        # A plain sleep rather than TestCase.wait_for(): teardown has no test
+        # case to poll, and nothing it could usefully abort for.
+        self._safe("engage the brake (drop the 24 V rail)", self._engage_brake_for_teardown)
+        self._safe("disarm the ODrive axis", lambda: self.command.set_axis_state("IDLE"))
+        self._safe("drop the 48 V motor bus", lambda: self.power_motor_bus(False))
+
+        self._safe("disconnect the ODrive backend", lambda: self.command.disconnect_backend())
+        self._safe("disconnect the supply backend", lambda: self.supply.disconnect_backend())
+
+        for client in (self._command, self._telemetry, self._sync_telemetry,
+                       self._supply, self._supply_telemetry):
+            if client is not None:
+                self._safe(f"close {type(client).__name__}", client.close)
+        self._command = self._telemetry = self._sync_telemetry = None
+        self._supply = self._supply_telemetry = None
+
+        for process in self._processes:
+            self._safe(f"terminate pid {process.pid}", process.terminate)
+        for process in self._processes:
+            self._safe(f"reap pid {process.pid}", lambda p=process: p.wait(timeout=5))
+        self._processes = []
+
+    def _engage_brake_for_teardown(self) -> None:
+        """Drop the brake rail and give the brake time to grab, before the axis is
+        disarmed and the bus removed."""
+        self.power_brake_bus(False)
+        time.sleep(BRAKE_SETTLE_S)
+
+    @staticmethod
+    def _safe(what: str, action: Callable[[], object]) -> None:
+        """Run a teardown step, logging rather than raising on failure."""
+        try:
+            action()
+        except Exception as exc:  # teardown must continue regardless
+            logger.error("teardown step failed, continuing: %s: %r", what, exc)
+
+    # --- power ------------------------------------------------------------
+
+    def power_motor_bus(self, enabled: bool) -> None:
+        """Switch the 48 V motor bus (output 2) on or off.
+
+        The output ramps rather than stepping, so a check immediately after
+        enabling reads low; and switching off does not mean zero volts, since the
+        output capacitance takes a moment to discharge."""
+        self.supply.enable_output(MOTOR_BUS.output, enabled)
+        logger.info("%s %s", MOTOR_BUS.name, "energized" if enabled else "de-energized")
+
+    def power_brake_bus(self, enabled: bool) -> None:
+        """Switch the 24 V brake rail (output 1) on or off.
+
+        Powering RELEASES the brake; removing power lets it grab. This only moves
+        the rail. It does NOT wait for the brake to act on it, and does NOT touch
+        the axis state - so calling it directly can leave the controller driving
+        against an engaged brake, or the brake letting go of a load nothing is
+        holding. The sequenced versions that cannot do either are
+        engage_brake()/release_brake() in
+        testcases/ydrive/teststeps/teststeps.py, which is what a test should
+        use."""
+        self.supply.enable_output(BRAKE_BUS.output, enabled)
+        logger.info("%s %s", BRAKE_BUS.name, "released (rail energized)" if enabled else "engaged (rail de-energized)")
+
+    def rail_is_powered(self, rail: Rail) -> bool:
+        """Whether this rail's output is currently on, read from the supply."""
+        return bool(self.get_supply_channels()[f"output_enabled_{rail.output}"])
+
+
+    def get_supply_channels(self) -> Dict[str, object]:
+        """Block for the next supply telemetry frame and return its channels.
+
+        The measured voltage and current are re-read at 5 Hz and held between
+        reads, since the instrument's meters refresh at 4 Hz, so consecutive
+        frames can carry the same reading."""
+        return self.supply_telemetry.latest_frame().channels
+
+
+    @property
+    def supply(self) -> Cpx400dpCommandClient:
+        if self._supply is None:
+            raise RuntimeError("YdriveTestbed.supply accessed before start()")
+        return self._supply
+
+    @property
+    def supply_telemetry(self) -> TelemetryClient:
+        if self._supply_telemetry is None:
+            raise RuntimeError("YdriveTestbed.supply_telemetry accessed before start()")
+        return self._supply_telemetry
 
     @property
     def command(self) -> OdriveCommandClient:
@@ -132,15 +387,24 @@ class YdriveTestbed:
         return self._sync_telemetry
 
     def get_channels(self) -> Dict[str, object]:
-        """Block until the next telemetry frame arrives and return its
-        full channels dict. For test step code, prefer the named
-        per-channel methods below - this is for callers that need more
-        than one channel from the same instant."""
-        frame = next(self.sync_telemetry.frames())
-        return frame.channels
+        """The newest ODrive frame's full channels dict, blocking if none has
+        arrived yet.
+
+        Use this whenever more than one channel is needed from the same instant -
+        reading two named accessors gives two values from two different frames,
+        and costs two frame periods."""
+        return self.sync_telemetry.latest_frame().channels
 
     def get_pos_estimate(self) -> float:
         return self.get_channels()["pos_estimate"]
+
+    def get_axis_armed_status(self) -> bool:
+        """Whether the axis is actively controlling the motor (`axis_is_armed`).
+
+        Requesting an axis state only writes `requested_state`; the ODrive acts on
+        it asynchronously and can decline. This is the reading that says whether
+        it took."""
+        return bool(self.get_channels()["axis_is_armed"])
 
     def get_vel_estimate(self) -> float:
         return self.get_channels()["vel_estimate"]

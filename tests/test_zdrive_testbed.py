@@ -4,7 +4,7 @@ can be checked without the hardware attached.
 start()/stop() launch driver subprocesses and talk to a real ODrive and a real
 supply, so they are not exercised here. What is: the rail declarations, the
 envelope arithmetic that decides whether a configured current limit is even
-reachable, the teardown ordering that the brake's spring-applied behaviour
+reachable, the teardown ordering that the brake's magnet-applied behaviour
 depends on, and the setpoint check - all of which are ordinary logic and all of
 which would be silently wrong in ways a live run might not reveal.
 """
@@ -15,16 +15,13 @@ import inspect
 import pytest
 
 from protocol.wire import DEVICE_CPX400DP, DEVICE_ODRIVE, TELEMETRY_ENDPOINTS
-from testbeds.zdrive_testbed.config.instruments import (
-    BRAKE_BUS,
+from hardware.cpx400dp.rails import (
     MAX_CURRENT_A,
     MAX_VOLTAGE_V,
-    MOTOR_BUS,
     POWER_ENVELOPE_W,
-    RAILS,
     deliverable_current_a,
 )
-from testbeds.zdrive_testbed.zdrive_testbed import ZdriveTestbed
+from testbeds.zdrive_testbed.zdrive_testbed import BRAKE_BUS, MOTOR_BUS, RAILS, ZdriveTestbed
 
 
 # --- what the stand is wired as ---------------------------------------------
@@ -112,7 +109,7 @@ def test_accessors_raise_before_start_rather_than_returning_none():
 
 
 def test_teardown_drops_the_brake_rail_before_the_motor_bus():
-    """The brake is spring-applied, so dropping its rail first is what makes it
+    """The brake is magnet-applied, so dropping its rail first is what makes it
     grab and hold the load before the drive is disarmed and the bus removed.
     Reversing these would leave the load unheld during shutdown - a source
     ordering that is easy to disturb while editing and invisible in review."""
@@ -175,13 +172,3 @@ def test_without_a_run_the_drivers_are_given_no_log_flag():
     assert ZdriveTestbed(output_dir="/out", test_id=None)._log_args(DEVICE_ODRIVE) == []
 
 
-def test_both_addressing_options_are_recorded_for_the_supply():
-    """The instrument answers on a raw link-local address and on an mDNS name
-    derived from its serial number. They fail in different directions - the
-    address when it moves, the name where no mDNS responder exists - so both are
-    declared and the choice is the stand's."""
-    from testbeds.zdrive_testbed.config.instruments import CPX400DP_HOST, CPX400DP_MDNS_HOST
-
-    assert CPX400DP_HOST.startswith("169.254."), "the fallback is a link-local address"
-    assert CPX400DP_MDNS_HOST.endswith(".local"), "the stable identity is an mDNS name"
-    assert "599542" in CPX400DP_MDNS_HOST, "the mDNS name carries the instrument's serial number"
