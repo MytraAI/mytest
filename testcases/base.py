@@ -467,16 +467,26 @@ class TestCase(ABC):
             self.test_id, beat.output_dir, beat.pid, ", ".join(self.DEVICES) or "(no declared devices)",
         )
 
+    def check_should_continue(self) -> None:
+        """Raise if this run should stop: a fatal Rulebook violation, an operator
+        stop request, or the telemetry engine having stopped recording.
+
+        The three checks always belong together, so any loop that blocks - a
+        paced wait, a step boundary, a test step polling live readings - calls
+        this rather than picking a subset. Picking a subset is how a loop ends up
+        honouring a fatal bound while ignoring an operator's stop for its whole
+        duration."""
+        self.check_fatal_violation()
+        self.check_stop_requested()
+        self.check_recording_alive()
+
     def wait_for(self, duration_s: float) -> None:
-        """Paced wait for duration_s, calling check_fatal_violation(),
-        check_stop_requested() and check_recording_alive() each tick
-        instead of blocking the full duration regardless of any of them.
-        Use this instead of iterating a Stopwatch directly for a plain
-        wait with no other condition to check."""
+        """Paced wait for duration_s, calling check_should_continue() each tick
+        instead of blocking the full duration regardless of it. Use this instead
+        of iterating a Stopwatch directly for a plain wait with no other
+        condition to check."""
         for _ in Stopwatch(duration_s=duration_s):
-            self.check_fatal_violation()
-            self.check_stop_requested()
-            self.check_recording_alive()
+            self.check_should_continue()
 
     def set_state(self, name: str, value: Any) -> None:
         """Publish a named state value - a step name, a rule's status, a

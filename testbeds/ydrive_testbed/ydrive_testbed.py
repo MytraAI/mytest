@@ -5,8 +5,11 @@ DUT layer - the ODrive is the entire actuator and sensor interface.
 The supply feeds two rails: a 48 V motor bus on output 2 and a 24 V brake on
 output 1 (see MOTOR_BUS/BRAKE_BUS below).
 
-THE BRAKE IS SPRING-APPLIED. Powering output 1 releases it; removing power lets
-it grab and hold the load. power_brake_bus() is the only place that polarity is
+THE BRAKE IS MAGNET-APPLIED, AND SO FAIL-SAFE. A permanent magnet supplies the
+holding force, so the brake is engaged whenever its rail is unpowered; powering
+output 1 cancels that field and releases it. Losing the rail therefore holds the
+load rather than dropping it. power_brake_bus() is the only place that polarity
+is
 asserted - and it moves the rail alone. Pairing the rail with the axis state, so
 the motor never drives against an engaged brake and the brake never lets go of a
 load the controller has not taken, is engage_brake()/release_brake() in
@@ -74,8 +77,9 @@ the channel that reports it, not `current_2`. For the same reason
 BRAKE_BUS = Rail(name="ydrive brake", output=1, voltage_v=24.0, current_limit_a=5.0)
 """The ydrive brake, on output 1.
 
-Spring-applied: powering this rail RELEASES the brake, removing power lets it
-grab. 120 W is inside the envelope, so this rail does get real current
+Magnet-applied and fail-safe: the brake is engaged with this rail unpowered, and
+powering it RELEASES the brake. 120 W is inside the envelope, so this rail does
+get real current
 limiting."""
 
 RAILS = (BRAKE_BUS, MOTOR_BUS)
@@ -86,7 +90,7 @@ BRAKE_SETTLE_S = 0.25
 """Seconds to wait after switching the brake rail, before moving or dwelling.
 
 A placeholder to be replaced with the brake's datasheet figure. A brake is not
-instantaneous: the coil field has to collapse before a spring-applied brake
+instantaneous: the coil field has to collapse before a magnet-applied brake
 grabs, and build before it lets go, and an output's terminal voltage decays
 through its capacitance rather than dropping.
 
@@ -102,10 +106,8 @@ class YdriveTestbed:
 
         with YdriveTestbed() as testbed:
             testbed.power_motor_bus(True)
-            testbed.release_brake()
             testbed.command.set_control_mode("POSITION_CONTROL")
-            testbed.command.set_axis_state("CLOSED_LOOP_CONTROL")
-            ...  # both drivers are up and the axis is controllable for this block
+            ...  # both drivers are up; arming and the brake are a test's to sequence
     """
 
     DEVICES: Tuple[str, ...] = (DEVICE_ODRIVE, DEVICE_CPX400DP)
@@ -223,8 +225,7 @@ class YdriveTestbed:
                     "%s: the configured %.1f A limit is above what this supply can deliver at "
                     "%.1f V (%.2f A, from the 420 W envelope), so it will NOT act as a current "
                     "limit. If the load draws more, the output goes unregulated and the rail "
-                    "voltage sags instead - watch in_power_limit_%d, not current_%d. Note this also "
-                    "means ydrive_rulebook's fatal board_ibus > 30 A bound can no longer fire.",
+                    "voltage sags instead - watch in_power_limit_%d, not current_%d.",
                     rail.name, rail.current_limit_a, rail.voltage_v,
                     deliverable_current_a(rail.voltage_v), rail.output, rail.output,
                 )
@@ -272,10 +273,11 @@ class YdriveTestbed:
     def stop(self) -> None:
         """Tear the stand down in a safe order, and finish even if a step fails.
 
-        The order matters. The brake is spring-applied, so dropping its rail
+        The order matters. The brake is magnet-applied, so dropping its rail
         first makes the brake grab and hold the load before anything else
         changes; only then is the axis disarmed and the motor bus removed. The
-        reverse order would leave the load unheld while the drive shuts down.
+        reverse order would leave the load unheld while the drive shuts down, and
+        a de-energized stand is one whose brake is holding.
 
         Each step runs independently, logging a failure rather than raising, so
         one wedged client cannot leave a 48 V bus energized."""
@@ -327,8 +329,7 @@ class YdriveTestbed:
         logger.info("%s %s", MOTOR_BUS.name, "energized" if enabled else "de-energized")
 
     def power_brake_bus(self, enabled: bool) -> None:
-        """Switch the 24 V brake rail (output 1) on or off, and wait for the
-        brake to act on it.
+        """Switch the 24 V brake rail (output 1) on or off.
 
         Powering RELEASES the brake; removing power lets it grab. This only moves
         the rail. It does NOT wait for the brake to act on it, and does NOT touch
@@ -341,21 +342,10 @@ class YdriveTestbed:
         self.supply.enable_output(BRAKE_BUS.output, enabled)
         logger.info("%s %s", BRAKE_BUS.name, "released (rail energized)" if enabled else "engaged (rail de-energized)")
 
-    def rail_is_powered(self, rail) -> bool:
+    def rail_is_powered(self, rail: Rail) -> bool:
         """Whether this rail's output is currently on, read from the supply."""
         return bool(self.get_supply_channels()[f"output_enabled_{rail.output}"])
 
-    def brake_is_released(self) -> bool:
-        """Whether the brake rail is energized, i.e. the brake is released."""
-        return self.rail_is_powered(BRAKE_BUS)
-
-    def motor_bus_is_unregulated(self) -> bool:
-        """Whether the motor bus has hit the supply's power envelope.
-
-        The channel that matters on this rail rather than current: the 16 A limit
-        is above the 8.75 A the supply can source at 48 V, so an overdraw shows
-        up as the output going unregulated and the voltage sagging."""
-        return bool(self.get_supply_channels()[f"in_power_limit_{MOTOR_BUS.output}"])
 
     def get_supply_channels(self) -> Dict[str, object]:
         """Block for the next supply telemetry frame and return its channels.
@@ -363,19 +353,8 @@ class YdriveTestbed:
         The measured voltage and current are re-read at 5 Hz and held between
         reads, since the instrument's meters refresh at 4 Hz, so consecutive
         frames can carry the same reading."""
-        return next(self.supply_telemetry.frames()).channels
+        return self.supply_telemetry.latest_frame().channels
 
-    def get_motor_bus_voltage(self) -> float:
-        """Volts on the 48 V rail as the supply measures them. The ODrive's
-        `board_vbus_voltage` is the drive's view of the same rail; the difference
-        is the cable drop."""
-        return self.get_supply_channels()[f"voltage_{MOTOR_BUS.output}"]
-
-    def get_motor_bus_current(self) -> float:
-        """Amps into the drive as the supply measures them. Not trustworthy below
-        a few tens of milliamps: the readback is +-0.3% of reading +-2 digits, a
-        digit being 10 mA."""
-        return self.get_supply_channels()[f"current_{MOTOR_BUS.output}"]
 
     @property
     def supply(self) -> Cpx400dpCommandClient:
@@ -408,12 +387,13 @@ class YdriveTestbed:
         return self._sync_telemetry
 
     def get_channels(self) -> Dict[str, object]:
-        """Block until the next telemetry frame arrives and return its
-        full channels dict. For test step code, prefer the named
-        per-channel methods below - this is for callers that need more
-        than one channel from the same instant."""
-        frame = next(self.sync_telemetry.frames())
-        return frame.channels
+        """The newest ODrive frame's full channels dict, blocking if none has
+        arrived yet.
+
+        Use this whenever more than one channel is needed from the same instant -
+        reading two named accessors gives two values from two different frames,
+        and costs two frame periods."""
+        return self.sync_telemetry.latest_frame().channels
 
     def get_pos_estimate(self) -> float:
         return self.get_channels()["pos_estimate"]

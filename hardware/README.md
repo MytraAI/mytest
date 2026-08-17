@@ -77,6 +77,7 @@ Mytest/
       cpx400dp_backend.py          Cpx400dpBackend - REAL, a TTi CPX400DP dual-output bench supply over ethernet (raw socket, port 9221). No mock counterpart.
       transport.py                 TtiSocketTransport - the line protocol alone (LF out, CRLF back), serialized on one lock; the seam tests substitute
       cpx400dp_channels.py         TELEMETRY_CHANNELS/COMMAND_CHANNELS - 41 telemetry channels in four acquisition tiers, and all 66 documented commands
+      rails.py                     the supply's power envelope, and a Rail describing one of its outputs - shared by the stands that use this model
       cpx400dp_command_client.py   Cpx400dpCommandClient - named sugar per command channel; 10 s default timeout, since `with verify` blocks 5 s
       main.py                      entry point: always real hardware, --host/--port/--max-voltage/--max-current/--interface-lock, calls runner.run()
     clients/

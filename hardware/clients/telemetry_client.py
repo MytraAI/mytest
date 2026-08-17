@@ -73,6 +73,25 @@ class TelemetryClient:
             _, raw = self._socket.recv_multipart()
             yield TelemetryFrame.from_bytes(raw)
 
+    def latest_frame(self) -> TelemetryFrame:
+        """Return the newest frame available, discarding any queued behind it.
+
+        For a point read - "what is the axis doing right now" - where frames()
+        would hand back the oldest queued frame instead. A subscriber that was
+        created early and is read late has a backlog proportional to that gap
+        (RCVHWM is 500 frames), so frames() can answer a question about the
+        present with a reading seconds old, and a single read-and-compare against
+        it is wrong rather than merely late.
+
+        Blocks for one frame if none is queued, so it paces a polling loop the
+        same way frames() does, and raises TelemetryTimeout on the same
+        staleness deadline."""
+        frame = next(self.frames())
+        while self._poller.poll(0):
+            _, raw = self._socket.recv_multipart()
+            frame = TelemetryFrame.from_bytes(raw)
+        return frame
+
     def verify_channels(self, expected: Iterable[str]) -> None:
         """Block for one live frame and raise MissingChannelError if
         any of `expected` isn't among its channels."""

@@ -7,10 +7,13 @@ output 1 (see MOTOR_BUS/BRAKE_BUS below).
     with ZdriveTestbed() as testbed:
         testbed.power_motor_bus(True)
         testbed.command.set_axis_state("CLOSED_LOOP_CONTROL")
-        testbed.power_brake_bus(True)
+        testbed.power_brake_bus(True)   # only after the controller is holding
 
-THE BRAKE IS SPRING-APPLIED. Powering output 1 releases it; removing power lets
-it grab and hold the load. power_brake_bus() is the only place that polarity is
+THE BRAKE IS MAGNET-APPLIED, AND SO FAIL-SAFE. A permanent magnet supplies the
+holding force, so the brake is engaged whenever its rail is unpowered; powering
+output 1 cancels that field and releases it. Losing the rail therefore holds the
+load rather than dropping it. power_brake_bus() is the only place that polarity
+is
 asserted, and it moves the rail alone - pairing it with the axis state belongs in
 a test step.
 
@@ -77,6 +80,12 @@ appears or on an address collision. `t599542.local` is the same instrument by
 mDNS name and follows it when the address moves, at the cost of needing an mDNS
 responder on the host. Pass either as ZdriveTestbed(cpx400dp_host=...)."""
 
+CPX400DP_MDNS_HOST = "t599542.local"
+"""The same supply by mDNS name: it advertises itself as `t<serial>.local`, which
+follows it when its address changes. Needs an mDNS responder on the host - macOS
+has one built in, a Windows or CentOS stand may not. Pass either this or
+CPX400DP_HOST as ZdriveTestbed(cpx400dp_host=...)."""
+
 STARTUP_DELAY_S = 1.0
 """Seconds allowed for both drivers to bind their sockets and connect. The
 supply's connect() checks identity, clears its error registers, probes all 27
@@ -94,8 +103,9 @@ for real current limiting on this rail."""
 BRAKE_BUS = Rail(name="zdrive brake", output=1, voltage_v=24.0, current_limit_a=5.0)
 """The zdrive brake, on output 1.
 
-Spring-applied: powering this rail RELEASES the brake, removing power lets it
-grab. 120 W is inside the envelope, so this rail does get real current
+Magnet-applied and fail-safe: the brake is engaged with this rail unpowered, and
+powering it RELEASES the brake. 120 W is inside the envelope, so this rail does
+get real current
 limiting."""
 
 RAILS = (BRAKE_BUS, MOTOR_BUS)
@@ -106,7 +116,7 @@ BRAKE_SETTLE_S = 0.25
 """Seconds to wait after switching the brake rail, before moving or dwelling.
 
 A placeholder to be replaced with the brake's datasheet figure. A brake is not
-instantaneous: the coil field has to collapse before a spring-applied brake
+instantaneous: the coil field has to collapse before a magnet-applied brake
 grabs, and build before it lets go."""
 
 
@@ -282,10 +292,11 @@ class ZdriveTestbed:
     def stop(self) -> None:
         """Tear the stand down in a safe order, and finish even if a step fails.
 
-        The order matters. The brake is spring-applied, so dropping its rail
+        The order matters. The brake is magnet-applied, so dropping its rail
         first makes the brake grab and hold the load before anything else
         changes; only then is the axis disarmed and the motor bus removed. The
-        reverse order would leave the load unheld while the drive shuts down.
+        reverse order would leave the load unheld while the drive shuts down, and
+        a de-energized stand is one whose brake is holding.
 
         Each step runs independently, logging a failure rather than raising, so
         one wedged client cannot leave a 48 V bus energized."""
@@ -337,8 +348,7 @@ class ZdriveTestbed:
         logger.info("%s %s", MOTOR_BUS.name, "energized" if enabled else "de-energized")
 
     def power_brake_bus(self, enabled: bool) -> None:
-        """Switch the 24 V brake rail (output 1) on or off, and wait for the
-        brake to act on it.
+        """Switch the 24 V brake rail (output 1) on or off.
 
         Powering RELEASES the brake; removing power lets it grab. This only moves
         the rail. It does NOT wait for the brake to act on it, and does NOT touch
@@ -361,7 +371,7 @@ class ZdriveTestbed:
         """Block for the next ODrive telemetry frame and return its channels.
         Uses a separate sync client so it doesn't contend with whatever else is
         consuming .telemetry (e.g. LiveRulebookRunner)."""
-        return next(self.sync_telemetry.frames()).channels
+        return self.sync_telemetry.latest_frame().channels
 
     def get_supply_channels(self) -> Dict[str, object]:
         """Block for the next supply telemetry frame and return its channels.
@@ -369,7 +379,7 @@ class ZdriveTestbed:
         The measured voltage and current are re-read at 5 Hz and held between
         reads, since the instrument's meters refresh at 4 Hz, so consecutive
         frames can carry the same reading."""
-        return next(self.supply_telemetry.frames()).channels
+        return self.supply_telemetry.latest_frame().channels
 
     def get_pos_estimate(self) -> float:
         return self.get_channels()["pos_estimate"]
@@ -377,17 +387,6 @@ class ZdriveTestbed:
     def get_vel_estimate(self) -> float:
         return self.get_channels()["vel_estimate"]
 
-    def get_motor_bus_voltage(self) -> float:
-        """Volts on the 48 V rail as the supply measures them. The ODrive's
-        `board_vbus_voltage` is the drive's view of the same rail; the difference
-        is the cable drop."""
-        return self.get_supply_channels()[f"voltage_{MOTOR_BUS.output}"]
-
-    def get_motor_bus_current(self) -> float:
-        """Amps into the drive as the supply measures them. Not trustworthy below
-        a few tens of milliamps: the readback is +-0.3% of reading +-2 digits, a
-        digit being 10 mA."""
-        return self.get_supply_channels()[f"current_{MOTOR_BUS.output}"]
 
     def get_brake_voltage(self) -> float:
         return self.get_supply_channels()[f"voltage_{BRAKE_BUS.output}"]
@@ -395,16 +394,6 @@ class ZdriveTestbed:
     def get_brake_current(self) -> float:
         return self.get_supply_channels()[f"current_{BRAKE_BUS.output}"]
 
-    def motor_bus_is_unregulated(self) -> bool:
-        """Whether the motor bus has hit the supply's power envelope.
-
-        This is the channel that matters on this rail rather than current: the
-        configured 16 A limit is above the 8.75 A the supply can source at 48 V,
-        so an overdraw shows up as the output going unregulated and the voltage
-        sagging, not as a current limit engaging."""
-        return bool(self.get_supply_channels()[f"in_power_limit_{MOTOR_BUS.output}"])
-
-    # --- accessors --------------------------------------------------------
 
     @property
     def command(self) -> OdriveCommandClient:

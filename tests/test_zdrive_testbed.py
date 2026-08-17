@@ -4,7 +4,7 @@ can be checked without the hardware attached.
 start()/stop() launch driver subprocesses and talk to a real ODrive and a real
 supply, so they are not exercised here. What is: the rail declarations, the
 envelope arithmetic that decides whether a configured current limit is even
-reachable, the teardown ordering that the brake's spring-applied behaviour
+reachable, the teardown ordering that the brake's magnet-applied behaviour
 depends on, and the setpoint check - all of which are ordinary logic and all of
 which would be silently wrong in ways a live run might not reveal.
 """
@@ -109,7 +109,7 @@ def test_accessors_raise_before_start_rather_than_returning_none():
 
 
 def test_teardown_drops_the_brake_rail_before_the_motor_bus():
-    """The brake is spring-applied, so dropping its rail first is what makes it
+    """The brake is magnet-applied, so dropping its rail first is what makes it
     grab and hold the load before the drive is disarmed and the bus removed.
     Reversing these would leave the load unheld during shutdown - a source
     ordering that is easy to disturb while editing and invisible in review."""

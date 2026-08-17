@@ -11,11 +11,14 @@ computed analytically from LOW_POSITION/HIGH_POSITION via
 METERS_PER_TURN, not measured telemetry - assumes each cycle_position()
 call actually reaches its target.
 
-post_test_teardown() moves back to position 0 before the base class's
-own teardown idles the axis - wrapped in _teardown_step() like every
-other teardown action, so a fatal violation already in flight (move_to
-checks it at entry via @step) or a stuck axis just logs and moves on to
-idling rather than blocking teardown.
+Teardown does not move the axis. It stops where the last cycle left it,
+and the base class's teardown engages the brake, idles the axis and
+drops the bus. Parking at a particular position would mean commanding
+motion during teardown - which is when the axis is least trustworthy,
+since teardown also runs after a fatal violation or a failure part-way
+through a brake transition. Nothing needs it: main_execution moves to
+LOW_POSITION before it starts cycling, so the next run establishes its
+own reference wherever this one stopped.
 
 ManualTest: no test sequence of its own. Starts live Rulebook
 evaluation, then blocks indefinitely via wait_for(float("inf")) -
@@ -27,15 +30,22 @@ long as an operator (e.g. via a GUI) needs them, for manually viewing
 and commanding hardware directly. Deliberately leaves the axis in
 IDLE, unconfigured - control mode, tuning, and arming are the
 operator's own choice to make in the moment, not this test's to assume.
+It leaves the 48 V motor bus off, taking BaseYdriveTest's default, so
+nothing about opening this test energizes the stand: no bus, no arming,
+no brake change. Powering a rail is the operator's to decide, the same
+way control mode and arming already are - the supply's own command
+endpoint can be added in tools/manual_gui.py alongside the ODrive's,
+which is how they energize it and release the brake by hand.
 post_test_teardown() is inherited unchanged from BaseYdriveTest for the
 same reason: it has no idea where the operator left the axis, so it
-doesn't command any move - just idles it.
+commands no motion.
 """
 from __future__ import annotations
 
 import logging
 from typing import Optional
 
+from ..rulebooks.ydrive_rulebook import ENDURANCE_CYCLE_TEST_NAME, MANUAL_TEST_NAME
 from .base_ydrive_test import BaseYdriveTest
 from ..teststeps.teststeps import cycle_position, move_to, release_brake, set_tuning_params
 
@@ -47,10 +57,14 @@ METERS_PER_TURN = 0.084
 class EnduranceCycleTest(BaseYdriveTest):
     """Cycles ydrive indefinitely between two position setpoints, tracking cumulative distance traveled."""
 
-    TEST_NAME = "endurance_cycle_test"
+    TEST_NAME = ENDURANCE_CYCLE_TEST_NAME
 
     LOW_POSITION = 0.0
     HIGH_POSITION = 10.0
+
+    POWER_MOTOR_BUS_AT_SETUP = True
+    """This test drives the axis, so it needs the 48 V bus up before
+    main_execution can arm the ODrive."""
 
     def __init__(self, test_id: Optional[str] = None, use_mock: bool = False, require_engine: bool = True):
         super().__init__(test_id, use_mock, require_engine=require_engine)
@@ -74,38 +88,11 @@ class EnduranceCycleTest(BaseYdriveTest):
             self.set_state("total_distance_m", self.total_distance_m)
             logger.info("test %s: total distance traveled: %.3f m", self.test_id, self.total_distance_m)
 
-    def post_test_teardown(self) -> None:
-        if self.testbed is not None:
-            self.teardown_step("return to position 0", self._return_to_zero)
-        super().post_test_teardown()
-
-    def _return_to_zero(self) -> None:
-        """Move back to position 0, but only with the brake released.
-
-        main_execution can leave the brake engaged: cycle_position releases it
-        after a dwell, but a failure in either brake transition itself - a refused
-        supply write, an axis that will not idle - propagates out with the brake
-        still holding. Commanding a move then would drive the axis into it.
-
-        So the brake is released first, and if it cannot be, the move is skipped
-        rather than attempted. Skipping loses only the convenience of parking at
-        0; the testbed's own teardown re-engages the brake and drops the bus
-        either way."""
-        if not self.testbed.brake_is_released():
-            release_brake(self)
-        if not self.testbed.brake_is_released():
-            logger.warning(
-                "test %s: brake is still engaged, skipping the return to position 0 rather than "
-                "driving the axis into it", self.test_id,
-            )
-            return
-        move_to(self, 0.0)
-
 
 class ManualTest(BaseYdriveTest):
     """No test sequence of its own - keeps the ODrive driver process and command/telemetry endpoints alive, under live Rulebook evaluation, for an operator to command/view directly (e.g. via a GUI) until stopped."""
 
-    TEST_NAME = "manual_test"
+    TEST_NAME = MANUAL_TEST_NAME
 
     def main_execution(self) -> None:
         self.runner.start(self.testbed.telemetry)

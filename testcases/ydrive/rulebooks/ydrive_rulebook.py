@@ -29,7 +29,10 @@ from __future__ import annotations
 
 from testcases.asimov.rulebook import Bound, Rulebook
 
-TEST_NAMES = ["endurance_cycle_test", "manual_test"]
+ENDURANCE_CYCLE_TEST_NAME = "endurance_cycle_test"
+MANUAL_TEST_NAME = "manual_test"
+
+TEST_NAMES = [ENDURANCE_CYCLE_TEST_NAME, MANUAL_TEST_NAME]
 
 YDRIVE_RULEBOOK = Rulebook(
     name="ydrive_rulebook",
