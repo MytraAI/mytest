@@ -15,16 +15,13 @@ import inspect
 import pytest
 
 from protocol.wire import DEVICE_CPX400DP, DEVICE_ODRIVE, TELEMETRY_ENDPOINTS
-from testbeds.zdrive_testbed.config.instruments import (
-    BRAKE_BUS,
+from hardware.cpx400dp.rails import (
     MAX_CURRENT_A,
     MAX_VOLTAGE_V,
-    MOTOR_BUS,
     POWER_ENVELOPE_W,
-    RAILS,
     deliverable_current_a,
 )
-from testbeds.zdrive_testbed.zdrive_testbed import ZdriveTestbed
+from testbeds.zdrive_testbed.zdrive_testbed import BRAKE_BUS, MOTOR_BUS, RAILS, ZdriveTestbed
 
 
 # --- what the stand is wired as ---------------------------------------------
@@ -175,13 +172,3 @@ def test_without_a_run_the_drivers_are_given_no_log_flag():
     assert ZdriveTestbed(output_dir="/out", test_id=None)._log_args(DEVICE_ODRIVE) == []
 
 
-def test_both_addressing_options_are_recorded_for_the_supply():
-    """The instrument answers on a raw link-local address and on an mDNS name
-    derived from its serial number. They fail in different directions - the
-    address when it moves, the name where no mDNS responder exists - so both are
-    declared and the choice is the stand's."""
-    from testbeds.zdrive_testbed.config.instruments import CPX400DP_HOST, CPX400DP_MDNS_HOST
-
-    assert CPX400DP_HOST.startswith("169.254."), "the fallback is a link-local address"
-    assert CPX400DP_MDNS_HOST.endswith(".local"), "the stable identity is an mDNS name"
-    assert "599542" in CPX400DP_MDNS_HOST, "the mDNS name carries the instrument's serial number"

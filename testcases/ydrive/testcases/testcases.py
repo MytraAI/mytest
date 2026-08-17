@@ -37,7 +37,7 @@ import logging
 from typing import Optional
 
 from .base_ydrive_test import BaseYdriveTest
-from ..teststeps.teststeps import cycle_position, move_to, set_tuning_params
+from ..teststeps.teststeps import cycle_position, move_to, release_brake, set_tuning_params
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,9 @@ class EnduranceCycleTest(BaseYdriveTest):
         self.runner.start(self.testbed.telemetry)
         set_tuning_params(self)
         self.testbed.command.set_control_mode("POSITION_CONTROL")
-        self.testbed.command.set_axis_state("CLOSED_LOOP_CONTROL")
+        # Arms the axis and then releases the brake, in that order -
+        # pre_test_setup left the brake engaged and the axis idle on purpose.
+        release_brake(self)
         move_to(self, self.LOW_POSITION)
 
         distance_per_cycle_m = 2 * abs(self.HIGH_POSITION - self.LOW_POSITION) * METERS_PER_TURN
@@ -74,8 +76,30 @@ class EnduranceCycleTest(BaseYdriveTest):
 
     def post_test_teardown(self) -> None:
         if self.testbed is not None:
-            self.teardown_step("move to position 0", lambda: move_to(self, 0.0))
+            self.teardown_step("return to position 0", self._return_to_zero)
         super().post_test_teardown()
+
+    def _return_to_zero(self) -> None:
+        """Move back to position 0, but only with the brake released.
+
+        main_execution can leave the brake engaged: cycle_position releases it
+        after a dwell, but a failure in either brake transition itself - a refused
+        supply write, an axis that will not idle - propagates out with the brake
+        still holding. Commanding a move then would drive the axis into it.
+
+        So the brake is released first, and if it cannot be, the move is skipped
+        rather than attempted. Skipping loses only the convenience of parking at
+        0; the testbed's own teardown re-engages the brake and drops the bus
+        either way."""
+        if not self.testbed.brake_is_released():
+            release_brake(self)
+        if not self.testbed.brake_is_released():
+            logger.warning(
+                "test %s: brake is still engaged, skipping the return to position 0 rather than "
+                "driving the axis into it", self.test_id,
+            )
+            return
+        move_to(self, 0.0)
 
 
 class ManualTest(BaseYdriveTest):

@@ -4,6 +4,17 @@ main_execution actually does:
 
 - overcurrent_bound: board_ibus > 30A for 5s continuous (persistence_s
   debounces a brief spike, e.g. during a fast direction reversal).
+  NOTE: since the CPX400DP took over this stand's DC bus, this bound can
+  no longer fire. The supply cannot source 30 A at any voltage (20 A
+  absolute, and only 8.75 A at the 48 V this rail runs at, from its
+  420 W envelope), so an overdraw makes the output go *unregulated* and
+  the bus voltage sag long before board_ibus reaches 30 A. It is left in
+  place because it costs nothing and stays correct if the bus is ever fed
+  by something bigger - but the channel that actually reports the limit
+  being hit is the supply's own in_power_limit_2, and undervoltage_bound
+  below is what now catches the sag. Adding a bound on in_power_limit_2
+  is an open action (see AI/Mytest.md); it needs a decision about whether
+  hitting the envelope should be fatal or merely recorded.
 - undervoltage_bound: board_vbus_voltage < 10.5V, no persistence -
   trusted instantaneously rather than debounced.
 

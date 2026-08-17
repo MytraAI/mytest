@@ -22,40 +22,35 @@ de-energize something a person deliberately energized. Nothing here survives
 SIGKILL; energized-state safety belongs to the instrument's own OVP/OCP, which
 this driver exposes but never sets on its own.
 
-EVERY WRITE IS CHECKED, because the instrument accepts writes it then ignores.
-Measured: `V2 999` (above the 60 V maximum) leaves the setpoint untouched,
-answers nothing at all, and reports itself only as `EER?` = 100. Both registers
-are read after every command, because they catch different failures - a range
-error sets `EER?` and `*ESR?` bit 4, while a syntax error sets only `*ESR?`
-bit 5. They are read *after* the command inside one transaction, so the answer
-cannot be another caller's.
+EVERY WRITE IS CHECKED, because the instrument accepts writes it then discards.
+`V2 999` (above the 60 V maximum) leaves the setpoint untouched, answers nothing
+at all, and reports itself only as `EER?` = 100. Both registers are read after
+every command, because they catch different failures - a range error sets `EER?`
+and `*ESR?` bit 4, while a syntax error sets only `*ESR?` bit 5. They are read
+after the command inside one transaction, so the answer cannot be another
+caller's.
 
-The registers also survive the socket: they belong to the interface instance,
-not the connection, so a driver that starts fresh can read an error left by a
-process that died twenty minutes earlier. connect() issues `*CLS` for exactly
-that reason.
+The registers survive the socket: they belong to the interface instance rather
+than the connection, so a driver starting fresh can read an error left by a
+process that died earlier. connect() issues `*CLS` for that reason.
 
-MEASURED AGAINST A REAL CPX400DP - Thurlby Thandar, serial 599542, firmware
-2.03-4.12, over a link-local ethernet connection:
-  - ~2.4 ms per query round-trip; the 8-query streaming frame costs 18.9 ms at
-    the median, but the instrument intermittently stalls - see
-    SAMPLE_INTERVAL_S for the distribution and what it means for consumers.
-  - `RANGE<n>?`, `SENSE<n>?`, `DAMPING<n>?` and `EXR?` are NOT implemented on
-    this firmware; they belong to other TTi models. An unimplemented mnemonic
-    is answered with silence, so it costs a full read timeout - which is what
-    _verify_declared_channels_exist() exists to catch once, at connect, rather
-    than on every frame for a whole run.
-  - The output ramps: 0.25 s after `OP2 1` at a 5 V setpoint the readback was
-    4.515 V, reaching 4.995 V shortly after. A step asserting voltage
-    immediately after enabling an output will read low.
-  - Switching an output off does not mean zero volts: 2.748 V was still on the
-    terminals immediately after `OP2 0`, decaying through the output
-    capacitance into an open circuit.
-  - An OVP or OCP trip switches the output off *by itself*, within one frame
-    period - which is why `output_enabled_<n>` is streamed rather than cached
-    with the other settings. `TRIPRST` does not clear either trip; see
-    cpx400dp_channels.py for what actually does, and note the two trips need
-    different recovery.
+BEHAVIOUR OF THIS INSTRUMENT worth knowing before writing a test against it:
+  - ~2.4 ms per query round-trip, and the instrument intermittently stalls for a
+    few hundred milliseconds - see SAMPLE_INTERVAL_S.
+  - `RANGE<n>?`, `SENSE<n>?`, `DAMPING<n>?` and `EXR?` are not implemented on
+    firmware 2.03-4.12; they belong to other TTi models. An unimplemented
+    mnemonic is answered with silence, so it costs a full read timeout, which is
+    what _verify_declared_channels_exist() catches once at connect rather than on
+    every frame of a run.
+  - An output ramps rather than stepping: a quarter-second after enabling at a
+    5 V setpoint the readback is still short of it. A step asserting voltage
+    immediately after enabling an output reads low.
+  - Switching an output off does not mean zero volts - the terminals decay
+    through the output capacitance.
+  - An OVP or OCP trip switches the output off by itself, within one frame
+    period, which is why `output_enabled_<n>` is polled rather than cached with
+    the other settings. `TRIPRST` does not clear either trip; see
+    cpx400dp_channels.py for what does, and note the two trips differ.
 """
 from __future__ import annotations
 
@@ -90,30 +85,26 @@ rather than rely on this; it exists so `python -m hardware.cpx400dp.main` works
 standalone. connect() verifies the model in `*IDN?` precisely because a moving
 address could otherwise point this driver at a different instrument.
 
-An mDNS name also works and is a stabler identity: this instrument advertises
-itself as `t<serial number>.local` (`t599542.local` here), verified to answer
-identically. It needs an mDNS responder on the host, which macOS has built in
-and a Windows or CentOS stand may not, so it is offered rather than assumed -
-see testbeds/zdrive_testbed/config/instruments.py for the tradeoff."""
+An mDNS name works too and is a stabler identity: the instrument advertises
+itself as `t<serial number>.local`, which follows it when its address changes. It
+needs an mDNS responder on the host - macOS has one built in, a Windows or
+CentOS stand may not."""
 
 SAMPLE_INTERVAL_S = 0.02
 """Sleep *between* frames, not the frame period - and on this instrument the
 difference is most of the number.
 
 Most frames cost 4 query round-trips (the state tier); roughly every fifth also
-pays 4 more for the meter tier. Before the tiers were split, every frame cost
-all 8, measured over 200 back-to-back frames at a median of 18.9 ms, mean
-33.9 ms, worst 250 ms - the mean exceeding the median because the instrument
-intermittently stalls for a few hundred milliseconds, which no amount of tuning
-here removes. So the frame period is not steady, and a consumer should read
+pays 4 more for the meter tier. A state-only frame is ~9 ms, a frame including
+the meters ~19 ms, and the instrument intermittently stalls for a few hundred
+milliseconds - so the frame period is not steady, and a consumer should read
 frame `t` rather than assume a fixed one.
 
-Left at 0.02 rather than tuned: the right value depends on what a test needs
-from the sample rate, which is a test-engineering decision, not a driver one.
-It is now a cleaner knob than it was, because turning it no longer trades
-against measurement freshness - the meter tier runs at the instrument's own
-rate regardless. Whatever it is set to, the publisher's high-water mark is
-sized from it (see protocol/wire.py's hwm_for_interval)."""
+The right value depends on what a test needs from the sample rate, which is a
+test-engineering decision rather than a driver one. Turning it does not trade
+against measurement freshness: the meter tier runs at the instrument's own rate
+regardless. Whatever it is set to, the publisher's high-water mark is sized from
+it (see protocol/wire.py's hwm_for_interval)."""
 
 METER_INTERVAL_S = 1.0 / METER_RATE_HZ * 0.8
 """How often the meter tier is re-read: 200 ms, i.e. 5 Hz against the
@@ -130,7 +121,7 @@ EXPECTED_MODEL = "CPX400DP"
 
 # --- Response parsing ------------------------------------------------------
 # The instrument uses three different reply shapes, and the mnemonic it echoes
-# is not always the one that was sent. All three are measured, not assumed:
+# is not always the one that was sent:
 #   V1?    -> 'V1 20.19'    mnemonic, space, value
 #   V1O?   -> '-0.005V'     value with a unit suffix, no mnemonic
 #   OP1?   -> '0'           bare integer
@@ -408,11 +399,10 @@ class Cpx400dpBackend(HardwareBackend):
         take_interface_lock: request exclusive control (IFLOCK) at connect and
             release it at disconnect. Off by default, keeping connect passive.
             Turning it on stops the web interface or a VXI-11 client changing
-            setpoints mid-run. Safe to use: the lock binds to the interface
-            instance rather than the connection, so a driver that dies without
-            releasing it leaves it held, and the next connection inherits
-            ownership and can release it (measured). Between the crash and that
-            next connection, though, other interfaces are refused writes with
+            setpoints mid-run. The lock binds to the interface instance rather
+            than the connection, so a driver that dies without releasing it
+            leaves it held - the next connection inherits ownership and can
+            release it, but until then other interfaces are refused writes with
             EER 200.
 
         transport: substitute the link, for tests. Defaults to a real socket.
@@ -448,11 +438,10 @@ class Cpx400dpBackend(HardwareBackend):
 
         await self._transport.open()
         try:
-            # Before trusting a single reply, throw away anything a previous
-            # client left behind. A stale reply outlives the connection that
-            # abandoned it, so without this a driver killed mid-transaction
-            # makes the *next* startup read every answer one behind - measured,
-            # with `*IDN?` answering `0`.
+            # Throw away anything a previous client left behind before trusting
+            # a reply. A stale reply outlives the connection that abandoned it,
+            # so without this a driver killed mid-transaction leaves the next
+            # startup reading every answer one behind.
             await self._transport.drain("at connect", timeout_s=CONNECT_DRAIN_TIMEOUT_S)
             await self._confirm_identity()
             # The error registers outlive the socket, so a previous process's

@@ -15,8 +15,15 @@ Runnable on its own, not abstract: main_execution() here just logs and
 returns, and never calls runner.start(), so running this base case
 directly does no live evaluation.
 
+pre_test_setup() energizes the 48 V motor bus but deliberately leaves the
+brake engaged - see the comment there for why the handover has to go
+controller-first, and why releasing is a concrete test's job rather than
+this one's.
+
 use_mock is plumbed through to YdriveTestbed for developing/testing
-without hardware attached - defaults to False (real hardware).
+without hardware attached - defaults to False (real hardware). It only
+substitutes the ODrive: the supply's driver has no mock backend, so a
+reachable CPX400DP is needed either way.
 """
 from __future__ import annotations
 
@@ -50,8 +57,20 @@ class BaseYdriveTest(TestCase):
         self.testbed: Optional[YdriveTestbed] = None
 
     def pre_test_setup(self) -> None:
-        self.testbed = YdriveTestbed(use_mock=self._use_mock)
+        self.testbed = YdriveTestbed(
+            use_mock=self._use_mock, output_dir=self._output_dir, test_id=self.test_id
+        )
         self.testbed.start()
+
+        # Energize the motor bus, since the ODrive cannot arm without it. The
+        # BRAKE IS DELIBERATELY LEFT ENGAGED: it is spring-applied, so it is
+        # already holding at this point, and the axis is still IDLE. Releasing
+        # it here would leave the load held by nothing at all until a subclass
+        # arms the axis. The handover belongs the other way round - controller
+        # first, then brake - which is why releasing is main_execution's job,
+        # after CLOSED_LOOP_CONTROL. Teardown reverses it: YdriveTestbed.stop()
+        # re-engages the brake before disarming and dropping the bus.
+        self.testbed.power_motor_bus(True)
 
         self._seed_channels()
 

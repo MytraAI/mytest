@@ -11,21 +11,19 @@ tests/test_cpx400dp.py). And the serialization requirement below is a property
 of the link, not of any particular command.
 
 ONE CONNECTION, ONE COMMAND AT A TIME. The instrument accepts a single raw
-socket on port 9221 - a second connection while one is open is refused outright
-(measured). Its parser "will not start a new command until any previous command
-or query is complete", so the telemetry poll and every operator command share
-one strictly serial link. `_lock` is what makes that safe: it makes each
+socket on port 9221 - a second connection while one is open is refused outright.
+Its parser "will not start a new command until any previous command or query is
+complete", so the telemetry poll and every operator command share one strictly
+serial link. `_lock` is what makes that safe: it makes each
 transaction atomic, so a command's reply can never be delivered to the
 telemetry loop's read, or vice versa. Callers that need several exchanges to be
 indivisible - a write followed by its error check - use `transaction()`.
 
 THE TIMEOUT IS LARGE ON PURPOSE. The `with verify` command family (`V<n>V`,
-`INCV<n>V`, `DECV<n>V`) blocks the instrument's parser for up to 5 seconds
-while the output settles - measured at 5.01 s against a real device with the
-output off, which is the worst case since the readback can never arrive. The
-read timeout therefore has to exceed 5 s or an ordinary verify command would
-look like a dead instrument. The cost is real and worth stating: a genuinely
-unreachable device also takes this long to be detected.
+`INCV<n>V`, `DECV<n>V`) blocks the instrument's parser for up to 5 seconds while
+the output settles, so the read timeout has to exceed 5 s or an ordinary verify
+command looks like a dead instrument. The cost: a genuinely unreachable device
+also takes that long to detect.
 
 AN UNKNOWN COMMAND ANSWERS NOTHING. A mnemonic this firmware does not
 implement produces no reply at all - not an error, silence - so the read simply
@@ -52,8 +50,8 @@ DEFAULT_TIMEOUT_S = 8.0
 
 DEFAULT_CONNECT_TIMEOUT_S = 5.0
 """Ceiling for opening the socket. Short, because a missing instrument should
-fail setup promptly; nothing about connecting is slow when the device is there
-(measured 32 ms)."""
+fail setup promptly, and connecting to a present one takes tens of
+milliseconds."""
 
 DRAIN_TIMEOUT_S = 0.5
 """How long to wait for a late reply after a read has already timed out, so it
@@ -63,10 +61,9 @@ already behaving slowly and the read it belongs to has been given up on."""
 
 CONNECT_DRAIN_TIMEOUT_S = 0.1
 """How long to wait when draining at connect. Much shorter than the above,
-because a reply a dead client left behind is delivered as soon as the link is
-open - within one round-trip, measured at ~2.4 ms - so this is a 40x margin
-rather than a guess. It is paid on every connect, and the 0.5 s value cost half
-a second of every driver startup for nothing."""
+because a reply a dead client left behind arrives as soon as the link is open -
+within one round-trip, around 2.4 ms - and this wait is paid on every
+connect."""
 
 TERMINATOR = b"\r\n"
 """<RESPONSE MESSAGE TERMINATOR>: CR LF, per the manual."""
@@ -191,17 +188,16 @@ class TtiSocketTransport:
         many replies were thrown away.
 
         Needed at connect, because a stale reply survives the *connection*, not
-        just the read that abandoned it. Measured: a driver killed with SIGKILL
-        mid-transaction left one unread reply on the instrument, which was then
-        delivered to the next client's first query - so a fresh driver asked
-        `*IDN?` and was told `0`, and every read after that would have been one
-        behind. `_confirm_identity()` catches that and refuses to run, which is
-        right, but it would leave the stand unusable until someone cleared the
-        link by hand. Draining first makes an abrupt kill cost nothing.
+        just the read that abandoned it: a client killed mid-transaction leaves
+        one unread reply on the instrument, which the next client's first query
+        collects - so a fresh driver asks `*IDN?` and is told `0`, with every read
+        after that one behind. `_confirm_identity()` catches that and refuses to
+        run, so draining first is what keeps an abrupt kill from costing the next
+        startup.
 
-        Anything discarded here is logged at warning level: it is evidence that
-        a previous process died without finishing a transaction, which is worth
-        knowing even though this recovers from it."""
+        Anything discarded is logged at warning level: it is evidence a previous
+        process died without finishing a transaction, worth knowing even though
+        this recovers from it."""
         deadline = self._drain_timeout_s if timeout_s is None else timeout_s
         discarded = 0
         while True:
