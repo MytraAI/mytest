@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Sequence
 
 from protocol import heartbeat
-from protocol.paths import DEFAULT_OUTPUT_DIR
+from protocol.paths import DEFAULT_OUTPUT_DIR, ensure_output_dir
 from protocol.wire import RunStateFrame
 
 from .aggregator import Aggregator
@@ -175,6 +175,7 @@ async def _reconcile_loop(
 
 
 async def main(output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
+    output_dir = ensure_output_dir(output_dir)
     session = datetime.now().strftime("%Y%m%d_%H%M%S")
     aggregator = Aggregator()
     storage = WideCsvTelemetryStorage(output_dir, session)
