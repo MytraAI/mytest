@@ -42,6 +42,12 @@ from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 from protocol import heartbeat
 from protocol.paths import DEFAULT_OUTPUT_DIR, new_test_id
+
+HEARTBEAT_POLL_INTERVAL_S = 0.5
+"""How often check_recording_alive() actually opens the heartbeat file. Polled far
+more often than that, but the answer cannot change meaningfully faster: the
+staleness deadline is ten seconds, and a hundred opens a second is what made the
+engine's atomic replace collide with it on Windows."""
 from protocol.verdict import BoundsResult, Lifecycle, Verdict, write_verdict
 
 from .asimov.live_rulebook_runner import FatalBoundViolation, LiveRulebookRunner
@@ -157,6 +163,14 @@ class TestCase(ABC):
 
         A bonus of the split: state set before run() starts publishing is
         carried on the very first frame rather than missed."""
+        self._heartbeat_seen_at = time.time()
+        """When a fresh engine heartbeat was last actually read. What
+        check_recording_alive() measures against, so a single unreadable read -
+        which on Windows is just a collision with the engine writing it - costs
+        nothing."""
+        self._heartbeat_checked_at = 0.0
+        """When the heartbeat file was last opened at all, so the check can be
+        polled at every tick while only reading occasionally."""
         self._tearing_down = False
         """True once post_test_teardown() starts, which switches off
         check_recording_alive(). Teardown steps go through @step like any
@@ -456,14 +470,46 @@ class TestCase(ABC):
         Deliberately *not* the same rule as a silent telemetry stream,
         which is fatal because it means losing live safety monitoring while
         hardware may still be moving. Monitoring is unaffected here; what's
-        lost is the run's product. See RecordingLost."""
+        lost is the run's product. See RecordingLost.
+
+        THE QUESTION IS "HAS ANYTHING ADVERTISED RECORDING RECENTLY", NOT "DID
+        THIS READ SUCCEED". One unreadable read is not an answer: on Windows the
+        engine's atomic replace of the heartbeat and this read collide - the
+        engine swaps the file once a second, this is polled every 10 ms - and
+        read_heartbeat() reports absent for anything it cannot parse or open. A
+        run died that way after one cycle, with the engine alive and recording
+        throughout. So a failed read is remembered rather than raised on, and the
+        run stops only once nothing has been seen for as long as a stale
+        heartbeat would be tolerated anyway.
+
+        The read is also rate-limited: at 10 ms it was doing a hundred file opens
+        a second to answer a question whose deadline is ten seconds, which is
+        what made the collision likely in the first place."""
         if not self.require_engine or self._tearing_down:
             return
+        now = time.time()
+        if now - self._heartbeat_checked_at < HEARTBEAT_POLL_INTERVAL_S:
+            return
+        self._heartbeat_checked_at = now
+
         beat = heartbeat.read_heartbeat()
+        if beat is not None and beat.is_fresh():
+            self._heartbeat_seen_at = now
+            return
+
+        unseen_s = now - self._heartbeat_seen_at
+        if unseen_s < heartbeat.DEFAULT_STALE_AFTER_S:
+            logger.debug(
+                "test %s: no readable engine heartbeat for %.1fs, still inside the %.0fs window",
+                self.test_id, unseen_s, heartbeat.DEFAULT_STALE_AFTER_S,
+            )
+            return
         if beat is None:
-            raise RecordingLost(self.test_id, "the telemetry engine's heartbeat is gone")
-        if not beat.is_fresh():
-            raise RecordingLost(self.test_id, f"engine heartbeat is {beat.age_s():.0f}s stale")
+            raise RecordingLost(
+                self.test_id,
+                f"no readable engine heartbeat for {unseen_s:.0f}s",
+            )
+        raise RecordingLost(self.test_id, f"engine heartbeat is {beat.age_s():.0f}s stale")
 
     def require_recording_started(self) -> None:
         """Refuse to start if nothing is recording, or if anything this run

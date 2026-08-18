@@ -62,7 +62,9 @@ class FakeOdriveTestbed:
         self.calls.append(f"mode:{mode}")
 
     def __getattr__(self, name):
-        if name.startswith("set_controller_config_"):
+        # Any configuration write, as the real command client has one per declared
+        # command channel - motor limits as well as controller gains.
+        if name.startswith("set_motor_config_") or name.startswith("set_controller_config_"):
             return lambda value: self.calls.append(f"tune:{name}")
         raise AttributeError(name)
 
@@ -164,3 +166,60 @@ def test_the_axis_is_not_armed_and_the_brake_is_not_touched():
     assert not any(c.startswith("axis:") for c in testbed.calls)
     assert not any(c.startswith("brake:") for c in testbed.calls)
     assert "bus:off" not in testbed.calls
+
+
+def test_an_encoder_field_fault_names_its_remedy():
+    """Observed on the stand: the mappers read MISSING_INPUT and the cause was the
+    onboard encoder reading a field it could not resolve - cleared by turning the
+    wheel. Leading with the mappers sends someone after cabling instead."""
+    from testcases.ydrive.teststeps.teststeps import _explain_unclearable
+
+    explained = _explain_unclearable({
+        "encoder_onboard0_status": "ENCODER_FIELD_TOO_HIGH",
+        "commutmapper_status": "MISSING_INPUT",
+        "posvelmapper_status": "MISSING_INPUT",
+    })
+
+    assert "cannot clear" in explained, "clearing was never going to fix a live condition"
+    assert "turn the wheel by hand" in explained
+    assert "mounting" in explained, "the case where moving it does not help"
+
+
+def test_a_latched_fault_is_not_dressed_up_as_a_condition():
+    from testcases.ydrive.teststeps.teststeps import _explain_unclearable
+
+    explained = _explain_unclearable({"active_errors": "CURRENT_LIMIT_VIOLATION"})
+
+    assert "still latched" in explained
+    assert "turn the wheel" not in explained
+
+def test_the_motor_current_limits_are_set_ceiling_first():
+    """A board whose previous soft limit was above the ceiling being set now would
+    briefly hold an inverted pair if the soft limit went first."""
+    from testcases.ydrive.teststeps.teststeps import (
+        MOTOR_CURRENT_HARD_MAX,
+        MOTOR_CURRENT_SOFT_MAX,
+        set_tuning_params,
+    )
+
+    testbed = FakeOdriveTestbed()
+    set_tuning_params(FakeTestCase(testbed))
+
+    written = [c for c in testbed.calls if "current" in c]
+    assert written == [
+        "tune:set_motor_config_current_hard_max",
+        "tune:set_motor_config_current_soft_max",
+    ]
+    assert MOTOR_CURRENT_SOFT_MAX < MOTOR_CURRENT_HARD_MAX, (
+        "the commanded limit has to sit under the ceiling that latches a violation"
+    )
+
+
+def test_prepare_sets_the_current_limits_too():
+    """A stand found with a latched CURRENT_LIMIT_VIOLATION is this ceiling being
+    hit, so it is set explicitly rather than inherited."""
+    testbed = FakeOdriveTestbed()
+    prepare_for_operation(FakeTestCase(testbed))
+
+    assert "tune:set_motor_config_current_hard_max" in testbed.calls
+    assert "tune:set_motor_config_current_soft_max" in testbed.calls

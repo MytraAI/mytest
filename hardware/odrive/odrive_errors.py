@@ -99,16 +99,39 @@ _DECODABLE: Dict[str, Tuple[str, bool]] = {
 # _DECODABLE above - control mode and encoder assignment are still decodable
 # when reporting on a stored run, but a test changing them on purpose is not an
 # event a driver should narrate.
-ERROR_CHANNELS: Tuple[str, ...] = (
+LATCHED_CHANNELS: Tuple[str, ...] = (
     "active_errors",
     "disarm_reason",
     "detailed_disarm_reason",
     "last_drv_fault",
     "axis_procedure_result",
+)
+"""What `clear_errors()` resets. These hold a fault until something clears them,
+which is why a stale one from a previous run blocks arming until it is."""
+
+CONDITION_CHANNELS: Tuple[str, ...] = (
     "commutmapper_status",
     "posvelmapper_status",
     "encoder_onboard0_status",
 )
+"""What describes the board right now, and what `clear_errors()` cannot touch.
+
+A ComponentStatus is a live reading, not a latch: a mapper reporting MISSING_INPUT
+has no encoder estimate at this instant, and it says so again the moment it is
+"cleared". Clearing errors and then waiting for one of these to go away waits
+forever - the cause has to change, whether that is the bus coming up, a cable, or
+which encoder the axis is configured to read.
+
+ENCODER_FIELD_TOO_HIGH and ENCODER_FIELD_TOO_LOW on encoder_onboard0_status are
+worth knowing by name: the onboard magnetic encoder is reading a field outside the
+range it can resolve, so it produces no estimate and both mappers report
+MISSING_INPUT downstream of it. Observed on the ydrive stand, and cleared by
+turning the wheel by hand - a rotor parked where the field saturates reads that
+way until it moves. `encoder_onboard0_get_field_strength` quantifies it if the
+chip exposes it. A magnet that reads out of range at every position is a mounting
+problem, not something a test can clear."""
+
+ERROR_CHANNELS: Tuple[str, ...] = LATCHED_CHANNELS + CONDITION_CHANNELS
 
 STATE_CHANNELS: Tuple[str, ...] = ("axis_current_state",)
 """Watched so a fault can be read against it rather than because it is wrong: a
@@ -126,7 +149,14 @@ reference does.
 
 Every other value is treated as a fault, including NOT_ENABLED - which may be a
 benign steady state on a board that does not use one of its three mappers, so
-expect to add it here if such a board turns up."""
+expect to add it here if such a board turns up.
+
+MISSING_INPUT is deliberately NOT benign, and is the one to expect at startup: a
+driver that connects while the motor bus is down reports it on commutmapper and
+posvelmapper, alongside DC_BUS_UNDER_VOLTAGE, because the encoder feeding them is
+not producing yet. It clears when the bus comes up. Left loud because the same
+value after the bus is up is the reason an axis will refuse CLOSED_LOOP_CONTROL,
+and that is worth a line in the log rather than a silent refusal later."""
 
 _BENIGN: Dict[str, Tuple[Any, ...]] = {
     "axis_procedure_result": (0,),  # SUCCESS

@@ -42,15 +42,18 @@ once the controller is holding (see EnduranceCycleTest). Each dwell is
 then held by the brake rather than by the controller alone; see the
 step's own docstring.
 
-set_tuning_params: sets the controller's velocity limit, position
-filter bandwidth, position/velocity/velocity-integrator gains, and
-spinout power thresholds in one call.
+set_tuning_params: sets the motor's current limits, the controller's
+velocity limit, position filter bandwidth,
+position/velocity/velocity-integrator gains, and spinout power
+thresholds in one call - in RAM, so a run leaves the board's saved
+configuration alone.
 """
 from __future__ import annotations
 
 import logging
 import time
 
+from hardware.odrive import odrive_errors
 from testbeds.ydrive_testbed.ydrive_testbed import (
     BRAKE_SETTLE_S,
     METERS_PER_TURN,
@@ -141,6 +144,28 @@ MAX_LOAD_VELOCITY_INTEGRATOR = 0.2
 MAX_LOAD_SPINOUT_MECHANICAL_THRESHOLD = -100.0  # W
 MAX_LOAD_SPINOUT_ELECTRICAL_THRESHOLD = 100.0  # W
 
+MOTOR_CURRENT_SOFT_MAX = 16.0  # A
+"""What the controller is allowed to command. Torque is clamped here, so this is
+the number that decides how hard the axis can push."""
+
+MOTOR_CURRENT_HARD_MAX = 20.0  # A
+"""What the measured phase current may reach before the board latches
+CURRENT_LIMIT_VIOLATION and disarms.
+
+Above the soft limit, so ordinary clamping does not trip it: the gap is headroom
+for the overshoot a step command produces. This stand was found with a
+CURRENT_LIMIT_VIOLATION latched from a previous run, which is this ceiling being
+hit - so it is set explicitly rather than inherited from whatever the board was
+last configured with.
+
+Motor current, not bus current, and both limits are reachable: the inverter acts
+as a transformer, drawing a small current at 48 V and putting a much larger one
+through the phases at a low effective phase voltage. Power is what is conserved,
+not current - so 20 A here is not 20 A asked of a supply that can deliver 8.75 A
+at 48 V. What that supply's envelope constrains is sustained power, which shows up
+as the rail sagging (in_power_limit_2, undervoltage_bound) rather than as bus
+current climbing."""
+
 
 def _clear_faults(test_case: BaseYdriveTest, timeout_s: float) -> None:
     """Clear the ODrive's latched errors, and confirm they actually cleared.
@@ -169,9 +194,45 @@ def _clear_faults(test_case: BaseYdriveTest, timeout_s: float) -> None:
             return
         if deadline.expired:
             raise RuntimeError(
-                f"test {test_case.test_id}: ODrive still faulted after {timeout_s}s "
-                f"of clear_errors - {remaining}"
+                f"test {test_case.test_id}: the ODrive is not fit to operate after {timeout_s}s "
+                f"- {_explain_unclearable(remaining)}"
             )
+
+
+def _explain_unclearable(remaining: dict) -> str:
+    """Say which of the remaining faults clear_errors could have cleared, and which
+    it never could.
+
+    Worth the words at the one moment somebody is reading them: a latched register
+    still set means clearing did not take, while a live condition means clearing was
+    never the answer and the cause is physical or configured. Retrying either for
+    another five seconds looks identical in a log without this."""
+    latched = {name: text for name, text in remaining.items() if name in odrive_errors.LATCHED_CHANNELS}
+    conditions = {name: text for name, text in remaining.items() if name in odrive_errors.CONDITION_CHANNELS}
+    parts = []
+    if latched:
+        parts.append(f"still latched after being cleared: {latched}")
+    if conditions:
+        parts.append(
+            f"conditions clear_errors cannot clear: {conditions} - these describe the board now, "
+            "so the cause has to change: the bus being up, the encoder cabling, or which encoder "
+            "axis0.config.load_encoder/commutation_encoder is set to read"
+        )
+        # Matched on the decoded text rather than a raw value, because that is what
+        # this function is handed. Called out by name because the remedy is
+        # mechanical and not guessable from "MISSING_INPUT" on the mappers, which
+        # is what this failure otherwise leads with.
+        if any("ENCODER_FIELD" in text for text in conditions.values()):
+            parts.append(
+                "the onboard encoder is reading a field it cannot resolve, which is why the "
+                "mappers have no input: turn the wheel by hand, since a rotor parked where the "
+                "field saturates reads that way until it moves. If it reads out of range at every "
+                "position, the magnet's mounting is the problem"
+            )
+    other = {k: v for k, v in remaining.items() if k not in latched and k not in conditions}
+    if other:
+        parts.append(f"other: {other}")
+    return "; ".join(parts)
 
 
 @step
@@ -557,6 +618,8 @@ def set_tuning_params(
     velocity_integrator: float = MAX_LOAD_VELOCITY_INTEGRATOR,
     spinout_mechanical_threshold: float = MAX_LOAD_SPINOUT_MECHANICAL_THRESHOLD,
     spinout_electrical_threshold: float = MAX_LOAD_SPINOUT_ELECTRICAL_THRESHOLD,
+    current_soft_max: float = MOTOR_CURRENT_SOFT_MAX,
+    current_hard_max: float = MOTOR_CURRENT_HARD_MAX,
 ) -> None:
     _apply_tuning_params(
         test_case,
@@ -567,6 +630,8 @@ def set_tuning_params(
         velocity_integrator,
         spinout_mechanical_threshold,
         spinout_electrical_threshold,
+        current_soft_max,
+        current_hard_max,
     )
 
 
@@ -579,8 +644,22 @@ def _apply_tuning_params(
     velocity_integrator: float = MAX_LOAD_VELOCITY_INTEGRATOR,
     spinout_mechanical_threshold: float = MAX_LOAD_SPINOUT_MECHANICAL_THRESHOLD,
     spinout_electrical_threshold: float = MAX_LOAD_SPINOUT_ELECTRICAL_THRESHOLD,
+    current_soft_max: float = MOTOR_CURRENT_SOFT_MAX,
+    current_hard_max: float = MOTOR_CURRENT_HARD_MAX,
 ) -> None:
+    """Write the controller and motor configuration this stand runs under.
+
+    In RAM, every run: nothing here calls save_configuration(), so the board keeps
+    whatever is in its flash and a run cannot leave a stand configured differently
+    than it found it. What that costs is that these have to be set on every run -
+    which is the point, since a value inherited from a previous session is how a
+    stand ends up running under limits nobody chose."""
     testbed: YdriveTestbed = test_case.testbed
+    # Hard ceiling before the soft limit that has to sit under it, so the pair is
+    # never briefly inverted on a board whose previous soft limit was higher than
+    # the ceiling being set now.
+    testbed.command.set_motor_config_current_hard_max(current_hard_max)
+    testbed.command.set_motor_config_current_soft_max(current_soft_max)
     testbed.command.set_controller_config_vel_limit(velocity_limit)
     testbed.command.set_controller_config_input_filter_bandwidth(filter_bw)
     testbed.command.set_controller_config_pos_gain(position_gain)
