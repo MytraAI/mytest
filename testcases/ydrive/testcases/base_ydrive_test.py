@@ -15,10 +15,11 @@ Runnable on its own, not abstract: main_execution() here just logs and
 returns, and never calls runner.start(), so running this base case
 directly does no live evaluation.
 
-pre_test_setup() energizes nothing unless a concrete test sets
-POWER_MOTOR_BUS_AT_SETUP, and leaves the brake engaged either way - see
+pre_test_setup() energizes nothing, and leaves the brake engaged - see
 the comment there for why the handover has to go controller-first, and
-why releasing is a concrete test's job rather than this one's.
+why releasing is a concrete test's job rather than this one's. A test
+that drives the axis brings the bus up itself, through
+prepare_for_operation().
 
 use_mock is plumbed through to YdriveTestbed for developing/testing
 without hardware attached - defaults to False (real hardware). It only
@@ -46,14 +47,6 @@ class BaseYdriveTest(TestCase):
 
     TEST_NAME = "base_ydrive_test"
     RULEBOOKS: List[Rulebook] = [YDRIVE_RULEBOOK]
-    POWER_MOTOR_BUS_AT_SETUP: bool = False
-    """Whether pre_test_setup() energizes the 48 V motor bus.
-
-    Off by default, so a test brings up a live rail only by saying so. A test that
-    drives the axis sets it True, since the ODrive cannot arm without a bus - see
-    EnduranceCycleTest. Defaulting the other way would mean every new test
-    energized the stand unless its author knew to opt out, which is the wrong
-    direction for the default of a safety-relevant action."""
 
     DEVICES = YdriveTestbed.DEVICES
     """Just the testbed's devices: ydrive is purely mechanical, so there is no
@@ -71,16 +64,17 @@ class BaseYdriveTest(TestCase):
         )
         self.testbed.start()
 
-        # The BRAKE IS DELIBERATELY LEFT ENGAGED whether or not the bus is
-        # energized: it is magnet-applied, so it is already holding, and the axis
-        # is still IDLE. Releasing here would leave the load held by nothing until
-        # a subclass arms the axis. The handover goes controller-first, which is
-        # why releasing is main_execution's job, after CLOSED_LOOP_CONTROL.
-        # Teardown reverses it: YdriveTestbed.stop() re-engages the brake before
-        # disarming and dropping the bus.
-        if self.POWER_MOTOR_BUS_AT_SETUP:
-            self.testbed.power_motor_bus(True)
-
+        # Setup energizes nothing. The stand comes up with both rails off - see
+        # YdriveTestbed._configure_rails() - and a test that needs the bus brings
+        # it up itself in main_execution, through prepare_for_operation().
+        #
+        # The BRAKE IS THEREFORE LEFT ENGAGED: it is magnet-applied, so an
+        # unpowered rail means it is already holding, and the axis is still IDLE.
+        # Releasing here would leave the load held by nothing until a subclass
+        # arms the axis. The handover goes controller-first, which is why
+        # releasing is main_execution's job, after CLOSED_LOOP_CONTROL. Teardown
+        # reverses it: YdriveTestbed.stop() re-engages the brake before disarming
+        # and dropping the bus.
         self._seed_channels()
 
         # Constructed here so it's ready the moment MainExecution starts, but

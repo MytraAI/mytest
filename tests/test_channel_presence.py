@@ -189,6 +189,9 @@ def test_runner_makes_an_unevaluable_bound_fatal_instead_of_dying():
             return {}
 
     class Client:
+        def discard_backlog(self):
+            return 0  # nothing queued: this stream starts when the runner does
+
         def frames(self):
             for i in range(10):
                 yield TelemetryFrame(seq=i, t=float(i), channels={"vbus": None}, device="odrive")

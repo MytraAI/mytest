@@ -1,5 +1,10 @@
 """Test steps for ydrive.
 
+prepare_for_operation: brings the stand from cold to ready-to-arm -
+energizes the motor bus, clears whatever the ODrive has latched, sets
+the control mode and applies the tuning. Leaves the axis idle and the
+brake engaged, since arming is release_brake's to sequence.
+
 move_to: commands a single target position and blocks (closed-loop)
 until arrived and settled. Its own step - call it directly from a test
 case, or via cycle_position below.
@@ -46,6 +51,18 @@ the wait polls through telemetry: at or above it, a silent stream raises
 TelemetryTimeout first and this timeout - the one that names the axis state and
 the decoded errors - never fires."""
 
+DEFAULT_CONTROL_MODE = "POSITION_CONTROL"
+DEFAULT_CLEAR_TIMEOUT_S = 5.0
+"""How long prepare_for_operation keeps clearing before it gives up.
+
+Long enough to cover the bus coming up: the supply's output ramps, and until it
+is above the ODrive's own under-voltage trip level the board re-latches
+DC_BUS_UNDER_VOLTAGE the moment it is cleared."""
+
+CLEAR_SETTLE_S = 0.25
+"""Seconds between clearing and reading the result, so the frame that is checked
+was produced after the clear rather than before it."""
+
 MAX_LOAD_VELOCITY_LIMIT = 18.3  # turns/s
 MAX_LOAD_FILTER_BW = 10.0  # 1/s
 MAX_LOAD_POSITION_GAIN = 10.0
@@ -53,6 +70,74 @@ MAX_LOAD_VELOCITY_GAIN = 0.8
 MAX_LOAD_VELOCITY_INTEGRATOR = 0.2
 MAX_LOAD_SPINOUT_MECHANICAL_THRESHOLD = -100.0  # W
 MAX_LOAD_SPINOUT_ELECTRICAL_THRESHOLD = 100.0  # W
+
+
+def _clear_faults(test_case: BaseYdriveTest, timeout_s: float) -> None:
+    """Clear the ODrive's latched errors, and confirm they actually cleared.
+
+    Clearing is retried rather than done once, because the bus is coming up
+    while this runs: below the board's under-voltage trip level, clearing
+    succeeds and DC_BUS_UNDER_VOLTAGE re-latches on the next control cycle.
+    Retrying until the reading is clean waits out the ramp without this step
+    having to invent a voltage threshold - the board's own trip level decides.
+
+    Raises with every remaining fault decoded, which is the useful failure: an
+    error that will not clear is one the axis will refuse to arm with, and
+    finding that out here beats finding it out at the first dwell.
+
+    What was cleared is not reported from here. The driver already logs each
+    watched channel that is set at startup and each transition back out of it,
+    decoded, into that device's own logs.txt."""
+    testbed: YdriveTestbed = test_case.testbed
+    deadline: Stopwatch = Stopwatch(duration_s=timeout_s)
+    while True:
+        test_case.check_should_continue()
+        testbed.command.clear_errors()
+        test_case.wait_for(CLEAR_SETTLE_S)
+        # One frame, so what is judged is a single instant rather than a
+        # picture assembled from several.
+        remaining = odrive_errors.faults_in_frame(testbed.get_channels())
+        if not remaining:
+            return
+        if deadline.expired:
+            raise RuntimeError(
+                f"test {test_case.test_id}: ODrive still faulted after {timeout_s}s "
+                f"of clear_errors - {remaining}"
+            )
+
+
+@step
+def prepare_for_operation(
+    test_case: BaseYdriveTest,
+    control_mode: str = DEFAULT_CONTROL_MODE,
+    clear_timeout_s: float = DEFAULT_CLEAR_TIMEOUT_S,
+) -> None:
+    """Bring the stand from cold to ready-to-arm: bus up, no latched faults,
+    control mode and tuning set.
+
+    The order is what makes it work. The bus is energized first, because the
+    ODrive latches DC_BUS_UNDER_VOLTAGE while it is unpowered - a board that
+    boots on USB alone always has it set, and an error latched from a previous
+    run (a CURRENT_LIMIT_VIOLATION, say) sits alongside it. Clearing happens
+    after, and is confirmed rather than assumed, since a latched error is enough
+    for the ODrive to refuse CLOSED_LOOP_CONTROL: without this, arming fails at
+    the first dwell with the stand already energized.
+
+    This is the only thing on the ydrive stand that energizes the motor bus.
+    Setup brings the stand up with both rails off, so a test that never calls
+    this one leaves it de-energized.
+
+    Does NOT arm the axis or touch the brake. The brake is left engaged and the
+    axis idle, so the load stays held by the brake until release_brake() hands
+    it to the controller in the one order that never leaves it held by neither.
+
+    Applies the default tuning; a test wanting different gains calls
+    set_tuning_params() afterwards."""
+    testbed: YdriveTestbed = test_case.testbed
+    testbed.power_motor_bus(True)
+    _clear_faults(test_case, clear_timeout_s)
+    testbed.command.set_control_mode(control_mode)
+    _apply_tuning_params(test_case)
 
 
 @step
@@ -228,6 +313,28 @@ def cycle_position(
 
 @step
 def set_tuning_params(
+    test_case: BaseYdriveTest,
+    velocity_limit: float = MAX_LOAD_VELOCITY_LIMIT,
+    filter_bw: float = MAX_LOAD_FILTER_BW,
+    position_gain: float = MAX_LOAD_POSITION_GAIN,
+    velocity_gain: float = MAX_LOAD_VELOCITY_GAIN,
+    velocity_integrator: float = MAX_LOAD_VELOCITY_INTEGRATOR,
+    spinout_mechanical_threshold: float = MAX_LOAD_SPINOUT_MECHANICAL_THRESHOLD,
+    spinout_electrical_threshold: float = MAX_LOAD_SPINOUT_ELECTRICAL_THRESHOLD,
+) -> None:
+    _apply_tuning_params(
+        test_case,
+        velocity_limit,
+        filter_bw,
+        position_gain,
+        velocity_gain,
+        velocity_integrator,
+        spinout_mechanical_threshold,
+        spinout_electrical_threshold,
+    )
+
+
+def _apply_tuning_params(
     test_case: BaseYdriveTest,
     velocity_limit: float = MAX_LOAD_VELOCITY_LIMIT,
     filter_bw: float = MAX_LOAD_FILTER_BW,

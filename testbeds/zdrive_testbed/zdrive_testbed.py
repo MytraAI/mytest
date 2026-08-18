@@ -38,22 +38,8 @@ from hardware.cpx400dp.cpx400dp_channels import (
     TELEMETRY_CHANNELS as CPX400DP_TELEMETRY_CHANNELS,
 )
 from hardware.cpx400dp.cpx400dp_command_client import Cpx400dpCommandClient
-from hardware.odrive.odrive_channels import (
-    COMMAND_CHANNELS as ODRIVE_COMMAND_CHANNELS,
-    TELEMETRY_CHANNELS as ODRIVE_TELEMETRY_CHANNELS,
-)
-from hardware.odrive.odrive_command_client import OdriveCommandClient
-from protocol.paths import driver_log_path
-from protocol.wire import (
-    DEFAULT_CPX400DP_COMMAND_ENDPOINT,
-    DEFAULT_CPX400DP_TELEMETRY_ENDPOINT,
-    DEFAULT_ODRIVE_COMMAND_ENDPOINT,
-    DEFAULT_ODRIVE_TELEMETRY_ENDPOINT,
-    DEVICE_CPX400DP,
-    DEVICE_ODRIVE,
-)
-
 from hardware.cpx400dp.rails import Rail, deliverable_current_a
+from hardware.driver_process import start_driver
 from hardware.odrive.odrive_channels import (
     COMMAND_CHANNELS as ODRIVE_COMMAND_CHANNELS,
     TELEMETRY_CHANNELS as ODRIVE_TELEMETRY_CHANNELS,
@@ -202,7 +188,7 @@ class ZdriveTestbed:
             *self._log_args(DEVICE_CPX400DP),
         ]
 
-        self._processes = [subprocess.Popen(odrive_args), subprocess.Popen(supply_args)]
+        self._processes = [start_driver(odrive_args), start_driver(supply_args)]
         time.sleep(STARTUP_DELAY_S)
 
         self._command = OdriveCommandClient(endpoint=DEFAULT_ODRIVE_COMMAND_ENDPOINT)
@@ -222,21 +208,20 @@ class ZdriveTestbed:
         self._configure_rails()
 
     def _configure_rails(self) -> None:
-        """Set both rails' voltage and current setpoints, refusing to do it
-        while an output is live.
+        """Switch both outputs off, then set every rail's voltage and current
+        setpoints.
 
-        Writing a setpoint to an energized output would step the rail under
-        whatever is connected. The supply's driver adopts, rather than resets,
-        the output state it finds, so this is the layer that notices - and it
-        raises rather than switching the output off, since something else
-        energized it deliberately and this testbed does not know what."""
-        live = [rail.name for rail in RAILS if self.rail_is_powered(rail)]
-        if live:
-            raise RuntimeError(
-                f"refusing to configure setpoints while these rails are already energized: {live}. "
-                "Something outside this testbed switched them on - the supply driver adopts, rather "
-                "than resets, the output state it finds. Switch them off before starting a run."
-            )
+        A run starts from a de-energized stand whatever it finds. The supply's
+        driver adopts, rather than resets, the output state it is started into,
+        so a rail can still be live from a previous run - and writing a setpoint
+        to a live output would step that rail under whatever is connected to it.
+        Switching off first makes every setpoint below land on a dead rail.
+
+        Powering anything back up is then a test's own decision, taken in
+        PreTestSetup."""
+        for rail in RAILS:
+            self.supply.enable_output(rail.output, False)
+        logger.info("both outputs off - configuring setpoints on de-energized rails")
 
         for rail in RAILS:
             if not rail.is_within_envelope:
@@ -361,9 +346,6 @@ class ZdriveTestbed:
         self.supply.enable_output(BRAKE_BUS.output, enabled)
         logger.info("%s %s", BRAKE_BUS.name, "released (rail energized)" if enabled else "engaged (rail de-energized)")
 
-    def rail_is_powered(self, rail: Rail) -> bool:
-        """Whether this rail's output is currently on, read from the supply."""
-        return bool(self.get_supply_channels()[f"output_enabled_{rail.output}"])
 
     # --- reads ------------------------------------------------------------
 

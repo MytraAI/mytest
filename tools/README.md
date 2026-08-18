@@ -46,6 +46,29 @@ clean exit (code 0), not a traceback - `TestCase.run()` re-raises
 `StopRequested`/`SystemExit` after tearing down cleanly purely so a caller
 can tell a stop happened, not because it's a failure.
 
+## find_cpx400dp.py
+
+Finds a CPX400DP whose address has moved. The instrument reports DHCP but sits
+on a segment with no DHCP server, so it self-assigns a link-local address, and
+that address changes if a DHCP server appears or on a collision - with nothing
+announcing the move.
+
+```
+python -m tools.find_cpx400dp
+python -m tools.find_cpx400dp --network 169.254.0.0/16
+python -m tools.find_cpx400dp --host 169.254.229.133
+```
+
+Opens the SCPI port on every address in a network and asks whatever answers
+`*IDN?`, so a hit is the instrument's own identity rather than "something is
+listening here" - and a *different* TTi unit answering at the expected address
+is reported too, since that is as useful to know. With no arguments it scans the
+networks this machine has an address on, which for a link-local address means
+the whole `169.254.0.0/16`.
+
+The address it prints goes into the testbed that owns that stand
+(`CPX400DP_HOST` in `testbeds/*/`), not into the driver's default.
+
 ## stop_test.py
 
 Cross-platform, OS-signal-independent way to stop a running test case - see
