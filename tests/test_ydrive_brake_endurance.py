@@ -298,17 +298,18 @@ def test_an_aborted_dwell_leaves_the_load_on_the_brake():
 
 
 def test_the_dwell_sets_the_cycle_rate():
-    """Worth stating in a test because it is the difference between 55 brake events
-    an hour and 2500, and nothing else in the test constrains it."""
+    """Worth stating in a test because nothing else in the test constrains how often
+    the brake is used, and the dwell is the whole of it."""
     from testcases.ydrive.testcases.testcases import BrakeEnduranceTest
 
     test = BrakeEnduranceTest(require_engine=False)
     # The traverse the axis actually takes, not MOVE_TIMEOUT_S - that is a ceiling
     # for a stalled move, not how long a healthy one lasts.
     traverse_s = test.START_POSITION / test.VELOCITY_LIMIT
-    cycle_s = test.DWELL_S + traverse_s
-    assert cycle_s > test.DWELL_S, "the dwell is not the dominant term any more"
-    assert 3600 / cycle_s < 100, "a cycle rate this high is not what a 60 s dwell implies"
+    cycle_s = test.DWELL_S + traverse_s + test.POST_BRAKE_DWELL_S
+    assert test.DWELL_S > 0.8 * cycle_s, "the dwell should dominate the cycle"
+    events_per_hour = 3600 / cycle_s
+    assert events_per_hour < 10, f"{events_per_hour:.0f} events an hour is not a ten-minute dwell"
 
 
 # --- an axis that stops driving on its own ------------------------------------

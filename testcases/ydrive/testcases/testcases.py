@@ -171,16 +171,20 @@ class BrakeEnduranceTest(BaseYdriveTest):
     also when a brake is hottest and least likely to hold, with nothing driving, so
     movement across it is slip rather than a controller fighting something."""
 
-    DWELL_S = 60.0
+    DWELL_S = 600.0
     """How long each cycle rests at the start line before the next run-up, held on
     the brake with the axis idle.
 
     Nothing dissipates during it - a magnet-applied brake needs no power to hold,
     and an idled axis draws no current - so it is what a thermal reading recovers
     over, and it gives the brake a static-hold duty cycle alongside the dynamic
-    stops. It also sets the cycle rate: a minute of dwell means about 55 brake
-    events an hour rather than 2500.
-    """
+    stops.
+
+    Ten minutes makes it the whole cycle: about six brake events an hour, each from
+    a brake that has had time to return to ambient, so what varies between events is
+    wear rather than how hot the last stop left it. The telemetry rate is unchanged
+    either way - a run records the same frames per hour whatever the dwell, so a
+    longer one buys repeatability at the cost of events per gigabyte."""
 
     MOVE_TIMEOUT_S = 45.0
     """How long a move to the start line may take.
