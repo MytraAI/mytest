@@ -14,6 +14,7 @@ keeps evaluating from its own subscription throughout.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -81,9 +82,36 @@ def test_check_recording_alive_passes_while_the_engine_is_fresh(beat_path, tmp_p
     MinimalTest().check_recording_alive()  # no raise
 
 
-def test_check_recording_alive_raises_when_the_heartbeat_is_gone(beat_path):
-    with pytest.raises(RecordingLost, match="heartbeat is gone"):
-        MinimalTest().check_recording_alive()
+def _nothing_seen_for(test, seconds: float):
+    """Age out a test's memory of the last good heartbeat read.
+
+    check_recording_alive() measures a window rather than one read, so a test that
+    wants the raise has to say how long nothing has been readable - and reset the
+    read rate limit, since it only opens the file twice a second."""
+    test._heartbeat_seen_at = time.time() - seconds
+    test._heartbeat_checked_at = 0.0
+    return test
+
+
+def test_check_recording_alive_raises_once_nothing_has_been_readable(beat_path):
+    test = _nothing_seen_for(MinimalTest(), heartbeat.DEFAULT_STALE_AFTER_S * 2)
+    with pytest.raises(RecordingLost, match="no readable engine heartbeat"):
+        test.check_recording_alive()
+
+
+def test_one_unreadable_read_does_not_stop_a_run(beat_path, tmp_path):
+    """The failure this window exists for: on Windows the engine's atomic replace
+    of the heartbeat and this read collide - the engine swaps it once a second, the
+    test polls every 10 ms - and an unreadable file is reported as absent. A real
+    run died after one cycle that way, with the engine recording throughout."""
+    heartbeat.write_heartbeat(tmp_path)
+    test = MinimalTest()
+    test.check_recording_alive()  # a good read, remembered
+
+    beat_path.write_text("{ this is what a half-swapped file looks like")
+    test._heartbeat_checked_at = 0.0
+
+    test.check_recording_alive()  # no raise: one bad read is not an answer
 
 
 def test_check_recording_alive_raises_when_the_heartbeat_is_stale(beat_path, tmp_path):
@@ -93,7 +121,7 @@ def test_check_recording_alive_raises_when_the_heartbeat_is_stale(beat_path, tmp
     beat_path.write_text(json.dumps(stale))
 
     with pytest.raises(RecordingLost, match="stale"):
-        MinimalTest().check_recording_alive()
+        _nothing_seen_for(MinimalTest(), heartbeat.DEFAULT_STALE_AFTER_S * 2).check_recording_alive()
 
 
 def test_require_engine_false_opts_out_entirely(beat_path):
@@ -138,7 +166,7 @@ def test_recording_checks_stop_once_teardown_begins(beat_path, tmp_path):
     Regression test: this was observed for real, by killing the engine
     during a mock ydrive run and watching YdriveTestbed's "move to
     position 0" idle step fail."""
-    test = MinimalTest()
+    test = _nothing_seen_for(MinimalTest(), heartbeat.DEFAULT_STALE_AFTER_S * 2)
     with pytest.raises(RecordingLost):
         test.check_recording_alive()
 
@@ -159,6 +187,7 @@ def test_recording_lost_does_not_linger(beat_path, tmp_path):
     class AbortingTest(MinimalTest):
         def main_execution(self):
             heartbeat.clear_heartbeat()
+            _nothing_seen_for(self, heartbeat.DEFAULT_STALE_AFTER_S * 2)
             self.check_recording_alive()
 
     test = AbortingTest()

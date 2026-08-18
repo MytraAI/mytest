@@ -4,7 +4,9 @@ runner.run() reads off the backend, and value coercion for the JSON wire.
 """
 from __future__ import annotations
 
+import contextlib
 from typing import Any, AsyncIterator, List
+from unittest import mock
 
 import pytest
 
@@ -130,3 +132,48 @@ def test_to_jsonable_falls_back_to_str_rather_than_failing_the_frame():
             return "opaque"
 
     assert to_jsonable(Opaque()) == "opaque"
+
+
+# --- a driver interrupted rather than stopped --------------------------------
+
+
+def test_the_backend_is_disconnected_even_when_the_driver_is_interrupted():
+    """On Windows a Ctrl+C reaches a driver as a KeyboardInterrupt that cancels
+    whatever is awaited, so everything after the await was skipped - including the
+    disconnect that idles an ODrive axis and closes the supply's single socket.
+    Observed on the stand: three shutdowns, zero disconnects."""
+    import asyncio
+
+    from hardware import runner
+
+    class NeverEndingServer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def run(self):
+            await asyncio.Event().wait()
+
+    class RecordingBackend(BareBackend):
+        def __init__(self):
+            super().__init__()
+            self.disconnected = False
+
+        async def disconnect(self):
+            self.disconnected = True
+
+    backend = RecordingBackend()
+
+    async def scenario():
+        task = asyncio.create_task(
+            runner.run(backend, "inproc://cmd-irrelevant", "inproc://tel-irrelevant")
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()  # what a KeyboardInterrupt does to the awaited wait
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    with mock.patch.object(runner, "CommandServer", NeverEndingServer), \
+         mock.patch.object(runner, "TelemetryServer", NeverEndingServer):
+        asyncio.run(scenario())
+
+    assert backend.disconnected, "an interrupted driver left the device connected"

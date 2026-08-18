@@ -69,6 +69,17 @@ class EngineHeartbeat:
         return self.age_s(now) < stale_after_s
 
 
+REPLACE_ATTEMPTS = 5
+"""Tries at swapping the new heartbeat into place before giving up on this beat.
+
+On Windows os.replace() fails with PermissionError while another process has the
+target open, and the reader opens it constantly - so a collision is normal, and
+microseconds wide. Retrying makes it invisible; a missed beat instead spends the
+staleness budget of a run that is perfectly healthy."""
+
+REPLACE_RETRY_S = 0.02
+
+
 def write_heartbeat(output_dir: Path, devices: Sequence[str] = (), path: Optional[Path] = None) -> None:
     """Publish/refresh the heartbeat. Atomic (write-temp-then-replace) so
     a reader never sees a half-written file. Best-effort: logs rather than
@@ -82,7 +93,15 @@ def write_heartbeat(output_dir: Path, devices: Sequence[str] = (), path: Optiona
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(payload.__dict__))
-        os.replace(tmp, target)
+        for attempt in range(REPLACE_ATTEMPTS):
+            try:
+                os.replace(tmp, target)
+                return
+            except PermissionError:
+                # Windows only: a reader has the target open this instant.
+                if attempt == REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(REPLACE_RETRY_S)
     except OSError:
         logger.warning("couldn't write engine heartbeat to %s", target, exc_info=True)
 
