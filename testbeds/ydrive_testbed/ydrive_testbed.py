@@ -212,6 +212,9 @@ class YdriveTestbed:
         self._output_dir = output_dir
         self._test_id = test_id
         self._processes: List[subprocess.Popen] = []
+        self._device_for_process: List[str] = []
+        """Which device each process in _processes drives, so a driver that exits
+        can be named rather than counted."""
         self._command: Optional[OdriveCommandClient] = None
         self._telemetry: Optional[TelemetryClient] = None
         self._sync_telemetry: Optional[TelemetryClient] = None
@@ -263,6 +266,7 @@ class YdriveTestbed:
         self._processes = [
             start_driver(odrive_args), start_driver(supply_args), start_driver(tc_daq_args)
         ]
+        self._device_for_process = [DEVICE_ODRIVE, DEVICE_CPX400DP, DEVICE_TC_DAQ]
         time.sleep(STARTUP_DELAY_S)  # let the drivers bind their sockets
 
         self._command = OdriveCommandClient(endpoint=DEFAULT_ODRIVE_COMMAND_ENDPOINT)
@@ -274,6 +278,9 @@ class YdriveTestbed:
             endpoint=DEFAULT_TC_DAQ_TELEMETRY_ENDPOINT, timeout_s=TC_DAQ_STALENESS_S
         )
 
+        # Before waiting ten seconds on a command server: a driver that has
+        # already exited will never answer, and its own log says why.
+        self._require_drivers_alive()
         self._command.connect_backend()
         self._supply.connect_backend()
 
@@ -289,6 +296,30 @@ class YdriveTestbed:
         self._tc_daq_telemetry.verify_channels(TC_DAQ_TELEMETRY_CHANNELS)
 
         self._configure_rails()
+
+    def _require_drivers_alive(self) -> None:
+        """Raise if any driver process has already exited.
+
+        Without this, a driver that died during startup - a supply at an address
+        nothing answers, an ODrive that is not attached - surfaces as
+        `CommandTimeout: command 'connect' timed out after 10000ms - command
+        server not responding`, ten seconds later, naming neither the device nor
+        the reason. The exit code and the log path are what a person actually
+        needs, and both are known here."""
+        dead = [
+            (args, process)
+            for args, process in zip(self._device_for_process, self._processes)
+            if process.poll() is not None
+        ]
+        if not dead:
+            return
+        detail = "; ".join(
+            f"{device} driver exited with code {process.returncode}"
+            + (f" - see {driver_log_path(self._output_dir, self._test_id, device)}"
+               if self._output_dir is not None and self._test_id is not None else "")
+            for device, process in dead
+        )
+        raise RuntimeError(f"a hardware driver did not stay up: {detail}")
 
     def _configure_rails(self) -> None:
         """Switch both outputs off, then set every rail's voltage and current

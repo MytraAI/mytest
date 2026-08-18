@@ -349,3 +349,51 @@ def test_the_arm_timeout_stays_below_the_telemetry_staleness_deadline():
     assert DEFAULT_ARM_TIMEOUT_S < staleness_s, (
         f"arm timeout {DEFAULT_ARM_TIMEOUT_S}s must be under the {staleness_s}s staleness deadline"
     )
+
+
+# --- a driver that did not stay up --------------------------------------------
+
+
+def test_a_dead_driver_is_named_rather_than_timing_out_as_an_unresponsive_server():
+    """A supply at an address nothing answers used to surface ten seconds later as
+    "command 'connect' timed out - command server not responding", naming neither
+    the device nor the reason. The exit code and the log path are both known here."""
+    from pathlib import Path
+
+    from protocol.wire import DEVICE_CPX400DP, DEVICE_ODRIVE, DEVICE_TC_DAQ
+    from testbeds.ydrive_testbed.ydrive_testbed import YdriveTestbed
+
+    class ExitedProcess:
+        returncode = 1
+
+        def poll(self):
+            return self.returncode
+
+    class LiveProcess:
+        def poll(self):
+            return None
+
+    testbed = YdriveTestbed(output_dir=Path("/out"), test_id="run-9")
+    testbed._processes = [LiveProcess(), ExitedProcess(), LiveProcess()]
+    testbed._device_for_process = [DEVICE_ODRIVE, DEVICE_CPX400DP, DEVICE_TC_DAQ]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        testbed._require_drivers_alive()
+
+    message = str(excinfo.value)
+    assert "cpx400dp driver exited with code 1" in message
+    assert "logs.txt" in message, "the log that says why is not named"
+    assert "odrive" not in message, "a live driver must not be blamed"
+
+
+def test_all_drivers_alive_is_silent():
+    from testbeds.ydrive_testbed.ydrive_testbed import YdriveTestbed
+
+    class LiveProcess:
+        def poll(self):
+            return None
+
+    testbed = YdriveTestbed()
+    testbed._processes = [LiveProcess(), LiveProcess(), LiveProcess()]
+    testbed._device_for_process = ["odrive", "cpx400dp", "tc_daq"]
+    testbed._require_drivers_alive()  # no raise

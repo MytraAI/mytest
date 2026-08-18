@@ -65,7 +65,16 @@ async def run(backend: HardwareBackend, command_endpoint: str, telemetry_endpoin
     itself - they're properties of what's being driven, not of whoever
     started it, so no entry point has to pass them.
     """
-    await backend.connect()
+    try:
+        await backend.connect()
+    except Exception:
+        # Logged before it propagates, so the reason lands in this driver's own
+        # logs.txt beside the telemetry it never got to produce. Unlogged, it goes
+        # to a console nobody keeps, and the run's record shows only a client
+        # timing out against a server that never started - which says nothing
+        # about a wrong address, a refused socket or an absent device.
+        logger.exception("%s driver failed to connect - shutting down", backend.device)
+        raise
 
     command_server = CommandServer(backend, command_endpoint)
     telemetry_server = TelemetryServer(
