@@ -75,7 +75,12 @@ class EnduranceCycleTest(BaseYdriveTest):
         # runner started over a de-energized bus fails the run on its first
         # frame - the bus reading volts is the correct answer to a question
         # nobody should be asking yet.
-        self.runner.start(self.testbed.telemetry)
+        #
+        # Both streams: YDRIVE_RULEBOOK's bus bounds are on ODrive channels and
+        # its temperature bounds on the DAQ's, and neither device publishes the
+        # other's. A bound whose channel is absent from a frame returns no
+        # result, so each stream evaluates the bounds it carries.
+        self.runner.start(self.testbed.telemetry, self.testbed.tc_daq_telemetry)
         # Arms the axis and then releases the brake, in that order -
         # pre_test_setup left the brake engaged and the axis idle on purpose.
         release_brake(self)
@@ -97,5 +102,7 @@ class ManualTest(BaseYdriveTest):
     TEST_NAME = MANUAL_TEST_NAME
 
     def main_execution(self) -> None:
-        self.runner.start(self.testbed.telemetry)
+        # Both streams, so the thermal bounds cover an operator's session too -
+        # see EnduranceCycleTest.
+        self.runner.start(self.testbed.telemetry, self.testbed.tc_daq_telemetry)
         self.wait_for(float("inf"))

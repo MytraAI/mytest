@@ -73,6 +73,14 @@ DEFAULT_ODRIVE_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5581"
 DEFAULT_CPX400DP_COMMAND_ENDPOINT = "tcp://127.0.0.1:5590"
 DEFAULT_CPX400DP_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5591"
 
+# The thermocouple DAQ. It has a command endpoint like every other driver even
+# though the device accepts no commands: the server still answers connect,
+# disconnect, get_status and list_actions, which is how a testbed confirms the
+# driver is up and how list_actions() can positively report that there is
+# nothing to call.
+DEFAULT_TC_DAQ_COMMAND_ENDPOINT = "tcp://127.0.0.1:5600"
+DEFAULT_TC_DAQ_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5601"
+
 # Single topic used on the telemetry PUB socket, kept as one constant
 # rather than per-channel topics because subscribers currently want
 # the full frame. Splitting by channel is an easy future change if a
@@ -114,6 +122,12 @@ DEVICE_DAQ = "daq"
 DEVICE_POWER_SUPPLY = "power_supply"
 DEVICE_DUT = "dut"
 DEVICE_ODRIVE = "odrive"
+DEVICE_TC_DAQ = "tc_daq"
+"""The 8-channel thermocouple DAQ. Deliberately not DEVICE_DAQ: that name
+belongs to the simulated general-purpose DAQ, and a device name keys a
+directory of recorded output, so two backends publishing different channel sets
+under one name would make a stored run ambiguous about which produced it."""
+
 DEVICE_CPX400DP = "cpx400dp"
 """The real TTi CPX400DP bench supply. Deliberately not DEVICE_POWER_SUPPLY:
 that name belongs to the generic simulated supply, whose channel surface is
@@ -140,6 +154,7 @@ TELEMETRY_ENDPOINTS: Dict[str, str] = {
     DEVICE_DUT: DEFAULT_DUT_TELEMETRY_ENDPOINT,
     DEVICE_ODRIVE: DEFAULT_ODRIVE_TELEMETRY_ENDPOINT,
     DEVICE_CPX400DP: DEFAULT_CPX400DP_TELEMETRY_ENDPOINT,
+    DEVICE_TC_DAQ: DEFAULT_TC_DAQ_TELEMETRY_ENDPOINT,
 }
 
 # High-water marks. ZeroMQ's default is 1000 *messages* on both ends, and

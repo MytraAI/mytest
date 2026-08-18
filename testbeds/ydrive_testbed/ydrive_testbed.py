@@ -48,14 +48,21 @@ from hardware.cpx400dp.rails import Rail, deliverable_current_a
 from hardware.driver_process import start_driver
 from hardware.odrive.odrive_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
 from hardware.odrive.odrive_command_client import OdriveCommandClient
+from hardware.tc_daq.tc_daq_channels import TELEMETRY_CHANNELS as TC_DAQ_TELEMETRY_CHANNELS
+from hardware.tc_daq.transport import (
+    DEFAULT_PORT as DEFAULT_TC_DAQ_PORT,
+    SILENCE_TIMEOUT_S as TC_DAQ_SILENCE_TIMEOUT_S,
+)
 from protocol.paths import driver_log_path
 from protocol.wire import (
     DEFAULT_CPX400DP_COMMAND_ENDPOINT,
     DEFAULT_CPX400DP_TELEMETRY_ENDPOINT,
     DEFAULT_ODRIVE_COMMAND_ENDPOINT,
     DEFAULT_ODRIVE_TELEMETRY_ENDPOINT,
+    DEFAULT_TC_DAQ_TELEMETRY_ENDPOINT,
     DEVICE_CPX400DP,
     DEVICE_ODRIVE,
+    DEVICE_TC_DAQ,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,6 +82,17 @@ CPX400DP_MDNS_HOST = "t595016.local"
 follows it when its address changes. Needs an mDNS responder on the host - macOS
 has one built in, a Windows or CentOS stand may not. Pass either this or
 CPX400DP_HOST as YdriveTestbed(cpx400dp_host=...)."""
+
+TC_DAQ_STALENESS_S = TC_DAQ_SILENCE_TIMEOUT_S + 2.0
+"""How long this stand's consumers wait for a thermocouple frame before treating
+the stream as dead.
+
+Derived from the driver's own tolerance rather than set alongside it, and
+deliberately longer. Both ends are watching the same silence: at the same value
+they race, and the client wins by reporting only that no frame arrived - while
+the driver reports which port went quiet and for how long. Two seconds of margin
+means the useful diagnosis is the one that lands. TelemetryClient's 5 s default
+would fire first and make the driver's extra patience unreachable."""
 
 STARTUP_DELAY_S = 1.0
 """Seconds allowed for both drivers to bind their sockets and connect. The
@@ -126,7 +144,7 @@ class YdriveTestbed:
             ...  # both drivers are up; arming and the brake are a test's to sequence
     """
 
-    DEVICES: Tuple[str, ...] = (DEVICE_ODRIVE, DEVICE_CPX400DP)
+    DEVICES: Tuple[str, ...] = (DEVICE_ODRIVE, DEVICE_CPX400DP, DEVICE_TC_DAQ)
     """The devices whose driver processes this testbed owns. Declared here
     because this is what starts them; the test case unions this with its DUT
     façade's declaration (there is none for ydrive) and publishes the result, so
@@ -138,6 +156,7 @@ class YdriveTestbed:
         use_mock: bool = False,
         serial_number: Optional[str] = None,
         cpx400dp_host: str = CPX400DP_HOST,
+        tc_daq_port: str = DEFAULT_TC_DAQ_PORT,
         output_dir: Optional[Path] = None,
         test_id: Optional[str] = None,
     ) -> None:
@@ -145,6 +164,13 @@ class YdriveTestbed:
         cpx400dp_host: this stand's supply. Defaults to CPX400DP_HOST, the
             address this stand's unit last self-assigned; pass a new address, or
             CPX400DP_MDNS_HOST, when it has moved.
+
+        tc_daq_port: the serial port the thermocouple DAQ is on. Named by the
+            OS rather than by the device - `COM<n>` on Windows,
+            `/dev/cu.usbserial-<n>` on macOS - and it changes with enumeration
+            order, so this stand's own value belongs here rather than in the
+            driver. `python -m hardware.tc_daq.main --list-ports` prints the
+            candidates.
 
         output_dir/test_id: given both, each driver writes its detailed log to
             `<output_dir>/runs/<test_id>/<device>/logs.txt`, beside the telemetry
@@ -157,6 +183,7 @@ class YdriveTestbed:
         self._use_mock = use_mock
         self._serial_number = serial_number
         self._cpx400dp_host = cpx400dp_host
+        self._tc_daq_port = tc_daq_port
         self._output_dir = output_dir
         self._test_id = test_id
         self._processes: List[subprocess.Popen] = []
@@ -165,6 +192,7 @@ class YdriveTestbed:
         self._sync_telemetry: Optional[TelemetryClient] = None
         self._supply: Optional[Cpx400dpCommandClient] = None
         self._supply_telemetry: Optional[TelemetryClient] = None
+        self._tc_daq_telemetry: Optional[TelemetryClient] = None
 
     def _log_args(self, device: str) -> List[str]:
         """`--log-file` for one device's driver, or nothing if this testbed
@@ -174,8 +202,8 @@ class YdriveTestbed:
         return ["--log-file", str(driver_log_path(self._output_dir, self._test_id, device))]
 
     def start(self) -> None:
-        """Bring both drivers up, verify their channel surfaces, and configure
-        both rails' setpoints - with the outputs left OFF.
+        """Bring all three drivers up, verify their channel surfaces, and
+        configure both rails' setpoints - with the outputs left OFF.
 
         Energizing is the test's decision, taken in PreTestSetup, not something
         that happens because a testbed was constructed."""
@@ -198,14 +226,28 @@ class YdriveTestbed:
             *self._log_args(DEVICE_CPX400DP),
         ]
 
-        self._processes = [start_driver(odrive_args), start_driver(supply_args)]
-        time.sleep(STARTUP_DELAY_S)  # let both drivers bind their sockets
+        # The thermocouple DAQ takes no commands at all, so it gets no command
+        # client below - nothing would be sendable through one. Its driver is
+        # started, its stream is verified, and that is the whole interface.
+        tc_daq_args = [
+            sys.executable, "-m", "hardware.tc_daq.main",
+            "--port", self._tc_daq_port,
+            *self._log_args(DEVICE_TC_DAQ),
+        ]
+
+        self._processes = [
+            start_driver(odrive_args), start_driver(supply_args), start_driver(tc_daq_args)
+        ]
+        time.sleep(STARTUP_DELAY_S)  # let the drivers bind their sockets
 
         self._command = OdriveCommandClient(endpoint=DEFAULT_ODRIVE_COMMAND_ENDPOINT)
         self._telemetry = TelemetryClient(endpoint=DEFAULT_ODRIVE_TELEMETRY_ENDPOINT)
         self._sync_telemetry = TelemetryClient(endpoint=DEFAULT_ODRIVE_TELEMETRY_ENDPOINT)
         self._supply = Cpx400dpCommandClient(endpoint=DEFAULT_CPX400DP_COMMAND_ENDPOINT)
         self._supply_telemetry = TelemetryClient(endpoint=DEFAULT_CPX400DP_TELEMETRY_ENDPOINT)
+        self._tc_daq_telemetry = TelemetryClient(
+            endpoint=DEFAULT_TC_DAQ_TELEMETRY_ENDPOINT, timeout_s=TC_DAQ_STALENESS_S
+        )
 
         self._command.connect_backend()
         self._supply.connect_backend()
@@ -214,6 +256,12 @@ class YdriveTestbed:
         self._telemetry.verify_channels(TELEMETRY_CHANNELS)
         self._supply.verify_actions(CPX400DP_COMMAND_CHANNELS)
         self._supply_telemetry.verify_channels(CPX400DP_TELEMETRY_CHANNELS)
+        # No verify_actions for the DAQ: it declares no commands, so there is
+        # nothing to confirm. Its stream is the only thing to check, and a
+        # faulted thermocouple still publishes its channel (as None), so this
+        # passes with sensors unplugged - what it catches is a driver that
+        # started against the wrong port and is streaming something else.
+        self._tc_daq_telemetry.verify_channels(TC_DAQ_TELEMETRY_CHANNELS)
 
         self._configure_rails()
 
@@ -306,11 +354,11 @@ class YdriveTestbed:
         self._safe("disconnect the supply backend", lambda: self.supply.disconnect_backend())
 
         for client in (self._command, self._telemetry, self._sync_telemetry,
-                       self._supply, self._supply_telemetry):
+                       self._supply, self._supply_telemetry, self._tc_daq_telemetry):
             if client is not None:
                 self._safe(f"close {type(client).__name__}", client.close)
         self._command = self._telemetry = self._sync_telemetry = None
-        self._supply = self._supply_telemetry = None
+        self._supply = self._supply_telemetry = self._tc_daq_telemetry = None
 
         for process in self._processes:
             self._safe(f"terminate pid {process.pid}", process.terminate)
@@ -399,6 +447,16 @@ class YdriveTestbed:
         if self._supply_telemetry is None:
             raise RuntimeError("YdriveTestbed.supply_telemetry accessed before start()")
         return self._supply_telemetry
+
+    @property
+    def tc_daq_telemetry(self) -> TelemetryClient:
+        """The thermocouple DAQ's stream.
+
+        The only interface this device has - it accepts no commands, so there is
+        no command client to pair with it."""
+        if self._tc_daq_telemetry is None:
+            raise RuntimeError("YdriveTestbed.tc_daq_telemetry accessed before start()")
+        return self._tc_daq_telemetry
 
     @property
     def command(self) -> OdriveCommandClient:

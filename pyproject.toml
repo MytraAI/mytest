@@ -13,6 +13,10 @@ dependencies = [
     # tools/manual_gui.py's live telemetry graph (dual y-axis, embedded in
     # Tkinter via FigureCanvasTkAgg).
     "matplotlib>=3.8",
+    # hardware/tc_daq/ reads the thermocouple DAQ's serial stream. The device
+    # sits behind a CP2102N USB-UART bridge and announces nothing of its own, so
+    # pyserial's list_ports is also how an operator finds which port it is on.
+    "pyserial>=3.5",
 ]
 
 [dependency-groups]
