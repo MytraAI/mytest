@@ -11,17 +11,13 @@ and a lost recorder throughout.
 
 brake_from_speed: accelerates toward a target, and the moment the load
 reaches a trigger speed idles the motor and drops the brake rail, so
-the brake stops a moving load. Records the speed it engaged at and how
-far the load then travelled. The inverse of engage_brake's ordering,
+the brake stops a moving load. Holds it there, then records the speed
+it engaged at and how far the load ended up from the brake command. The inverse of engage_brake's ordering,
 deliberately: see its own docstring.
 
 release_brake_in_place: hands a stopped load back to the controller
 without moving it, by parking the setpoint where the axis actually is
 before arming.
-
-rest_on_brake: waits while the brake holds a load it has just stopped,
-touching neither the rail nor the axis - so drift over the window is
-the brake slipping.
 
 dwell_braked: engages the brake, holds the load with the axis idle for
 a fixed time, then releases - the state that dissipates nothing, so a
@@ -110,6 +106,17 @@ DC_BUS_UNDER_VOLTAGE the moment it is cleared."""
 CLEAR_SETTLE_S = 0.25
 """Seconds between clearing and reading the result, so the frame that is checked
 was produced after the clear rather than before it."""
+
+DEFAULT_POST_BRAKE_REST_S = 5.0
+"""How long the brake holds a load it has just stopped before its stopping
+distance is taken.
+
+Inside the brake event rather than after it, because the distance is measured at
+the end of it: a brake that stops the load and then creeps has not stopped it in
+that distance, and the number that matters is where the load ended up. The window
+is also when a brake is hottest and least likely to hold, with nothing driving -
+so any movement across it is the brake slipping, not a controller fighting
+something."""
 
 DEFAULT_STOP_TIMEOUT_S = 10.0
 """How long the load may take to come to rest after the brake is commanded. A
@@ -364,6 +371,7 @@ def brake_from_speed(
     target: float,
     trigger_speed: float,
     stop_timeout_s: float = DEFAULT_STOP_TIMEOUT_S,
+    rest_s: float = DEFAULT_POST_BRAKE_REST_S,
     velocity_tolerance: float = DEFAULT_VELOCITY_TOLERANCE,
     position_tolerance: float = DEFAULT_POSITION_TOLERANCE,
 ) -> None:
@@ -381,9 +389,14 @@ def brake_from_speed(
 
     Records the speed at engagement and how far the load travelled afterwards, as
     `brake_speed_m_s` and `stopping_distance_m` in metres, since that is what a
-    limit is written in and what an operator reads. Distance is measured from the
-    brake command, so it includes the coast through BRAKE_SETTLE_S -
-    understating it by starting from first deceleration would flatter the brake.
+    limit is written in and what an operator reads.
+
+    Distance is measured from the brake command to where the load sits `rest_s`
+    after coming to rest - both ends chosen so the number cannot flatter the brake.
+    Starting at the command includes the coast through BRAKE_SETTLE_S, which
+    starting from first deceleration would hide; ending after the rest includes any
+    creep while the brake holds, which stopping the clock at first standstill would
+    hide.
 
     Publishing `stopping_distance_m` is what aborts the run on a bad stop:
     ydrive_rulebook bounds it fatally at 2 m, the runner merges published state
@@ -441,7 +454,6 @@ def brake_from_speed(
         test_case.check_should_continue()
         motion = testbed.get_motion()
         if abs(motion.velocity) <= velocity_tolerance:
-            stopped_at = motion.position
             break
         if stop_deadline.expired:
             raise TimeoutError(
@@ -451,8 +463,14 @@ def brake_from_speed(
                 f"{abs(motion.position - position) * METERS_PER_TURN:.2f} m"
             )
 
+    # The brake keeps what it stopped, and only then is the distance taken - see
+    # DEFAULT_POST_BRAKE_REST_S. Nothing here touches the rail or the axis: they
+    # were left where they should be above.
+    test_case.wait_for(rest_s)
+    rested_at = testbed.get_motion().position
+
     test_case.set_state("brake_speed_m_s", speed * METERS_PER_TURN)
-    test_case.set_state("stopping_distance_m", abs(stopped_at - position) * METERS_PER_TURN)
+    test_case.set_state("stopping_distance_m", abs(rested_at - position) * METERS_PER_TURN)
 
 
 def release_brake_in_place(test_case: BaseYdriveTest) -> None:
@@ -473,24 +491,6 @@ def release_brake_in_place(test_case: BaseYdriveTest) -> None:
     testbed.command.set_position(held_at)
     test_case.set_state("position_target", held_at)
     release_brake(test_case)
-
-
-@step
-def rest_on_brake(test_case: BaseYdriveTest, seconds: float) -> None:
-    """Leave the load where it is, on the brake, for `seconds`.
-
-    For the pause straight after brake_from_speed(), which already left the rail
-    down and the axis idle - so this touches neither. Using dwell_braked() here
-    would re-engage what is already engaged and, worse, end by releasing the brake
-    with release_brake(), which assumes the position setpoint still matches the
-    axis. After a brake stop it does not: the setpoint is the far end of the
-    stroke. release_brake_in_place() is what handles that, and it is the caller's
-    to sequence.
-
-    The load is held by the brake alone throughout, with nothing driving, so
-    pos_estimate over this window is the brake's static holding - drift here is
-    slip, on a brake that has just absorbed a stop."""
-    test_case.wait_for(seconds)
 
 
 @step

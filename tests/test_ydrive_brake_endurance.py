@@ -362,18 +362,33 @@ def test_a_run_up_stops_the_moment_the_axis_disarms():
     assert "brake:engage" not in testbed.calls, "no brake event should be recorded"
 
 
-def test_the_post_brake_rest_touches_neither_the_rail_nor_the_axis():
-    """brake_from_speed already left the rail down and the axis idle. Re-engaging
-    would be noise, and releasing at the end - which dwell_braked does - would arm
-    against the stale far-end setpoint and lunge for it."""
-    from testcases.ydrive.teststeps.teststeps import rest_on_brake
+def test_the_brake_keeps_the_load_before_the_distance_is_taken():
+    """The rest is inside the event, and it touches neither the rail nor the axis -
+    they were left where they should be when the brake closed."""
+    _, testbed = _brake_once()
 
-    testbed = FakeBrakeTestbed()
-    case = FakeTestCase(testbed)
-    testbed.braked = True
-    testbed.armed = False
+    after_brake = testbed.calls[testbed.calls.index("brake:engage"):]
+    assert "wait:5.0" in after_brake, f"the brake did not keep the load: {after_brake}"
+    assert [c for c in after_brake if c.startswith(("brake:", "axis:"))] == ["brake:engage"], (
+        "the rail or the axis was touched while the brake held the load"
+    )
 
-    rest_on_brake(case, 5.0)
 
-    assert testbed.calls == ["wait:5.0"]
-    assert testbed.braked is True and testbed.armed is False
+def test_creep_while_the_brake_holds_counts_against_the_stopping_distance():
+    """A brake that stops the load and then lets it creep has not stopped it in
+    that distance, so the measurement ends after the rest rather than at first
+    standstill."""
+
+    class CreepingCase(FakeTestCase):
+        def wait_for(self, seconds):
+            super().wait_for(seconds)
+            if seconds == 5.0:
+                self.testbed.position += 5.0  # 0.42 m of creep while held
+
+    testbed = FakeBrakeTestbed(stopping_turns=10.0, reaches=TRIGGER_TURNS_S)
+    case = CreepingCase(testbed)
+    brake_from_speed(case, target=110.0, trigger_speed=TRIGGER_TURNS_S)
+
+    assert case.state["stopping_distance_m"] == pytest.approx(15.0 * METERS_PER_TURN, abs=0.01), (
+        "the creep is missing from the distance"
+    )

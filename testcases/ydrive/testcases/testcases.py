@@ -59,7 +59,6 @@ from ..teststeps.teststeps import (
     brake_from_speed,
     cycle_position,
     dwell_braked,
-    rest_on_brake,
     move_to,
     prepare_for_operation,
     release_brake,
@@ -163,12 +162,14 @@ class BrakeEnduranceTest(BaseYdriveTest):
     derived from it - see return_timeout_s."""
 
     POST_BRAKE_DWELL_S = 5.0
-    """How long the brake holds the load it has just stopped, before the controller
-    takes it back.
+    """How long the brake holds the load it has just stopped, before its stopping
+    distance is taken and the controller takes it back.
 
-    The load is on the brake alone for this window, right after the stop, which is
-    when a brake is hottest and least likely to hold. Nothing drives during it, so
-    position drift over it is slip rather than a controller fighting something."""
+    Part of the brake event rather than something after it: the distance is
+    measured at the end of this window, so a brake that stops the load and then
+    creeps is reported as not having stopped it in that distance. The window is
+    also when a brake is hottest and least likely to hold, with nothing driving, so
+    movement across it is slip rather than a controller fighting something."""
 
     DWELL_S = 60.0
     """How long each cycle rests at the start line before the next run-up, held on
@@ -254,16 +255,13 @@ class BrakeEnduranceTest(BaseYdriveTest):
                 self,
                 target=origin + self.BRAKE_TARGET_POSITION,
                 trigger_speed=self.trigger_speed_turns_s,
+                rest_s=self.POST_BRAKE_DWELL_S,
             )
 
             self.brake_cycles += 1
             self.set_state("brake_cycles", self.brake_cycles)
             logger.info("test %s: brake cycle %d complete", self.test_id, self.brake_cycles)
 
-            # The brake keeps what it just stopped, before the controller takes it
-            # back. brake_from_speed left the rail down and the axis idle, so this
-            # only waits.
-            rest_on_brake(self, self.POST_BRAKE_DWELL_S)
 
             # Then hand the load back, return it to the start line, and rest
             # there on the brake before the next run-up.
