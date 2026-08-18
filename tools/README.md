@@ -69,6 +69,49 @@ the whole `169.254.0.0/16`.
 The address it prints goes into the testbed that owns that stand
 (`CPX400DP_HOST` in `testbeds/*/`), not into the driver's default.
 
+## operator_prompt.py
+
+The window a test opens when it needs a person to do something - the instruction,
+the test id, and one button. Clicking it writes the same marker file
+`operator_ack.py` writes, so the waiting test polls for one thing however it is
+answered.
+
+```
+python -m tools.operator_prompt --test-id <test_id> --message "do the thing"
+```
+
+Not run by hand normally: `await_operator()` spawns it, and closes it when the
+wait ends however it ended. Its own process because a Tk main loop owns its
+thread - inside the test process it would either block the sequence or have to run
+off the main thread, which Tk does not support. Launched via `pythonw.exe` on
+Windows so no console window appears behind it.
+
+Deliberately cannot stop a test: the only outcomes are acknowledging and closing
+the window. Stopping is `stop_test.py`'s job and the status page's, and a dialog
+that could do both invites clicking the wrong one at live hardware. Closing it
+does not acknowledge - the test keeps waiting, and exits 2 rather than failing a
+run on a stand with no display or no tkinter.
+
+## operator_ack.py
+
+Tells a waiting test that the operator has done what it asked. Some steps stop
+for a person - `BrakeEnduranceTest` has the load moved to position 0 by hand
+before it starts - and `await_operator()` publishes what it wants as
+`operator_prompt`, then polls for the marker file this leaves.
+
+```
+python -m tools.operator_ack
+python -m tools.operator_ack --test-id <test_id>
+```
+
+A file rather than `input()` for the same reason `stop_test.py` is one: the test
+keeps checking for a fatal bound, a stop request and a lost recorder while it
+waits, which a blocking read would suspend during the one part of a run where
+somebody has their hands on the hardware. With no `--test-id` it discovers the
+running test from the run-state stream and prints what that test is waiting for
+before acknowledging, so an operator can see they are answering the prompt they
+think they are.
+
 ## stop_test.py
 
 Cross-platform, OS-signal-independent way to stop a running test case - see

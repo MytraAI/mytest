@@ -10,7 +10,8 @@ import inspect
 
 import pytest
 
-from testbeds.ydrive_testbed.ydrive_testbed import BRAKE_SETTLE_S
+from hardware.odrive import odrive_errors
+from testbeds.ydrive_testbed.ydrive_testbed import BRAKE_SETTLE_S, Motion
 from testcases.ydrive.teststeps.teststeps import (
     DEFAULT_ARM_TIMEOUT_S,
     cycle_position,
@@ -49,7 +50,7 @@ class FakeSupplyTestbed:
         elif state == "IDLE" and self._idles:
             self.armed = False
 
-    def get_channels(self):
+    def _channels(self):
         return {
             "axis_is_armed": self.armed,
             "axis_current_state": 8 if self.armed else 1,
@@ -59,8 +60,28 @@ class FakeSupplyTestbed:
             "vel_estimate": 0.0,
         }
 
+    # The same named surface the real testbed exposes - steps never see a
+    # channels dict, so neither does the fake standing in for one.
+    def get_motion(self):
+        channels = self._channels()
+        return Motion(position=channels["pos_estimate"], velocity=channels["vel_estimate"])
+
+    def describe_errors(self):
+        channels = self._channels()
+        return {
+            name: odrive_errors.describe(name, channels[name])
+            for name in odrive_errors.WATCHED_CHANNELS
+            if name in channels
+        }
+
+    def get_faults(self):
+        return odrive_errors.faults_in_frame(self._channels())
+
+    def get_pos_estimate(self):
+        return self.position
+
     def get_axis_armed_status(self):
-        return bool(self.get_channels()["axis_is_armed"])
+        return bool(self._channels()["axis_is_armed"])
 
     # supply side
     def power_brake_bus(self, enabled):

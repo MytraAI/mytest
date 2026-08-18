@@ -425,6 +425,24 @@ class TestCase(ABC):
             path.unlink(missing_ok=True)
             raise StopRequested(self.test_id)
 
+    def operator_ack_path(self) -> Path:
+        """Where an operator's "done" for this run lands -
+        Path(tempfile.gettempdir())/mytest-ack-<test_id>.
+
+        The same convention as the stop marker above and for the same reasons: a
+        file, so it needs no OS signal and works identically on every target
+        platform, and polled by the test itself so the wait still checks for a
+        fatal bound, a stop request and a lost recorder on every tick. A step
+        that blocks on input() would stop all three during the one part of a test
+        where somebody has their hands on the hardware.
+
+        Public because tools/operator_ack.py has to compose the same path, the
+        way tools/stop_test.py does for the stop marker. Only the convention
+        lives here: what a run asks an operator to do, and what it does with the
+        answer, is a test step's business - see
+        testcases/ydrive/teststeps/teststeps.py's await_operator()."""
+        return Path(tempfile.gettempdir()) / f"mytest-ack-{self.test_id}"
+
     def check_recording_alive(self) -> None:
         """Raise RecordingLost if the telemetry engine isn't recording any
         more - a no-op when require_engine is False.

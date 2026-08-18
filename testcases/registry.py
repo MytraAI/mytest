@@ -20,7 +20,7 @@ from .base import TestCase
 from .example_dut.testcases.base_example_dut_test import BaseExampleDutTest
 from .example_dut.testcases.halt_tests import CycleDutPositionTest
 from .ydrive.testcases.base_ydrive_test import BaseYdriveTest
-from .ydrive.testcases.testcases import EnduranceCycleTest, ManualTest
+from .ydrive.testcases.testcases import BrakeEnduranceTest, EnduranceCycleTest, ManualTest
 
 REGISTERED_TESTS: Dict[str, Callable[[Optional[str], bool], TestCase]] = {
     "example_dut.base": lambda test_id, use_mock: BaseExampleDutTest(test_id=test_id),
@@ -28,4 +28,5 @@ REGISTERED_TESTS: Dict[str, Callable[[Optional[str], bool], TestCase]] = {
     "ydrive.base": lambda test_id, use_mock: BaseYdriveTest(test_id=test_id, use_mock=use_mock),
     "ydrive.manual": lambda test_id, use_mock: ManualTest(test_id=test_id, use_mock=use_mock),
     "ydrive.endurance_cycle": lambda test_id, use_mock: EnduranceCycleTest(test_id=test_id, use_mock=use_mock),
+    "ydrive.brake_endurance": lambda test_id, use_mock: BrakeEnduranceTest(test_id=test_id, use_mock=use_mock),
 }

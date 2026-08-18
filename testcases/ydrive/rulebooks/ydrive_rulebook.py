@@ -62,6 +62,26 @@ main_execution actually does:
   no 5s of grace. Losing the sensor is a different failure from being
   too hot, and it is not one that waiting improves.
 
+- stopping_distance_bound: stopping_distance_m > 2.0, fatal, no
+  persistence. Not a hardware channel: BrakeEnduranceTest publishes each
+  brake event's stopping distance as run state, and the runner merges
+  published state into what it evaluates. So a brake that no longer
+  stops the load in 2 m aborts the run through the same path as any
+  hardware bound, and the value that did it lands in the verdict's
+  timeline instead of only in a log line.
+
+  Undebounced deliberately, unlike the thermal bounds: this channel is
+  not a sampled signal that can spike, it is one number per brake event,
+  written once and then held until the next event. One bad stop is the
+  event, and debouncing would mean waiting for a second one.
+
+  The channel is seeded 0.0, and has to carry a number rather than no
+  value: a numeric bound on a channel carrying None is UNEVALUABLE,
+  which stops a run exactly as a faulted thermocouple does. Seeded None,
+  this bound aborted every run on its first frame before anything moved.
+  The cost of 0.0 is that every row before the first brake event reads as
+  a stop in no distance rather than as no stop yet.
+
 TEST_NAMES lists every concrete ydrive TestCase.TEST_NAME that starts
 a runner against this Rulebook (today, EnduranceCycleTest and
 ManualTest) - add a new test's TEST_NAME here when it should be
@@ -79,6 +99,11 @@ why this cannot engage on a rail fed at 48 V by a 420 W supply."""
 
 BUS_CURRENT_PERSISTENCE_S = 10.0
 """How long board_ibus must stay above MAX_BUS_CURRENT_A before the run stops."""
+
+MAX_STOPPING_DISTANCE_M = 2.0
+"""How far the load may travel after the brake is commanded, measured from the
+command rather than from when the brake bites - so it includes the coast through
+BRAKE_SETTLE_S, which at 1.8 m/s is up to 0.18 m of it."""
 
 MAX_TEMPERATURE_C = 80.0
 """Fatal ceiling for every wired thermocouple."""
@@ -99,8 +124,9 @@ will abort on the first frame."""
 
 ENDURANCE_CYCLE_TEST_NAME = "endurance_cycle_test"
 MANUAL_TEST_NAME = "manual_test"
+BRAKE_ENDURANCE_TEST_NAME = "brake_endurance_test"
 
-TEST_NAMES = [ENDURANCE_CYCLE_TEST_NAME, MANUAL_TEST_NAME]
+TEST_NAMES = [ENDURANCE_CYCLE_TEST_NAME, MANUAL_TEST_NAME, BRAKE_ENDURANCE_TEST_NAME]
 
 YDRIVE_RULEBOOK = Rulebook(
     name="ydrive_rulebook",
@@ -117,6 +143,12 @@ YDRIVE_RULEBOOK = Rulebook(
             channel="board_vbus_voltage",
             lower=10.5,
             name="undervoltage_bound",
+            fatal=True,
+        ),
+        Bound(
+            channel="stopping_distance_m",
+            upper=MAX_STOPPING_DISTANCE_M,
+            name="stopping_distance_bound",
             fatal=True,
         ),
         *[

@@ -27,4 +27,25 @@ DEFAULT_STATE: Dict[str, Any] = {
     # the moment the stand comes up and stays that way until a step powers its
     # rail. Present from frame 1 so a recorded run reads as "engaged except
     # during moves" rather than the channel appearing at the first dwell.
+    "operator_prompt": None,
+    # What the test is waiting for a person to do, or None when it is waiting for
+    # nobody. A recorded run then shows how long the stand sat waiting on an
+    # operator, which is otherwise indistinguishable from a hang.
+    "position_origin": None,
+    # The pos_estimate captured where the operator put the load, in turns. Every
+    # position this test commands is relative to it, so a stored run's absolute
+    # positions stay interpretable without it.
+    "brake_cycles": 0,
+    "brake_speed_m_s": 0.0,
+    "stopping_distance_m": 0.0,
+    # The last brake event's speed at engagement and how far the load then
+    # travelled. Published as state rather than only logged, because
+    # ydrive_rulebook bounds stopping_distance_m - the runner merges published
+    # state into what it evaluates, so a bad stop aborts the run through the same
+    # path as any hardware bound and lands in the verdict's timeline.
+    #
+    # Seeded 0.0, not None: a numeric bound on a channel carrying no value is
+    # unevaluable, and unevaluable stops a run - so None here aborted every run on
+    # its first frame, before anything moved. The cost is that rows before the
+    # first brake event read as a stop in no distance rather than as no stop yet.
 }
