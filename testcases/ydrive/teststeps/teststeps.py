@@ -19,8 +19,13 @@ release_brake_in_place: hands a stopped load back to the controller
 without moving it, by parking the setpoint where the axis actually is
 before arming.
 
-dwell_braked: holds the load on the brake, axis idle, for a fixed time -
-the state that dissipates nothing, so a thermal reading recovers over it.
+rest_on_brake: waits while the brake holds a load it has just stopped,
+touching neither the rail nor the axis - so drift over the window is
+the brake slipping.
+
+dwell_braked: engages the brake, holds the load with the axis idle for
+a fixed time, then releases - the state that dissipates nothing, so a
+thermal reading recovers over it.
 
 move_to: commands a single target position and blocks (closed-loop)
 until arrived and settled. Its own step - call it directly from a test
@@ -468,6 +473,24 @@ def release_brake_in_place(test_case: BaseYdriveTest) -> None:
     testbed.command.set_position(held_at)
     test_case.set_state("position_target", held_at)
     release_brake(test_case)
+
+
+@step
+def rest_on_brake(test_case: BaseYdriveTest, seconds: float) -> None:
+    """Leave the load where it is, on the brake, for `seconds`.
+
+    For the pause straight after brake_from_speed(), which already left the rail
+    down and the axis idle - so this touches neither. Using dwell_braked() here
+    would re-engage what is already engaged and, worse, end by releasing the brake
+    with release_brake(), which assumes the position setpoint still matches the
+    axis. After a brake stop it does not: the setpoint is the far end of the
+    stroke. release_brake_in_place() is what handles that, and it is the caller's
+    to sequence.
+
+    The load is held by the brake alone throughout, with nothing driving, so
+    pos_estimate over this window is the brake's static holding - drift here is
+    slip, on a brake that has just absorbed a stop."""
+    test_case.wait_for(seconds)
 
 
 @step

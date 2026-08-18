@@ -59,6 +59,7 @@ from ..teststeps.teststeps import (
     brake_from_speed,
     cycle_position,
     dwell_braked,
+    rest_on_brake,
     move_to,
     prepare_for_operation,
     release_brake,
@@ -112,7 +113,7 @@ class EnduranceCycleTest(BaseYdriveTest):
 
 
 class BrakeEnduranceTest(BaseYdriveTest):
-    """Stops a moving load with the brake, over and over: run 110 -> 0, brake at speed, return to 110, rest on the brake, recording the speed it engaged at and how far the load then travelled."""
+    """Stops a moving load with the brake, over and over: run 110 -> 0, brake at speed, hold it there, return to 110, rest on the brake, recording the speed it engaged at and how far the load then travelled."""
 
     TEST_NAME = BRAKE_ENDURANCE_TEST_NAME
 
@@ -136,7 +137,7 @@ class BrakeEnduranceTest(BaseYdriveTest):
     because that is the number the test is specified in; converted through the
     stand's own METERS_PER_TURN, since the controller works in turns.
 
-IT IS A FLOOR, NOT THE SPEED THE BRAKE ACTUALLY SEES, and which of the
+    IT IS A FLOOR, NOT THE SPEED THE BRAKE ACTUALLY SEES, and which of the
     two you get depends on the load. Unloaded, the axis goes from rest to the
     velocity limit inside one telemetry frame (measured: 0 -> 21.3 turns/s in
     77 ms at 12.6 Hz), so the first sample is already past this trigger and the
@@ -149,9 +150,10 @@ IT IS A FLOOR, NOT THE SPEED THE BRAKE ACTUALLY SEES, and which of the
     having driven the whole stroke instead. Making the requested speed the one that
     always happens means making it the cruise speed - see AI/Mytest.md.
 
-    A cycle is: run down toward 0, brake at this speed, hand the load back,
-    return to START_POSITION. The return is part of the cycle rather than
-    something teardown does - teardown commands no motion at all here, inherited
+    A cycle is: run down toward 0, brake at this speed, hold the stopped load on
+    the brake, hand it back to the controller, return to START_POSITION, and rest
+    there. Both rests and the return are part of the cycle rather than something
+    teardown does - teardown commands no motion at all here, inherited
     unchanged from BaseYdriveTest, so a run that ends leaves the load wherever
     its last complete action put it."""
 
@@ -159,6 +161,14 @@ IT IS A FLOOR, NOT THE SPEED THE BRAKE ACTUALLY SEES, and which of the
     """What this test tunes the controller to before it moves anything. Held as an
     attribute rather than passed inline because the return move's timeout is
     derived from it - see return_timeout_s."""
+
+    POST_BRAKE_DWELL_S = 5.0
+    """How long the brake holds the load it has just stopped, before the controller
+    takes it back.
+
+    The load is on the brake alone for this window, right after the stop, which is
+    when a brake is hottest and least likely to hold. Nothing drives during it, so
+    position drift over it is slip rather than a controller fighting something."""
 
     DWELL_S = 60.0
     """How long each cycle rests at the start line before the next run-up, held on
@@ -249,6 +259,11 @@ IT IS A FLOOR, NOT THE SPEED THE BRAKE ACTUALLY SEES, and which of the
             self.brake_cycles += 1
             self.set_state("brake_cycles", self.brake_cycles)
             logger.info("test %s: brake cycle %d complete", self.test_id, self.brake_cycles)
+
+            # The brake keeps what it just stopped, before the controller takes it
+            # back. brake_from_speed left the rail down and the axis idle, so this
+            # only waits.
+            rest_on_brake(self, self.POST_BRAKE_DWELL_S)
 
             # Then hand the load back, return it to the start line, and rest
             # there on the brake before the next run-up.

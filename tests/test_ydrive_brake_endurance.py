@@ -360,3 +360,20 @@ def test_a_run_up_stops_the_moment_the_axis_disarms():
         brake_from_speed(FakeTestCase(testbed), target=0.0, trigger_speed=TRIGGER_TURNS_S)
 
     assert "brake:engage" not in testbed.calls, "no brake event should be recorded"
+
+
+def test_the_post_brake_rest_touches_neither_the_rail_nor_the_axis():
+    """brake_from_speed already left the rail down and the axis idle. Re-engaging
+    would be noise, and releasing at the end - which dwell_braked does - would arm
+    against the stale far-end setpoint and lunge for it."""
+    from testcases.ydrive.teststeps.teststeps import rest_on_brake
+
+    testbed = FakeBrakeTestbed()
+    case = FakeTestCase(testbed)
+    testbed.braked = True
+    testbed.armed = False
+
+    rest_on_brake(case, 5.0)
+
+    assert testbed.calls == ["wait:5.0"]
+    assert testbed.braked is True and testbed.armed is False
