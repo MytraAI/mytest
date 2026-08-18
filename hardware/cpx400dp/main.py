@@ -23,7 +23,6 @@ itself will happily accept any value inside its own 60 V / 20 A range.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import logging
 
 from protocol.wire import (
@@ -34,6 +33,7 @@ from protocol.wire import (
 
 from ..driver_logging import add_logging_args, configure as configure_logging
 from ..runner import run
+from protocol import asyncio_compat
 from .cpx400dp_backend import DEFAULT_CPX400DP_HOST, Cpx400dpBackend
 from .transport import DEFAULT_PORT
 
@@ -74,4 +74,4 @@ if __name__ == "__main__":
         args.host, args.port, args.max_voltage, args.max_current,
     )
 
-    asyncio.run(run(backend, args.command_endpoint, args.telemetry_endpoint))
+    asyncio_compat.run(run(backend, args.command_endpoint, args.telemetry_endpoint))

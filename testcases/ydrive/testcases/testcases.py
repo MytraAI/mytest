@@ -30,7 +30,7 @@ long as an operator (e.g. via a GUI) needs them, for manually viewing
 and commanding hardware directly. Deliberately leaves the axis in
 IDLE, unconfigured - control mode, tuning, and arming are the
 operator's own choice to make in the moment, not this test's to assume.
-It leaves the 48 V motor bus off, taking BaseYdriveTest's default, so
+It never calls prepare_for_operation(), so the 48 V motor bus stays off and
 nothing about opening this test energizes the stand: no bus, no arming,
 no brake change. Powering a rail is the operator's to decide, the same
 way control mode and arming already are - the supply's own command
@@ -47,7 +47,7 @@ from typing import Optional
 
 from ..rulebooks.ydrive_rulebook import ENDURANCE_CYCLE_TEST_NAME, MANUAL_TEST_NAME
 from .base_ydrive_test import BaseYdriveTest
-from ..teststeps.teststeps import cycle_position, move_to, release_brake, set_tuning_params
+from ..teststeps.teststeps import cycle_position, move_to, prepare_for_operation, release_brake
 
 logger = logging.getLogger(__name__)
 
@@ -62,18 +62,20 @@ class EnduranceCycleTest(BaseYdriveTest):
     LOW_POSITION = 0.0
     HIGH_POSITION = 10.0
 
-    POWER_MOTOR_BUS_AT_SETUP = True
-    """This test drives the axis, so it needs the 48 V bus up before
-    main_execution can arm the ODrive."""
-
     def __init__(self, test_id: Optional[str] = None, use_mock: bool = False, require_engine: bool = True):
         super().__init__(test_id, use_mock, require_engine=require_engine)
         self.total_distance_m = 0.0
 
     def main_execution(self) -> None:
+        # Bus up, latched faults cleared, control mode and tuning set - and the
+        # axis still idle behind an engaged brake.
+        prepare_for_operation(self)
+        # Evaluation starts once the stand is in the state the bounds describe.
+        # YDRIVE_RULEBOOK's undervoltage_bound is fatal and undebounced, so a
+        # runner started over a de-energized bus fails the run on its first
+        # frame - the bus reading volts is the correct answer to a question
+        # nobody should be asking yet.
         self.runner.start(self.testbed.telemetry)
-        set_tuning_params(self)
-        self.testbed.command.set_control_mode("POSITION_CONTROL")
         # Arms the axis and then releases the brake, in that order -
         # pre_test_setup left the brake engaged and the axis idle on purpose.
         release_brake(self)

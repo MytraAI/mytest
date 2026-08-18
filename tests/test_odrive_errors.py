@@ -350,3 +350,24 @@ def test_an_unpowered_bus_reads_as_a_real_condition():
     as a literal: it is the exact number that motivated this whole module."""
     assert oe.describe("active_errors", 513) == "INITIALIZING | DC_BUS_UNDER_VOLTAGE"
     assert oe.is_fault("active_errors", 513) is True
+
+
+def test_only_the_faulted_channels_are_reported_as_faults():
+    """describe_frame() decodes everything it can, including what is fine.
+    faults_in_frame() is for a caller deciding whether the board is fit to be
+    armed, which a channel reading NOMINAL does not help with."""
+    frame = {
+        "active_errors": 4096,          # CURRENT_LIMIT_VIOLATION
+        "disarm_reason": 0,             # nothing
+        "axis_procedure_result": 0,     # SUCCESS
+        "axis_current_state": 1,        # IDLE - a state, never a fault
+        "pos_estimate": 3.5,            # not a watched channel at all
+    }
+    faults = oe.faults_in_frame(frame)
+
+    assert list(faults) == ["active_errors"]
+    assert "CURRENT_LIMIT_VIOLATION" in faults["active_errors"]
+
+
+def test_a_clean_frame_reports_no_faults():
+    assert oe.faults_in_frame({"active_errors": 0, "disarm_reason": 0}) == {}

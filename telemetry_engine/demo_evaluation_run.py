@@ -27,6 +27,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from protocol import asyncio_compat
 from protocol.paths import run_dir
 from protocol.verdict import read_verdict
 from testcases.example_dut.rulebooks.cycle_dut_position_rulebook import CYCLE_DUT_POSITION_RULEBOOK
@@ -78,4 +79,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio_compat.run(main())

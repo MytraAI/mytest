@@ -73,6 +73,24 @@ class TelemetryClient:
             _, raw = self._socket.recv_multipart()
             yield TelemetryFrame.from_bytes(raw)
 
+    def discard_backlog(self) -> int:
+        """Drop every frame already queued, and report how many.
+
+        For a consumer whose judgements are about the present, when its
+        subscription is older than its first read: a client created at testbed
+        start and first read once setup is done holds frames describing a stand
+        that was still being set up. Never blocks - a queue with nothing in it
+        discards nothing.
+
+        Discarding here costs the record nothing. The telemetry engine
+        subscribes to the same publisher directly and keeps its own copy of
+        every frame."""
+        dropped = 0
+        while self._poller.poll(0):
+            self._socket.recv_multipart()
+            dropped += 1
+        return dropped
+
     def latest_frame(self) -> TelemetryFrame:
         """Return the newest frame available, discarding any queued behind it.
 

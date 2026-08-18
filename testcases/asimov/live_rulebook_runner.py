@@ -171,6 +171,20 @@ class LiveRulebookRunner:
             self._thread.join(timeout=5)
 
     def _run(self, telemetry_client: TelemetryClient) -> None:
+        # Evaluation starts from the present. The subscriber is created when the
+        # testbed starts, well before a test has energized anything, so by the
+        # time a run reaches this point its queue holds frames describing a
+        # stand that was deliberately cold - a de-energized bus reads volts
+        # below any undervoltage bound, and judging that history fails the run
+        # for a condition that predates it. The queued frames are recorded by
+        # the engine regardless; what is dropped here is only this thread's
+        # backlog.
+        dropped = telemetry_client.discard_backlog()
+        if dropped:
+            logger.info(
+                "test %s: evaluation starting from the present, %d queued frame(s) skipped",
+                self._test_id, dropped,
+            )
         try:
             for frame in telemetry_client.frames():
                 if self._stop.is_set():

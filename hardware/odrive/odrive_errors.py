@@ -209,6 +209,21 @@ def describe_frame(channels: Dict[str, Any]) -> Dict[str, str]:
     return described
 
 
+def faults_in_frame(channels: Dict[str, Any]) -> Dict[str, str]:
+    """Just the watched channels of this frame that read as a fault, decoded.
+
+    For a caller deciding whether the board is fit to be armed, rather than one
+    reporting what it is doing - describe_frame() decodes everything it can,
+    including the channels that are fine. Reads the watched set rather than a
+    caller's own list, so a fault in a channel that caller never thought of is
+    still seen."""
+    return {
+        channel: describe(channel, channels[channel])
+        for channel in WATCHED_CHANNELS
+        if channel in channels and is_fault(channel, channels[channel])
+    }
+
+
 def is_fault(channel: str, value: Any) -> bool:
     """Whether this value means something is wrong. Decides the log level.
 

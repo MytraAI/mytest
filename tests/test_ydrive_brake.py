@@ -66,6 +66,9 @@ class FakeSupplyTestbed:
     def power_brake_bus(self, enabled):
         self.calls.append("brake:release" if enabled else "brake:engage")
 
+    def power_motor_bus(self, enabled):
+        self.calls.append("bus:on" if enabled else "bus:off")
+
 
 class FakeTestCase:
     """The surface @step and the steps require of a TestCase."""
@@ -290,16 +293,27 @@ def test_teardown_tolerates_a_run_that_never_built_a_runner():
     assert testbed.calls == ["testbed:stop"]
 
 
-def test_nothing_is_energized_unless_a_test_asks():
-    """The default has to fail safe. Defaulting to True would mean every new ydrive
-    test brought up a 48 V rail unless its author knew to opt out - and would make
-    ManualTest, which hands the stand to an operator, energize it by inheritance."""
-    from testcases.ydrive.testcases.base_ydrive_test import BaseYdriveTest
-    from testcases.ydrive.testcases.testcases import EnduranceCycleTest, ManualTest
+class Waited(Exception):
+    """Raised by a fake wait_for, to end a test that would otherwise block."""
 
-    assert BaseYdriveTest.POWER_MOTOR_BUS_AT_SETUP is False, "the default must be off"
-    assert EnduranceCycleTest.POWER_MOTOR_BUS_AT_SETUP is True, "a test that drives needs the bus"
-    assert ManualTest.POWER_MOTOR_BUS_AT_SETUP is False
+
+def test_the_manual_test_energizes_nothing():
+    """It hands the stand to an operator, so opening it must bring nothing up:
+    no bus, no arming, no brake change. Energizing is prepare_for_operation's,
+    and this test never calls it."""
+    from testcases.ydrive.testcases.testcases import ManualTest
+
+    testbed = FakeSupplyTestbed()
+    testbed.telemetry = object()
+    case = FakeTeardownCase(testbed)
+    case.runner = FakeRunner(testbed.calls)
+    case.runner.start = lambda telemetry: testbed.calls.append("runner:start")
+    case.wait_for = lambda seconds: (_ for _ in ()).throw(Waited())
+
+    with pytest.raises(Waited):
+        ManualTest.main_execution(case)
+
+    assert testbed.calls == ["runner:start"], f"the stand was touched: {testbed.calls}"
 
 
 def test_the_arm_timeout_stays_below_the_telemetry_staleness_deadline():

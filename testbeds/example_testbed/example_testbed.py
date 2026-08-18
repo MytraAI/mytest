@@ -18,6 +18,7 @@ import sys
 import time
 from typing import List, Optional, Tuple
 
+from hardware.driver_process import start_driver
 from hardware.mock_power_supply.mock_power_supply_command_client import PowerSupplyCommandClient
 from protocol.wire import DEVICE_DAQ, DEVICE_POWER_SUPPLY
 
@@ -50,8 +51,8 @@ class ExampleTestbed:
 
     def start(self) -> None:
         self._processes = [
-            subprocess.Popen([sys.executable, "-m", "hardware.mock_daq.main"]),
-            subprocess.Popen([sys.executable, "-m", "hardware.mock_power_supply.main"]),
+            start_driver([sys.executable, "-m", "hardware.mock_daq.main"]),
+            start_driver([sys.executable, "-m", "hardware.mock_power_supply.main"]),
         ]
         time.sleep(STARTUP_DELAY_S)  # let both drivers bind their sockets
 

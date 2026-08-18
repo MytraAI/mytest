@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import logging
 
 from protocol.wire import (
@@ -15,6 +14,7 @@ from protocol.wire import (
 )
 from ..driver_logging import add_logging_args, configure as configure_logging
 from ..runner import run
+from protocol import asyncio_compat
 from .mock_backend import MockPowerSupplyBackend
 
 logger = logging.getLogger(__name__)
@@ -27,4 +27,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     configure_logging(args.log_file, device=DEVICE_POWER_SUPPLY)
     logger.warning("SIMULATED DEVICE - MockPowerSupplyBackend, no real hardware connected")
-    asyncio.run(run(MockPowerSupplyBackend(), args.command_endpoint, args.telemetry_endpoint))
+    asyncio_compat.run(run(MockPowerSupplyBackend(), args.command_endpoint, args.telemetry_endpoint))

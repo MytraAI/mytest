@@ -43,9 +43,9 @@ from hardware.cpx400dp.cpx400dp_channels import (
     COMMAND_CHANNELS as CPX400DP_COMMAND_CHANNELS,
     TELEMETRY_CHANNELS as CPX400DP_TELEMETRY_CHANNELS,
 )
-from hardware.cpx400dp.cpx400dp_backend import DEFAULT_CPX400DP_HOST
 from hardware.cpx400dp.cpx400dp_command_client import Cpx400dpCommandClient
 from hardware.cpx400dp.rails import Rail, deliverable_current_a
+from hardware.driver_process import start_driver
 from hardware.odrive.odrive_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
 from hardware.odrive.odrive_command_client import OdriveCommandClient
 from protocol.paths import driver_log_path
@@ -59,6 +59,22 @@ from protocol.wire import (
 )
 
 logger = logging.getLogger(__name__)
+
+CPX400DP_HOST = "169.254.166.16"
+"""This stand's supply, serial 595016.
+
+Not a stable address: the instrument reports DHCP, but its segment has no DHCP
+server, so it self-assigns a link-local address that changes if a DHCP server
+appears or on an address collision. Nothing announces the move, and `connect()`
+checks the model rather than the serial, so a moved address is found with
+`python -m tools.find_cpx400dp`, which reports the identity of whatever answers.
+Pass a new one as YdriveTestbed(cpx400dp_host=...)."""
+
+CPX400DP_MDNS_HOST = "t595016.local"
+"""The same supply by mDNS name: it advertises itself as `t<serial>.local`, which
+follows it when its address changes. Needs an mDNS responder on the host - macOS
+has one built in, a Windows or CentOS stand may not. Pass either this or
+CPX400DP_HOST as YdriveTestbed(cpx400dp_host=...)."""
 
 STARTUP_DELAY_S = 1.0
 """Seconds allowed for both drivers to bind their sockets and connect. The
@@ -121,15 +137,14 @@ class YdriveTestbed:
         self,
         use_mock: bool = False,
         serial_number: Optional[str] = None,
-        cpx400dp_host: str = DEFAULT_CPX400DP_HOST,
+        cpx400dp_host: str = CPX400DP_HOST,
         output_dir: Optional[Path] = None,
         test_id: Optional[str] = None,
     ) -> None:
         """
-        cpx400dp_host: this stand's supply. Defaults to the driver's own
-            default, which is correct as long as only one stand is connected;
-            pass the instrument's address, or its `t<serial>.local` mDNS name,
-            for anything else.
+        cpx400dp_host: this stand's supply. Defaults to CPX400DP_HOST, the
+            address this stand's unit last self-assigned; pass a new address, or
+            CPX400DP_MDNS_HOST, when it has moved.
 
         output_dir/test_id: given both, each driver writes its detailed log to
             `<output_dir>/runs/<test_id>/<device>/logs.txt`, beside the telemetry
@@ -183,7 +198,7 @@ class YdriveTestbed:
             *self._log_args(DEVICE_CPX400DP),
         ]
 
-        self._processes = [subprocess.Popen(odrive_args), subprocess.Popen(supply_args)]
+        self._processes = [start_driver(odrive_args), start_driver(supply_args)]
         time.sleep(STARTUP_DELAY_S)  # let both drivers bind their sockets
 
         self._command = OdriveCommandClient(endpoint=DEFAULT_ODRIVE_COMMAND_ENDPOINT)
@@ -203,21 +218,20 @@ class YdriveTestbed:
         self._configure_rails()
 
     def _configure_rails(self) -> None:
-        """Set both rails' voltage and current setpoints, refusing to do it
-        while an output is live.
+        """Switch both outputs off, then set every rail's voltage and current
+        setpoints.
 
-        Writing a setpoint to an energized output would step the rail under
-        whatever is connected. The supply's driver adopts, rather than resets,
-        the output state it finds, so this is the layer that notices - and it
-        raises rather than switching the output off, since something else
-        energized it deliberately and this testbed does not know what."""
-        live = [rail.name for rail in RAILS if self.rail_is_powered(rail)]
-        if live:
-            raise RuntimeError(
-                f"refusing to configure setpoints while these rails are already energized: {live}. "
-                "Something outside this testbed switched them on - the supply driver adopts, rather "
-                "than resets, the output state it finds. Switch them off before starting a run."
-            )
+        A run starts from a de-energized stand whatever it finds. The supply's
+        driver adopts, rather than resets, the output state it is started into,
+        so a rail can still be live from a previous run - and writing a setpoint
+        to a live output would step that rail under whatever is connected to it.
+        Switching off first makes every setpoint below land on a dead rail.
+
+        Powering anything back up is then a test's own decision, taken in
+        PreTestSetup or by prepare_for_operation()."""
+        for rail in RAILS:
+            self.supply.enable_output(rail.output, False)
+        logger.info("both outputs off - configuring setpoints on de-energized rails")
 
         for rail in RAILS:
             if not rail.is_within_envelope:
@@ -286,6 +300,7 @@ class YdriveTestbed:
         self._safe("engage the brake (drop the 24 V rail)", self._engage_brake_for_teardown)
         self._safe("disarm the ODrive axis", lambda: self.command.set_axis_state("IDLE"))
         self._safe("drop the 48 V motor bus", lambda: self.power_motor_bus(False))
+        self._safe("confirm both rails are off", self._confirm_rails_off)
 
         self._safe("disconnect the ODrive backend", lambda: self.command.disconnect_backend())
         self._safe("disconnect the supply backend", lambda: self.supply.disconnect_backend())
@@ -302,6 +317,28 @@ class YdriveTestbed:
         for process in self._processes:
             self._safe(f"reap pid {process.pid}", lambda p=process: p.wait(timeout=5))
         self._processes = []
+
+    def _confirm_rails_off(self) -> None:
+        """Read both outputs back after switching them off, and say so at ERROR
+        if either is still on.
+
+        Every step of stop() logs its failure and continues, which is what keeps
+        one wedged client from stranding the rest of the sequence - but it also
+        means a rail that never actually switched off leaves the stand
+        energized with nothing stating it plainly. This is the one place that
+        reads the outcome rather than the command.
+
+        The queued frames are dropped first: the newest one already published
+        can still predate the switch-off by a frame, and reporting a stand as
+        energized when it isn't is the one thing this must not do."""
+        self.supply_telemetry.discard_backlog()
+        channels = self.get_supply_channels()
+        still_on = [rail.name for rail in RAILS if channels.get(f"output_enabled_{rail.output}")]
+        if still_on:
+            logger.error(
+                "TEARDOWN LEFT THE STAND ENERGIZED: %s still on - switch the supply off by hand",
+                ", ".join(still_on),
+            )
 
     def _engage_brake_for_teardown(self) -> None:
         """Drop the brake rail and give the brake time to grab, before the axis is
@@ -341,11 +378,6 @@ class YdriveTestbed:
         use."""
         self.supply.enable_output(BRAKE_BUS.output, enabled)
         logger.info("%s %s", BRAKE_BUS.name, "released (rail energized)" if enabled else "engaged (rail de-energized)")
-
-    def rail_is_powered(self, rail: Rail) -> bool:
-        """Whether this rail's output is currently on, read from the supply."""
-        return bool(self.get_supply_channels()[f"output_enabled_{rail.output}"])
-
 
     def get_supply_channels(self) -> Dict[str, object]:
         """Block for the next supply telemetry frame and return its channels.
