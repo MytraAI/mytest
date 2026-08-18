@@ -103,7 +103,8 @@ BUS_CURRENT_PERSISTENCE_S = 10.0
 MAX_STOPPING_DISTANCE_M = 2.0
 """How far the load may travel after the brake is commanded, measured from the
 command rather than from when the brake bites - so it includes the coast through
-BRAKE_SETTLE_S, which at 1.8 m/s is up to 0.18 m of it."""
+BRAKE_SETTLE_S, which at the brake test's engagement speed is up to 0.18 m of
+it."""
 
 MAX_TEMPERATURE_C = 80.0
 """Fatal ceiling for every wired thermocouple."""

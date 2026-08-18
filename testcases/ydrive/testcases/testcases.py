@@ -131,23 +131,23 @@ class BrakeEnduranceTest(BaseYdriveTest):
     0 has nothing left - which is what stopping_distance_bound stops the run
     over, after the fact rather than before it."""
 
-    TRIGGER_SPEED_M_S = 1.8
+    TRIGGER_SPEED_M_S = 1.75
     """Load speed at which the motor is idled and the brake closes. In m/s
     because that is the number the test is specified in; converted through the
     stand's own METERS_PER_TURN, since the controller works in turns.
 
-    IT IS A FLOOR, NOT THE SPEED THE BRAKE ACTUALLY SEES, and on this stand the
-    difference is large. Measured: the axis goes from rest to the velocity limit
-    inside one telemetry frame (0 -> 21.3 turns/s in 77 ms at 12.6 Hz), so the
-    first sample this step can see is already past any lower trigger. A run asked
-    for 0.5 m/s and every one of its 52 events engaged at 1.61-1.79 m/s - the
-    speed the velocity *limit* allowed, not the one requested, and 12x the
-    kinetic energy. At the default the two happen to agree, because
-    OVER_ENERGY_VELOCITY_LIMIT is just above this trigger.
+IT IS A FLOOR, NOT THE SPEED THE BRAKE ACTUALLY SEES, and which of the
+    two you get depends on the load. Unloaded, the axis goes from rest to the
+    velocity limit inside one telemetry frame (measured: 0 -> 21.3 turns/s in
+    77 ms at 12.6 Hz), so the first sample is already past this trigger and the
+    brake engages at whatever the limit allows - 52 events asked for 0.5 m/s and
+    engaged at 1.61-1.79 m/s. Loaded, the axis climbs for seconds and this trigger
+    is what it crosses, so the engagement speed is close to it.
 
-    So the engagement speed is set by the velocity limit today. Making the
-    requested speed the one that happens means making it the cruise speed - see
-    AI/Mytest.md.
+    Set below the loaded stand's measured peak rather than at the round number
+    above it: a trigger the axis cannot quite reach fires never, and the run ends
+    having driven the whole stroke instead. Making the requested speed the one that
+    always happens means making it the cruise speed - see AI/Mytest.md.
 
     A cycle is: run down toward 0, brake at this speed, hand the load back,
     return to START_POSITION. The return is part of the cycle rather than

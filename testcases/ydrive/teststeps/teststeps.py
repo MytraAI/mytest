@@ -120,11 +120,12 @@ OVER_ENERGY_VELOCITY_LIMIT = 24.0  # turns/s = 2.02 m/s at the stand's 0.084 m/t
 allow.
 
 MAX_LOAD_VELOCITY_LIMIT below caps the load at 1.54 m/s, so a brake test
-triggering at 1.8 m/s (21.43 turns/s) would sit at the clamp forever. This is 12%
+triggering at 1.75 m/s (20.83 turns/s) would sit at the clamp forever. This is 13%
 above that trigger, and the margin is the point rather than slack: a loaded axis
 approaches its ceiling asymptotically, so a limit set just above a trigger is a
-trigger that never fires. Measured on this stand, a 22 turns/s ceiling produced a
-peak of 20.96 turns/s - 2% short of a 21.43 trigger, over the whole 8.75 m stroke.
+trigger that never fires. Measured on this stand, a ceiling of 22 turns/s produced
+a peak of 20.96 turns/s over the whole 8.75 m stroke - 5% short of its own
+ceiling.
 
 It raises the ceiling only - the gains below were tuned against a 130-turn step
 at 18.3 turns/s and are unchanged, so the axis is being run faster than it was
