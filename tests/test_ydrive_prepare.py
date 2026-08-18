@@ -10,6 +10,8 @@ from typing import Optional
 
 import pytest
 
+from hardware.odrive import odrive_errors
+
 from testcases.ydrive.teststeps.teststeps import (
     DEFAULT_CONTROL_MODE,
     prepare_for_operation,
@@ -64,7 +66,12 @@ class FakeOdriveTestbed:
             return lambda value: self.calls.append(f"tune:{name}")
         raise AttributeError(name)
 
-    def get_channels(self):
+    def get_faults(self):
+        """As the real testbed does it - the decode is the driver's, not a
+        fake's opinion of what counts as a fault."""
+        return odrive_errors.faults_in_frame(self._channels())
+
+    def _channels(self):
         return {
             "active_errors": self.active_errors,
             "disarm_reason": self.disarm_reason,
@@ -112,6 +119,9 @@ def test_a_latched_fault_is_cleared_and_the_stand_left_ready():
 
     assert testbed.active_errors == 0
     assert f"mode:{DEFAULT_CONTROL_MODE}" in testbed.calls
+    assert "tune:set_controller_config_input_mode" in testbed.calls, (
+        "the input mode was not set - a stand left in VEL_RAMP ignores every commanded position"
+    )
     assert any(c.startswith("tune:") for c in testbed.calls), "tuning was never applied"
     assert case.state["current_step"] == "prepare_for_operation", (
         "a nested @step would have overwritten current_step"

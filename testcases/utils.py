@@ -28,7 +28,10 @@ needs it) avoids every Stopwatch caller transitively depending on it.
 from __future__ import annotations
 
 import logging
+import subprocess
+import sys
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Iterator, Optional
 
 if TYPE_CHECKING:
@@ -81,6 +84,42 @@ class Stopwatch:
         while not self.expired:
             yield self.elapsed_s()
             self.wait()
+
+
+def _windowless_python() -> str:
+    """This interpreter, or its GUI twin on Windows.
+
+    Launching a GUI with python.exe on Windows opens a console window behind it -
+    an empty black box on the stand's screen for as long as the prompt is up.
+    pythonw.exe is the same interpreter without one. Falls back to sys.executable
+    if it is not there, which is every other platform and any Windows install
+    that does not ship it."""
+    if sys.platform != "win32":
+        return sys.executable
+    windowless = Path(sys.executable).with_name("pythonw.exe")
+    return str(windowless) if windowless.exists() else sys.executable
+
+
+def spawn_operator_prompt(test_id: str, message: str) -> Optional[subprocess.Popen]:
+    """Open a window asking the operator to do something, and return the process
+    so the caller can close it once the wait is over however it ended.
+
+    Its own process because a Tk main loop owns its thread: inside the test
+    process it would either block the sequence or have to run off the main
+    thread, which Tk does not support. See tools/operator_prompt.py.
+
+    Returns None (logged, not raised) if it cannot be started. The window is a
+    convenience over the marker file it writes, and the wait it belongs to polls
+    for that file whatever created it - so a stand with no display still answers
+    with `python -m tools.operator_ack` rather than failing the run."""
+    try:
+        return subprocess.Popen(
+            [_windowless_python(), "-m", "tools.operator_prompt", "--test-id", test_id,
+             "--message", message]
+        )
+    except OSError as exc:
+        logger.warning("test %s: couldn't open the operator prompt window: %s", test_id, exc)
+        return None
 
 
 def spawn_operator_dashboard(test_id: str, test_name: str) -> Optional["OperatorDashboard"]:

@@ -30,7 +30,7 @@ from .tc_daq_channels import (
     FAULT_TOKEN,
     TELEMETRY_CHANNELS,
 )
-from .transport import DEFAULT_BAUD, DEFAULT_PORT, SerialLineTransport
+from .transport import DEFAULT_BAUD, SerialLineTransport
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ class TcDaqBackend(HardwareBackend):
 
     def __init__(
         self,
-        port: str = DEFAULT_PORT,
+        port: Optional[str] = None,
         baud: int = DEFAULT_BAUD,
         transport: Optional[SerialLineTransport] = None,
     ) -> None:

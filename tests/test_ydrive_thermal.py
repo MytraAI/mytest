@@ -30,6 +30,12 @@ from testcases.ydrive.rulebooks.ydrive_rulebook import (
 
 TEMPERATURE_BOUNDS = [b for b in YDRIVE_RULEBOOK.bounds if b.channel.startswith("temperature_")]
 
+PUBLISHED_STATE = {"stopping_distance_m": 0.0}
+"""What every ydrive run has in its published state, which the runner merges into
+every frame it evaluates. Included here because stopping_distance_bound is
+fatal and numeric: a frame without this channel is fine (an absent channel is no
+result), but one carrying None would stop the run."""
+
 
 # --- what is bounded --------------------------------------------------------
 
@@ -71,7 +77,7 @@ def test_a_brief_spike_above_the_ceiling_does_not_stop_the_run():
     waited out, so this stays deterministic and fast."""
     evaluator = RulebookEvaluator()
     evaluator.register(YDRIVE_RULEBOOK)
-    hot = {"temperature_4_c": 91.0}
+    hot = {**PUBLISHED_STATE, "temperature_4_c": 91.0}
 
     assert evaluator.evaluate(hot, 100.0) == [], "a violation on the first hot frame"
     assert evaluator.evaluate(hot, 100.0 + TC_PERSISTENCE_S - 0.1) == [], "fired early"
@@ -80,7 +86,7 @@ def test_a_brief_spike_above_the_ceiling_does_not_stop_the_run():
 def test_staying_above_the_ceiling_for_the_debounce_stops_the_run():
     evaluator = RulebookEvaluator()
     evaluator.register(YDRIVE_RULEBOOK)
-    hot = {"temperature_4_c": 91.0}
+    hot = {**PUBLISHED_STATE, "temperature_4_c": 91.0}
 
     evaluator.evaluate(hot, 100.0)
     transitions = evaluator.evaluate(hot, 100.0 + TC_PERSISTENCE_S)
@@ -94,7 +100,8 @@ def test_one_cool_sample_resets_the_debounce_rather_than_accumulating():
     and also why a channel that spikes constantly hides a real rise."""
     evaluator = RulebookEvaluator()
     evaluator.register(YDRIVE_RULEBOOK)
-    hot, cool = {"temperature_4_c": 91.0}, {"temperature_4_c": 24.0}
+    hot = {**PUBLISHED_STATE, "temperature_4_c": 91.0}
+    cool = {**PUBLISHED_STATE, "temperature_4_c": 24.0}
 
     evaluator.evaluate(hot, 100.0)
     evaluator.evaluate(cool, 100.0 + TC_PERSISTENCE_S - 0.1)
@@ -111,7 +118,7 @@ def test_an_open_channel_is_not_debounced():
     evaluator.register(YDRIVE_RULEBOOK)
 
     with pytest.raises(UnevaluableBoundError):
-        evaluator.evaluate({"temperature_4_c": None}, 100.0)
+        evaluator.evaluate({**PUBLISHED_STATE, "temperature_4_c": None}, 100.0)
 
 
 def test_the_ceiling_fires_above_80_and_not_below():

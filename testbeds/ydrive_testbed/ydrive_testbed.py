@@ -36,7 +36,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from hardware.clients.telemetry_client import TelemetryClient
 from hardware.cpx400dp.cpx400dp_channels import (
@@ -46,13 +46,11 @@ from hardware.cpx400dp.cpx400dp_channels import (
 from hardware.cpx400dp.cpx400dp_command_client import Cpx400dpCommandClient
 from hardware.cpx400dp.rails import Rail, deliverable_current_a
 from hardware.driver_process import start_driver
+from hardware.odrive import odrive_errors
 from hardware.odrive.odrive_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
 from hardware.odrive.odrive_command_client import OdriveCommandClient
 from hardware.tc_daq.tc_daq_channels import TELEMETRY_CHANNELS as TC_DAQ_TELEMETRY_CHANNELS
-from hardware.tc_daq.transport import (
-    DEFAULT_PORT as DEFAULT_TC_DAQ_PORT,
-    SILENCE_TIMEOUT_S as TC_DAQ_SILENCE_TIMEOUT_S,
-)
+from hardware.tc_daq.transport import SILENCE_TIMEOUT_S as TC_DAQ_SILENCE_TIMEOUT_S
 from protocol.paths import driver_log_path
 from protocol.wire import (
     DEFAULT_CPX400DP_COMMAND_ENDPOINT,
@@ -66,6 +64,19 @@ from protocol.wire import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class Motion(NamedTuple):
+    """Where the axis is and how fast it is going, from one telemetry frame.
+
+    A pair rather than two reads because every question worth asking about a
+    moving axis is about both at once - "arrived and settled", "how far did it
+    travel after reaching this speed" - and two named reads would answer from two
+    different frames, a sample period apart, at twice the cost."""
+
+    position: float
+    velocity: float
+
 
 CPX400DP_HOST = "169.254.166.16"
 """This stand's supply, serial 595016.
@@ -116,21 +127,34 @@ powering it RELEASES the brake. 120 W is inside the envelope, so this rail does
 get real current
 limiting."""
 
+METERS_PER_TURN = 0.084
+"""How far the load travels per motor turn.
+
+Stand geometry, so it lives with the stand rather than in whichever test needed
+it first: every test that reports a distance or a speed in the units an operator
+thinks in converts through this. 2 m of travel is 23.8 turns; 1.8 m/s is 21.43
+turns/s."""
+
 RAILS = (BRAKE_BUS, MOTOR_BUS)
 """Both rails, ordered by output number. start() iterates this to configure
 setpoints. It is not the teardown order - see stop()."""
 
-BRAKE_SETTLE_S = 0.25
+BRAKE_SETTLE_S = 0.1
 """Seconds to wait after switching the brake rail, before moving or dwelling.
 
-A placeholder to be replaced with the brake's datasheet figure. A brake is not
-instantaneous: the coil field has to collapse before a magnet-applied brake
-grabs, and build before it lets go, and an output's terminal voltage decays
-through its capacitance rather than dropping.
+Chosen for this stand rather than taken from the brake's datasheet, which is
+still the number that should replace it. A brake is not instantaneous: the coil
+field has to collapse before a magnet-applied brake grabs, and build before it
+lets go, and an output's terminal voltage decays through its capacitance rather
+than dropping.
 
 The risk is asymmetric. Too short before a dwell means dwelling briefly
 unbraked. Too short before a move means driving the axis into a brake that has
-not let go."""
+not let go.
+
+It also sets how far a moving load coasts before the brake bites, which is part
+of any stopping distance measured from the brake command: at 1.8 m/s this wait
+alone is up to 0.18 m."""
 
 
 class YdriveTestbed:
@@ -156,7 +180,7 @@ class YdriveTestbed:
         use_mock: bool = False,
         serial_number: Optional[str] = None,
         cpx400dp_host: str = CPX400DP_HOST,
-        tc_daq_port: str = DEFAULT_TC_DAQ_PORT,
+        tc_daq_port: Optional[str] = None,
         output_dir: Optional[Path] = None,
         test_id: Optional[str] = None,
     ) -> None:
@@ -165,12 +189,13 @@ class YdriveTestbed:
             address this stand's unit last self-assigned; pass a new address, or
             CPX400DP_MDNS_HOST, when it has moved.
 
-        tc_daq_port: the serial port the thermocouple DAQ is on. Named by the
-            OS rather than by the device - `COM<n>` on Windows,
-            `/dev/cu.usbserial-<n>` on macOS - and it changes with enumeration
-            order, so this stand's own value belongs here rather than in the
-            driver. `python -m hardware.tc_daq.main --list-ports` prints the
-            candidates.
+        tc_daq_port: the serial port the thermocouple DAQ is on. Left None, the
+            driver finds it by its CP210x bridge's USB vendor, which works
+            unchanged on every OS - a port is named `COM<n>` on Windows and
+            `/dev/cu.usbserial-<n>` on macOS, and the number moves with
+            enumeration order on both. Pass one only when this machine has
+            another CP210x device, which is the case the driver refuses to guess
+            in.
 
         output_dir/test_id: given both, each driver writes its detailed log to
             `<output_dir>/runs/<test_id>/<device>/logs.txt`, beside the telemetry
@@ -231,7 +256,7 @@ class YdriveTestbed:
         # started, its stream is verified, and that is the whole interface.
         tc_daq_args = [
             sys.executable, "-m", "hardware.tc_daq.main",
-            "--port", self._tc_daq_port,
+            *(["--port", self._tc_daq_port] if self._tc_daq_port else []),
             *self._log_args(DEVICE_TC_DAQ),
         ]
 
@@ -314,7 +339,7 @@ class YdriveTestbed:
         matters: the driver's ceiling is per-backend, so it cannot stop 48 V
         being commanded onto the 24 V brake rail, and a test holds the same
         supply client this testbed does."""
-        channels = self.get_supply_channels()
+        channels = self._supply_channels()
         wrong = []
         for rail in RAILS:
             for quantity, expected, channel in (
@@ -380,7 +405,7 @@ class YdriveTestbed:
         can still predate the switch-off by a frame, and reporting a stand as
         energized when it isn't is the one thing this must not do."""
         self.supply_telemetry.discard_backlog()
-        channels = self.get_supply_channels()
+        channels = self._supply_channels()
         still_on = [rail.name for rail in RAILS if channels.get(f"output_enabled_{rail.output}")]
         if still_on:
             logger.error(
@@ -427,8 +452,12 @@ class YdriveTestbed:
         self.supply.enable_output(BRAKE_BUS.output, enabled)
         logger.info("%s %s", BRAKE_BUS.name, "released (rail energized)" if enabled else "engaged (rail de-energized)")
 
-    def get_supply_channels(self) -> Dict[str, object]:
+    def _supply_channels(self) -> Dict[str, object]:
         """Block for the next supply telemetry frame and return its channels.
+
+        Private: a caller outside this class asks a named question - check_rails(),
+        rail_is_powered() - rather than reaching into a channels dict, so the
+        channel names this stand depends on live in one place.
 
         The measured voltage and current are re-read at 5 Hz and held between
         reads, since the instrument's meters refresh at 4 Hz, so consecutive
@@ -476,17 +505,40 @@ class YdriveTestbed:
             raise RuntimeError("YdriveTestbed.sync_telemetry accessed before start()")
         return self._sync_telemetry
 
-    def get_channels(self) -> Dict[str, object]:
+    def _channels(self) -> Dict[str, object]:
         """The newest ODrive frame's full channels dict, blocking if none has
         arrived yet.
 
-        Use this whenever more than one channel is needed from the same instant -
-        reading two named accessors gives two values from two different frames,
-        and costs two frame periods."""
+        Private, and the only place a raw frame is handled: everything outside
+        this class asks a named question instead, so a channel name appears here
+        rather than spread through the steps that happen to need it. Whatever
+        needs more than one channel from a single instant gets an accessor that
+        returns them together - see Motion."""
         return self.sync_telemetry.latest_frame().channels
 
+    def get_motion(self) -> Motion:
+        """Position and velocity, from one frame."""
+        channels = self._channels()
+        return Motion(position=channels["pos_estimate"], velocity=channels["vel_estimate"])
+
+    def get_faults(self) -> Dict[str, str]:
+        """Every watched ODrive channel currently reading as a fault, decoded -
+        empty when the board is clean. One frame, so it describes one instant."""
+        return odrive_errors.faults_in_frame(self._channels())
+
+    def describe_errors(self) -> Dict[str, str]:
+        """Every watched channel decoded, faulted or not - the diagnostic for
+        "why did the axis refuse", where a channel reading NOMINAL is as much of
+        the answer as one reading a fault. One frame."""
+        channels = self._channels()
+        return {
+            name: odrive_errors.describe(name, channels[name])
+            for name in odrive_errors.WATCHED_CHANNELS
+            if name in channels
+        }
+
     def get_pos_estimate(self) -> float:
-        return self.get_channels()["pos_estimate"]
+        return self._channels()["pos_estimate"]
 
     def get_axis_armed_status(self) -> bool:
         """Whether the axis is actively controlling the motor (`axis_is_armed`).
@@ -494,10 +546,10 @@ class YdriveTestbed:
         Requesting an axis state only writes `requested_state`; the ODrive acts on
         it asynchronously and can decline. This is the reading that says whether
         it took."""
-        return bool(self.get_channels()["axis_is_armed"])
+        return bool(self._channels()["axis_is_armed"])
 
     def get_vel_estimate(self) -> float:
-        return self.get_channels()["vel_estimate"]
+        return self._channels()["vel_estimate"]
 
     def __enter__(self) -> "YdriveTestbed":
         self.start()

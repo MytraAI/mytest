@@ -4,12 +4,12 @@
     python -m hardware.tc_daq.main --port /dev/cu.usbserial-21210
     python -m hardware.tc_daq.main --port COM4
 
---port has a default, but a USB serial port's name is assigned by the OS and
-changes with enumeration order and platform, so a testbed passes its stand's
-own. --list-ports prints what this machine currently has, with the USB
-description and serial number of each, since the device announces itself only as
-the USB-UART bridge it sits behind and there is no way to ask a port what is on
-the other end of it.
+--port is optional: omitted, the driver finds the device by its CP210x bridge's
+USB vendor, which works unchanged on every OS - a port is named COM<n> on
+Windows, /dev/cu.usbserial-<n> on macOS and /dev/ttyUSB<n> on Linux, and the
+number moves with enumeration order on all three. Pass it explicitly when this
+machine has more than one CP210x device, which is the case the driver refuses to
+guess in. --list-ports prints what this machine has.
 
 There is no --mock. The device streams a documented eight-field line and nothing
 else, so a fake serial transport in the tests covers the whole surface (see
@@ -32,7 +32,7 @@ from protocol.wire import (
 from ..driver_logging import add_logging_args, configure as configure_logging
 from ..runner import run
 from .tc_daq_backend import TcDaqBackend
-from .transport import DEFAULT_BAUD, DEFAULT_PORT
+from .transport import DEFAULT_BAUD
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,11 @@ def list_ports() -> int:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", default=DEFAULT_PORT, help="serial port the device is on")
+    parser.add_argument(
+        "--port",
+        default=None,
+        help="serial port the device is on; found by its CP210x bridge when omitted",
+    )
     parser.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     parser.add_argument(
         "--list-ports", action="store_true", help="print this machine's serial ports and exit"
@@ -68,7 +72,7 @@ if __name__ == "__main__":
 
     configure_logging(args.log_file, device=DEVICE_TC_DAQ)
     backend = TcDaqBackend(port=args.port, baud=args.baud)
-    logger.info("REAL HARDWARE - TC DAQ at %s@%s", args.port, args.baud)
+    logger.info("REAL HARDWARE - TC DAQ at %s@%s", args.port or "(auto-detected)", args.baud)
     asyncio_compat.run(
         run(backend, DEFAULT_TC_DAQ_COMMAND_ENDPOINT, DEFAULT_TC_DAQ_TELEMETRY_ENDPOINT)
     )

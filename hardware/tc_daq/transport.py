@@ -30,11 +30,44 @@ from ..backend import HardwareError
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PORT = "/dev/cu.usbserial-21210"
-"""Where the device was found on the machine this driver was written on. Not
-stable: a USB serial port's name depends on the OS and the enumeration order
-(`COM<n>` on Windows, `/dev/ttyUSB<n>` on Linux), so a testbed passes its own
-`--port`. `python -m hardware.tc_daq.main --list-ports` prints the candidates."""
+CP210X_VENDOR_ID = 0x10C4
+"""Silicon Labs, whose CP2102N bridge this device sits behind.
+
+The only identity it has. The DAQ itself announces nothing - no USB descriptor of
+its own, no serial number, nothing in the stream - so the bridge's vendor is what
+finds it. Matching the vendor rather than a port name is what makes this work
+unchanged on every OS: a port is called `COM<n>` on Windows,
+`/dev/cu.usbserial-<n>` on macOS and `/dev/ttyUSB<n>` on Linux, and the number
+moves with enumeration order on all three."""
+
+
+def find_port() -> str:
+    """The serial port the DAQ is on, found by its bridge's USB vendor.
+
+    Raises rather than guessing when there is no single answer: none found means
+    it is unplugged, and several means something else on this machine uses the
+    same bridge chip, in which case which one is the DAQ is not knowable from
+    here and the caller has to say. The error lists what was actually seen, since
+    that is the list an operator would otherwise go and fetch."""
+    try:
+        from serial.tools import list_ports
+    except ImportError as exc:  # pragma: no cover - the dependency is declared
+        raise HardwareError("pyserial is not installed") from exc
+    ports = list(list_ports.comports())
+    matches = [port for port in ports if port.vid == CP210X_VENDOR_ID]
+    if len(matches) == 1:
+        logger.info("found the TC DAQ on %s (%s)", matches[0].device, matches[0].description)
+        return matches[0].device
+    seen = ", ".join(f"{port.device} ({port.description})" for port in ports) or "no serial ports"
+    if not matches:
+        raise HardwareError(
+            f"no CP210x bridge found, so the TC DAQ is not attached to this machine - saw: {seen}. "
+            "Pass --port explicitly if it is behind a different bridge"
+        )
+    raise HardwareError(
+        f"several CP210x bridges found, so which one is the TC DAQ is not knowable from here: "
+        f"{', '.join(port.device for port in matches)}. Pass --port to choose"
+    )
 
 DEFAULT_BAUD = 115200
 """Confirmed against the device. Worth stating because a wrong baud rate here
@@ -62,12 +95,12 @@ class SerialLineTransport:
 
     def __init__(
         self,
-        port: str = DEFAULT_PORT,
+        port: Optional[str] = None,
         baud: int = DEFAULT_BAUD,
         read_timeout_s: float = READ_TIMEOUT_S,
         silence_timeout_s: float = SILENCE_TIMEOUT_S,
     ) -> None:
-        self._port = port
+        self._port = port  # None until open() resolves it - see find_port()
         self._baud = baud
         self._read_timeout_s = read_timeout_s
         self._silence_timeout_s = silence_timeout_s
@@ -75,7 +108,7 @@ class SerialLineTransport:
 
     @property
     def address(self) -> str:
-        return f"{self._port}@{self._baud}"
+        return f"{self._port or '(auto)'}@{self._baud}"
 
     @property
     def is_open(self) -> bool:
@@ -91,6 +124,8 @@ class SerialLineTransport:
             import serial
         except ImportError as exc:  # pragma: no cover - the dependency is declared
             raise HardwareError("pyserial is not installed") from exc
+        if self._port is None:
+            self._port = find_port()
         try:
             self._serial = serial.Serial(self._port, self._baud, timeout=self._read_timeout_s)
         except Exception as exc:
