@@ -129,8 +129,15 @@ class LiveRulebookRunner:
         for rulebook in rulebooks:
             self._evaluator.register(rulebook)
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._threads: List[threading.Thread] = []
         self._summary_lock = threading.Lock()
+        self._evaluate_lock = threading.Lock()
+        """Serializes the evaluator itself, which holds each bound's transition
+        and debounce state. One thread per telemetry stream means two frames can
+        arrive at once, and that state is not concurrent - a lost transition
+        would be a violation missing from the verdict's timeline. Separate from
+        _summary_lock, which evaluate() takes *inside* this one; a single
+        non-reentrant lock for both would deadlock."""
         self._violations: List[Violation] = []
         """Every bound transition this run, in order - the timeline that
         lands in the verdict verbatim. Appended in evaluate() on the
@@ -155,20 +162,39 @@ class LiveRulebookRunner:
         closed-loop wait) checks this each tick and re-raises it to stop
         what it's doing - see TestCase.check_fatal_violation()."""
 
-    def start(self, telemetry_client: TelemetryClient) -> None:
-        """Start a background thread evaluating telemetry_client's
-        frames against this runner's Rulebook(s), until stop() or a
-        fatal bound violates."""
-        self._thread = threading.Thread(
-            target=self._run, args=(telemetry_client,), name="live-rulebook-runner", daemon=True
-        )
-        self._thread.start()
+    def start(self, *telemetry_clients: TelemetryClient) -> None:
+        """Start a background thread per telemetry stream, each evaluating this
+        runner's Rulebook(s) until stop() or a fatal bound violates.
+
+        Several streams because a Rulebook covers a stand, not a device: the
+        ydrive rulebook bounds the ODrive's DC bus and the thermocouple DAQ's
+        temperatures, and no one device publishes both. A bound whose channel is
+        absent from a frame returns no result, so each stream evaluates exactly
+        the bounds it can see and ignores the rest - which is what makes one
+        rulebook over several streams work without any bound-to-device mapping.
+
+        The hazard this closes: a bound on a channel that reaches *no* stream
+        being watched would return no result forever, reporting a clean pass
+        while supervising nothing."""
+        if not telemetry_clients:
+            raise ValueError("a runner needs at least one telemetry stream to evaluate")
+        self._threads = [
+            threading.Thread(
+                target=self._run,
+                args=(client,),
+                name=f"live-rulebook-runner-{index}",
+                daemon=True,
+            )
+            for index, client in enumerate(telemetry_clients)
+        ]
+        for thread in self._threads:
+            thread.start()
 
     def stop(self) -> None:
-        """Signal the background thread to stop and wait for it to exit."""
+        """Signal every background thread to stop and wait for them to exit."""
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
+        for thread in self._threads:
+            thread.join(timeout=5)
 
     def _run(self, telemetry_client: TelemetryClient) -> None:
         # Evaluation starts from the present. The subscriber is created when the
@@ -202,7 +228,11 @@ class LiveRulebookRunner:
                     self.evaluate(channels, seq=frame.seq, frame_t=frame.t)
                 except FatalBoundViolation as exc:
                     logger.error("test %s: fatal breach - stopping evaluation", self._test_id)
-                    self.fatal_violation = exc
+                    # First breach wins: with a thread per stream, two can fail
+                    # in the same instant, and the one a test reports should be
+                    # the one that happened first.
+                    if self.fatal_violation is None:
+                        self.fatal_violation = exc
                     return
                 except UnevaluableBoundError as exc:
                     with self._summary_lock:
@@ -243,7 +273,8 @@ class LiveRulebookRunner:
         (tests) that only care about the pass/fail logic. Note debounce
         still uses wall-clock time here, not frame_t: see this module's
         docstring."""
-        transitions = self._evaluator.evaluate(channels, time.time())
+        with self._evaluate_lock:
+            transitions = self._evaluator.evaluate(channels, time.time())
         fatal_transition = None
 
         with self._summary_lock:
