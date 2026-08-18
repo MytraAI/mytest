@@ -391,12 +391,17 @@ def brake_from_speed(
     `brake_speed_m_s` and `stopping_distance_m` in metres, since that is what a
     limit is written in and what an operator reads.
 
-    Distance is measured from the brake command to where the load sits `rest_s`
-    after coming to rest - both ends chosen so the number cannot flatter the brake.
-    Starting at the command includes the coast through BRAKE_SETTLE_S, which
-    starting from first deceleration would hide; ending after the rest includes any
-    creep while the brake holds, which stopping the clock at first standstill would
-    hide.
+    STOPPING DISTANCE IS EVERYTHING AFTER THE BRAKE IS COMMANDED: the coast before
+    it bites, the deceleration itself, and any creep in the `rest_s` after the load
+    comes to rest. One number, three phases, and both ends are picked so it cannot
+    flatter the brake - starting at first deceleration would hide the coast through
+    BRAKE_SETTLE_S, and stopping at first standstill would hide the creep.
+
+    The start is the frame the trigger was seen in, which is the command rather
+    than the moment the brake physically engages - the two differ by up to
+    BRAKE_SETTLE_S, about 0.18 m at 1.75 m/s. Nothing on this stand can observe
+    actual engagement, and charging the command latency to the brake is the
+    conservative side of that ignorance.
 
     Publishing `stopping_distance_m` is what aborts the run on a bad stop:
     ydrive_rulebook bounds it fatally at 2 m, the runner merges published state
