@@ -145,17 +145,19 @@ def test_the_speed_and_distance_of_each_event_are_recorded_in_metres():
     assert case.state["stopping_distance_m"] == pytest.approx(10.0 * METERS_PER_TURN, abs=0.01)
 
 
-def test_a_load_that_never_reaches_the_trigger_speed_is_an_error():
-    """Rather than a run that waits forever at a velocity clamp - which is what a
-    test that forgot to raise the limit would do."""
-    with pytest.raises(TimeoutError, match="never reached"):
-        testbed = FakeBrakeTestbed(reaches=TRIGGER_TURNS_S / 4)
-        brake_from_speed(
-            FakeTestCase(testbed),
-            target=110.0,
-            trigger_speed=TRIGGER_TURNS_S,
-            trigger_timeout_s=0.05,
-        )
+def test_a_load_that_never_reaches_the_trigger_speed_fails_on_arrival_not_a_clock():
+    """Observed on the loaded stand: it drove the whole 8.75 m stroke, peaked 2%
+    under the trigger, then decelerated into the target - and the old time bound
+    reported the speed at the moment the timer expired rather than the peak, which
+    is the number that says whether the requested speed is achievable at all."""
+    testbed = FakeBrakeTestbed(reaches=TRIGGER_TURNS_S / 4)
+    with pytest.raises(RuntimeError) as excinfo:
+        brake_from_speed(FakeTestCase(testbed), target=110.0, trigger_speed=TRIGGER_TURNS_S)
+
+    message = str(excinfo.value)
+    assert "arrived at 110.0 turns" in message
+    assert "peaked at 5.36 turns/s" in message, f"the peak is what matters: {message}"
+    assert "brake:engage" not in testbed.calls, "no brake event on a run-up that failed"
 
 
 def test_a_load_that_never_stops_is_an_error():

@@ -106,14 +106,6 @@ CLEAR_SETTLE_S = 0.25
 """Seconds between clearing and reading the result, so the frame that is checked
 was produced after the clear rather than before it."""
 
-DEFAULT_TRIGGER_TIMEOUT_S = 15.0
-"""How long brake_from_speed() waits for the load to reach its trigger speed.
-
-Generous: the axis has to accelerate from rest under a filter bandwidth of 10/s.
-What it catches is an axis that cannot reach the speed at all - a velocity limit
-left at the normal tuning, a load heavier than the gains expect - rather than a
-slow one."""
-
 DEFAULT_STOP_TIMEOUT_S = 10.0
 """How long the load may take to come to rest after the brake is commanded. A
 brake that never stops it is a failure, not something to keep waiting on."""
@@ -123,13 +115,16 @@ OPERATOR_POLL_INTERVAL_S = 0.1
 tick, because a person is the thing being waited on - but every tick still runs
 the same abort checks."""
 
-OVER_ENERGY_VELOCITY_LIMIT = 22.0  # turns/s = 1.85 m/s at the stand's 0.084 m/turn
+OVER_ENERGY_VELOCITY_LIMIT = 24.0  # turns/s = 2.02 m/s at the stand's 0.084 m/turn
 """Velocity limit for a test that has to reach a speed the normal tuning will not
 allow.
 
 MAX_LOAD_VELOCITY_LIMIT below caps the load at 1.54 m/s, so a brake test
-triggering at 1.8 m/s (21.43 turns/s) would wait forever at the clamp. This sits
-just above that trigger.
+triggering at 1.8 m/s (21.43 turns/s) would sit at the clamp forever. This is 12%
+above that trigger, and the margin is the point rather than slack: a loaded axis
+approaches its ceiling asymptotically, so a limit set just above a trigger is a
+trigger that never fires. Measured on this stand, a 22 turns/s ceiling produced a
+peak of 20.96 turns/s - 2% short of a 21.43 trigger, over the whole 8.75 m stroke.
 
 It raises the ceiling only - the gains below were tuned against a 130-turn step
 at 18.3 turns/s and are unchanged, so the axis is being run faster than it was
@@ -144,24 +139,28 @@ MAX_LOAD_VELOCITY_INTEGRATOR = 0.2
 MAX_LOAD_SPINOUT_MECHANICAL_THRESHOLD = -100.0  # W
 MAX_LOAD_SPINOUT_ELECTRICAL_THRESHOLD = 100.0  # W
 
-MOTOR_CURRENT_SOFT_MAX = 16.0  # A
+MOTOR_CURRENT_SOFT_MAX = 18.0  # A
 """What the controller is allowed to command. Torque is clamped here, so this is
-the number that decides how hard the axis can push."""
+the number that decides how hard the axis can push.
 
-MOTOR_CURRENT_HARD_MAX = 25.0  # A
+The loaded ydrive stand sits at this limit for roughly 72% of its stroke -
+accelerating as hard as it is allowed for the first 4 m, then coasting up toward
+its velocity ceiling on less. So this is the number that sets how quickly the load
+reaches speed, and the one that decides whether it reaches a trigger at all."""
+
+MOTOR_CURRENT_HARD_MAX = 27.0  # A
 """What the measured phase current may reach before the board latches
 CURRENT_LIMIT_VIOLATION and disarms.
 
-Above the soft limit, so ordinary clamping does not trip it: the gap is headroom
-for the overshoot a step command produces. 25 A over a 16 A soft limit is 56% of
-headroom, and it is 25 rather than 20 because 20 was reached and disarmed the axis
-mid-move: the loaded stand draws 15-17 A continuously while accelerating, so a
-ceiling only 25% above that sits inside a step response's overshoot rather than
-above it.
+Half again above the soft limit, and the size of that gap matters: an axis that
+sits at its soft limit for most of a stroke - which this one does - meets the
+ceiling on the ordinary overshoot of a step response unless the ceiling is well
+clear of it. A gap of a few amps is inside the ripple, and the board latches
+CURRENT_LIMIT_VIOLATION and disarms mid-move.
 
 Well inside what the board itself allows - it reports its own inverter limits as
 100 A soft and 150 A hard - so this is the motor's protection, not the board's.
-Set explicitly rather than inherited, because this stand was found with a
+Set explicitly rather than inherited, because a stand can be found with a
 CURRENT_LIMIT_VIOLATION already latched from a previous session.
 
 Motor current, not bus current, and both limits are reachable: the inverter acts
@@ -358,9 +357,9 @@ def brake_from_speed(
     test_case: BaseYdriveTest,
     target: float,
     trigger_speed: float,
-    trigger_timeout_s: float = DEFAULT_TRIGGER_TIMEOUT_S,
     stop_timeout_s: float = DEFAULT_STOP_TIMEOUT_S,
     velocity_tolerance: float = DEFAULT_VELOCITY_TOLERANCE,
+    position_tolerance: float = DEFAULT_POSITION_TOLERANCE,
 ) -> None:
     """Accelerate toward `target` and let the brake stop the load once it reaches
     `trigger_speed` turns/s.
@@ -384,30 +383,46 @@ def brake_from_speed(
     ydrive_rulebook bounds it fatally at 2 m, the runner merges published state
     into what it evaluates, and this step's own exit check raises once that lands.
 
-    Raises if the load never reaches the trigger speed (the velocity limit is
-    below it, or the axis cannot get there) and if it never comes to rest - a
-    brake that does not stop the load is a failure, not something to wait on."""
+    THE RUN-UP IS BOUNDED BY THE STROKE, NOT BY A CLOCK. It ends when the trigger
+    speed is reached or when the axis arrives at `target` - whichever happens
+    first. A time limit answered a different question: a loaded axis drove the
+    whole 8.75 m stroke, peaked 2% under the trigger, decelerated into the target
+    and then sat there, and the failure reported the speed at the moment the timer
+    expired rather than the speed it had actually achieved. Arriving without ever
+    reaching the trigger is the real finding, and it is a fact about the stroke.
+
+    Raises then, reporting the *peak* speed rather than the last sample, since the
+    peak is what says whether the requested speed is achievable at all. Also raises
+    if the load never comes to rest after the brake closes - a brake that does not
+    stop the load is a failure, not something to wait on."""
     testbed: YdriveTestbed = test_case.testbed
 
     testbed.command.set_position(target)
     test_case.set_state("position_target", target)
 
-    trigger_deadline: Stopwatch = Stopwatch(duration_s=trigger_timeout_s)
+    started_at = testbed.get_motion().position
+    peak_speed = 0.0
     while True:
         test_case.check_should_continue()
-        # One frame for both, so the speed recorded and the position it was
+        # One frame for all of it, so the speed recorded and the position it was
         # reached at describe the same instant.
         motion = testbed.get_motion()
-        _require_still_driving(test_case, motion, f"accelerating to {trigger_speed} turns/s")
+        _require_still_driving(test_case, motion, f"accelerating to {trigger_speed:.2f} turns/s")
         speed, position = abs(motion.velocity), motion.position
+        peak_speed = max(peak_speed, speed)
         if speed >= trigger_speed:
             break
-        if trigger_deadline.expired:
-            raise TimeoutError(
-                f"test {test_case.test_id}: the load never reached {trigger_speed} turns/s "
-                f"within {trigger_timeout_s}s - reached {speed:.2f} turns/s. Check the "
-                "controller's velocity limit, which clamps below the trigger unless a test "
-                "raises it (see OVER_ENERGY_VELOCITY_LIMIT)"
+        if abs(position - target) <= position_tolerance:
+            travelled = abs(position - started_at)
+            raise RuntimeError(
+                f"test {test_case.test_id}: the load arrived at {target:.1f} turns without ever "
+                f"reaching {trigger_speed:.2f} turns/s "
+                f"({trigger_speed * METERS_PER_TURN:.2f} m/s) - it peaked at "
+                f"{peak_speed:.2f} turns/s ({peak_speed * METERS_PER_TURN:.2f} m/s) over "
+                f"{travelled:.1f} turns ({travelled * METERS_PER_TURN:.2f} m). The load will not "
+                "give that speed with this tuning: lower the trigger below the peak, or raise "
+                "the velocity limit above it (see OVER_ENERGY_VELOCITY_LIMIT) and the current "
+                "limits that feed it"
             )
 
     # Idle first, then let the brake close on a coasting axis.
