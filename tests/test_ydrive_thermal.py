@@ -21,6 +21,7 @@ from testcases.asimov.live_rulebook_runner import LiveRulebookRunner
 from testcases.asimov.rulebook import Bound, Rulebook, RulebookEvaluator, UnevaluableBoundError
 from testcases.ydrive.rulebooks.ydrive_rulebook import (
     BUS_CURRENT_PERSISTENCE_S,
+    TC_DROPOUT_GRACE_S,
     LIVE_TC_CHANNELS,
     MAX_BUS_CURRENT_A,
     MAX_TEMPERATURE_C,
@@ -119,6 +120,19 @@ def test_a_momentary_open_channel_does_not_stop_the_run():
 
     assert evaluator.evaluate(absent, 100.0) == []
     assert evaluator.evaluate({**PUBLISHED_STATE, "temperature_4_c": 24.0}, 100.2) == []
+
+
+def test_the_thermocouples_get_a_wider_dropout_window_than_the_framework_default():
+    """This DAQ drops the odd sample; the bus channels do not, and a window is time
+    spent without supervision - so it is widened where it is needed rather than
+    everywhere."""
+    from testcases.asimov.rulebook import DEFAULT_UNEVALUABLE_GRACE_S
+
+    assert TC_DROPOUT_GRACE_S == 10.0 > DEFAULT_UNEVALUABLE_GRACE_S
+    for bound in TEMPERATURE_BOUNDS:
+        assert bound.unevaluable_grace_s == TC_DROPOUT_GRACE_S
+    others = [b for b in YDRIVE_RULEBOOK.bounds if b not in TEMPERATURE_BOUNDS]
+    assert all(b.unevaluable_grace_s == DEFAULT_UNEVALUABLE_GRACE_S for b in others)
 
 
 def test_a_channel_that_stays_open_stops_the_run():

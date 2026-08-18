@@ -80,7 +80,7 @@ class UnevaluableBoundError(Exception):
         self.value = value
 
 
-DEFAULT_UNEVALUABLE_GRACE_S = 2.0
+DEFAULT_UNEVALUABLE_GRACE_S = 1.0
 """How long a bound may be unevaluable before it stops the run.
 
 A channel that reports no value cannot be checked, and a bound that cannot be
@@ -88,7 +88,13 @@ checked is not a bound that passed - so it stops the run. But "no value" arrives
 one sample at a time: a thermocouple dropped one frame in 6852 of a twelve-minute
 run and ended it, having supervised the whole run perfectly either side. This is
 the window that separates a dropout from a loss, in the data's own time rather
-than in samples, since sample rates differ per device."""
+than in samples, since sample rates differ per device.
+
+Short by default, because a bound is supervision and this window is time spent
+without it: a second covers the dropout of any device here (the slowest samples at
+9 Hz) while leaving a genuinely absent channel caught almost as fast as before. A
+sensor known to drop for longer says so on its own bounds rather than by raising
+this for everything - see ydrive_rulebook's thermal bounds."""
 
 
 @dataclass(frozen=True)

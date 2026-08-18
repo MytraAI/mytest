@@ -57,10 +57,12 @@ main_execution actually does:
   channel never trips it - which is the point, and also why a channel
   that spikes constantly hides a real rise until it stops spiking.
 
-  THE DEBOUNCE DOES NOT COVER AN OPEN CHANNEL. A faulted channel is
-  unevaluable, not violated, and that stops the run on the first frame -
-  no 5s of grace. Losing the sensor is a different failure from being
-  too hot, and it is not one that waiting improves.
+  THE DEBOUNCE DOES NOT COVER AN OPEN CHANNEL, and a separate window
+  does. A faulted channel is unevaluable rather than violated, which
+  stops a run - so these bounds carry TC_DROPOUT_GRACE_S, ten seconds,
+  because this DAQ drops the odd sample and one dropped sample is not a
+  lost sensor. Past that window it still stops the run: a thermocouple
+  that has come out reads FAULT forever.
 
 - stopping_distance_bound: stopping_distance_m > 2.0, fatal, no
   persistence. Not a hardware channel: BrakeEnduranceTest publishes each
@@ -108,6 +110,19 @@ it."""
 
 MAX_TEMPERATURE_C = 80.0
 """Fatal ceiling for every wired thermocouple."""
+
+TC_DROPOUT_GRACE_S = 10.0
+"""How long a thermocouple may report no reading before the run stops.
+
+Ten times the framework default, because this DAQ drops samples: it reports FAULT
+for a channel it cannot read that instant, and a wired thermocouple on this stand
+has been seen doing that for a single frame in a twelve-minute run. A window this
+wide costs ten seconds of thermal supervision in the worst case, which is
+affordable on a quantity that moves as slowly as temperature - the bound it guards
+already waits five seconds before believing a rise.
+
+What it still catches, and must: a thermocouple pulled out or broken, which reads
+FAULT forever rather than for a frame."""
 
 TC_PERSISTENCE_S = 5.0
 """How long a channel must stay above MAX_TEMPERATURE_C before the run stops -
@@ -159,6 +174,7 @@ YDRIVE_RULEBOOK = Rulebook(
                 name=f"overtemperature_bound_{n}",
                 fatal=True,
                 persistence_s=TC_PERSISTENCE_S,
+                unevaluable_grace_s=TC_DROPOUT_GRACE_S,
             )
             for n in LIVE_TC_CHANNELS
         ],
