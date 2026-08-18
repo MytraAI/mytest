@@ -198,7 +198,11 @@ def test_runner_makes_an_unevaluable_bound_fatal_instead_of_dying():
                 time.sleep(0.01)
 
     rulebook = Rulebook(
-        name="rb", test_names=["t"], bounds=[Bound(name="uv", channel="vbus", lower=10.5, fatal=True)]
+        name="rb",
+        test_names=["t"],
+        # No grace: this test is about what the runner does with an unevaluable
+        # bound, not about how long one is tolerated first.
+        bounds=[Bound(name="uv", channel="vbus", lower=10.5, fatal=True, unevaluable_grace_s=0.0)],
     )
     runner = LiveRulebookRunner(test_id="x", rulebooks=[rulebook], publisher=Publisher())
 
@@ -216,3 +220,42 @@ def test_runner_makes_an_unevaluable_bound_fatal_instead_of_dying():
 
     assert escaped == [], f"exception escaped the runner thread: {escaped}"
     assert isinstance(runner.fatal_violation, UnevaluableBoundError)
+
+
+# --- a channel that drops a sample vs one that is gone ------------------------
+
+
+def test_other_bounds_are_still_judged_while_one_channel_is_absent():
+    """A flaky channel must not blind the rest of the frame: only the bound that
+    cannot be evaluated is skipped, and only for as long as it is tolerated."""
+    from testcases.asimov.rulebook import Bound, Rulebook, RulebookEvaluator
+
+    evaluator = RulebookEvaluator()
+    evaluator.register(Rulebook(name="rb", test_names=["t"], bounds=[
+        Bound(name="flaky", channel="temperature", upper=80.0),
+        Bound(name="solid", channel="vbus", lower=10.5, fatal=True),
+    ]))
+
+    transitions = evaluator.evaluate({"temperature": None, "vbus": 3.0}, 100.0)
+
+    assert [x.bound_label for x in transitions] == ["solid"], (
+        "the absent channel stopped the frame's other bound being judged"
+    )
+
+
+def test_a_recovered_channel_starts_its_grace_again():
+    """Otherwise a channel that drops one sample a minute would eventually exhaust
+    a window it never actually stayed absent for."""
+    from testcases.asimov.rulebook import Bound, Rulebook, RulebookEvaluator, UnevaluableBoundError
+
+    bound = Bound(name="flaky", channel="temperature", upper=80.0, unevaluable_grace_s=1.0)
+    evaluator = RulebookEvaluator()
+    evaluator.register(Rulebook(name="rb", test_names=["t"], bounds=[bound]))
+
+    for minute in range(3):
+        evaluator.evaluate({"temperature": None}, 100.0 + minute * 60)      # a dropped sample
+        evaluator.evaluate({"temperature": 24.0}, 100.1 + minute * 60)      # and back
+
+    evaluator.evaluate({"temperature": None}, 400.0)
+    with pytest.raises(UnevaluableBoundError):
+        evaluator.evaluate({"temperature": None}, 401.5)

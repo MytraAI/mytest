@@ -50,8 +50,13 @@ Bound.evaluate() itself stays a pure, stateless, instantaneous check.
 """
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+
+
+logger = logging.getLogger(__name__)
 
 
 class UnevaluableBoundError(Exception):
@@ -75,6 +80,17 @@ class UnevaluableBoundError(Exception):
         self.value = value
 
 
+DEFAULT_UNEVALUABLE_GRACE_S = 2.0
+"""How long a bound may be unevaluable before it stops the run.
+
+A channel that reports no value cannot be checked, and a bound that cannot be
+checked is not a bound that passed - so it stops the run. But "no value" arrives
+one sample at a time: a thermocouple dropped one frame in 6852 of a twelve-minute
+run and ended it, having supervised the whole run perfectly either side. This is
+the window that separates a dropout from a loss, in the data's own time rather
+than in samples, since sample rates differ per device."""
+
+
 @dataclass(frozen=True)
 class Bound:
     """One channel check: violated if `channel`'s value is above `upper`, below `lower`, or not `expected`.
@@ -93,6 +109,13 @@ class Bound:
     fatal: bool = False
     event_name: Optional[str] = None
     persistence_s: Optional[float] = None
+
+    unevaluable_grace_s: float = DEFAULT_UNEVALUABLE_GRACE_S
+    """How long this bound may report no value before that stops the run.
+
+    Separate from persistence_s, which debounces a *violation*: this debounces
+    the absence of anything to judge. A sensor that drops a sample is not a
+    sensor that is gone."""
 
     @property
     def label(self) -> str:
@@ -217,6 +240,9 @@ class RulebookEvaluator:
         self._rulebooks: List[Rulebook] = []
         self._prior_violated: Dict[Tuple[str, str], bool] = {}
         self._pending_since: Dict[Tuple[str, str], float] = {}
+        self._unevaluable_since: Dict[Tuple[str, str], float] = {}
+        """When each bound last started being unevaluable, so a momentary absence
+        is tolerated and a sustained one is not - see Bound.unevaluable_grace_s."""
 
     def register(self, rulebook: Rulebook) -> None:
         self._rulebooks.append(rulebook)
@@ -230,8 +256,28 @@ class RulebookEvaluator:
         transitions = []
         for rulebook in self._rulebooks:
             for bound in rulebook.bounds:
-                raw = bound.evaluate(channels)
                 key = (rulebook.name, bound.label)
+                try:
+                    raw = bound.evaluate(channels)
+                except UnevaluableBoundError:
+                    # Tolerated briefly, fatal if it lasts. A thermocouple that
+                    # drops one sample in a twelve-minute run is not a lost sensor,
+                    # and treating it as one ends the run; a channel that stays
+                    # absent is a lost sensor, and carrying on would be
+                    # supervising nothing. Only this bound is skipped - the rest
+                    # of the frame is still evaluated, so one flaky channel does
+                    # not blind the others.
+                    started = self._unevaluable_since.setdefault(key, t)
+                    if t - started <= bound.unevaluable_grace_s:
+                        if started == t:
+                            logger.warning(
+                                "bound %s cannot be evaluated (%s) - tolerating for up to %.1fs",
+                                bound.label, bound.channel, bound.unevaluable_grace_s,
+                            )
+                        continue
+                    raise
+                if self._unevaluable_since.pop(key, None) is not None:
+                    logger.info("bound %s is evaluable again (%s)", bound.label, bound.channel)
 
                 if raw is None:
                     self._pending_since.pop(key, None)

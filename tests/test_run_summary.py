@@ -13,6 +13,8 @@ incidental behaviour:
 """
 from __future__ import annotations
 
+import time
+
 from protocol.verdict import BoundsResult
 from testcases.asimov.live_rulebook_runner import LiveRulebookRunner, RunSummary
 from testcases.asimov.rulebook import Bound, Rulebook
@@ -138,16 +140,22 @@ def test_unevaluable_bound_forces_not_evaluated_rather_than_pass():
     Regression test: found in review."""
     from testcases.asimov.rulebook import UnevaluableBoundError
 
-    runner = make_runner(Bound(name="uv", channel="vbus", lower=10.5))
+    runner = make_runner(Bound(name="uv", channel="vbus", lower=10.5, unevaluable_grace_s=0.01))
     runner.evaluate({"vbus": 48.0}, seq=0, frame_t=0.0)
     assert runner.summary().bounds_result == BoundsResult.PASS
 
+    # Twice, spanning the grace window: one absent sample is tolerated, a channel
+    # that stays absent is a lost sensor - see DEFAULT_UNEVALUABLE_GRACE_S.
+    runner.evaluate({"vbus": None}, seq=1, frame_t=1.0)
+    time.sleep(0.05)
     try:
-        runner.evaluate({"vbus": None}, seq=1, frame_t=1.0)
+        runner.evaluate({"vbus": None}, seq=2, frame_t=2.0)
     except UnevaluableBoundError as exc:
         runner._unevaluable = str(exc)  # what _run() does on the runner's thread
 
     summary = runner.summary()
-    assert summary.evaluated_frames == 1
+    # Two, not one: the frame whose absence was tolerated was still evaluated -
+    # every other bound in it was judged. Only the frame that raised is not.
+    assert summary.evaluated_frames == 2
     assert summary.unevaluable is not None
     assert summary.bounds_result == BoundsResult.NOT_EVALUATED

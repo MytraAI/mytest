@@ -110,15 +110,28 @@ def test_one_cool_sample_resets_the_debounce_rather_than_accumulating():
     assert transitions == [], "the clock accumulated across an interruption"
 
 
-def test_an_open_channel_is_not_debounced():
-    """A faulted channel is unevaluable rather than violated, and that stops the
-    run on the first frame - losing the sensor is a different failure from being
-    too hot, and not one waiting improves."""
+def test_a_momentary_open_channel_does_not_stop_the_run():
+    """Observed: one faulted frame out of 6852 ended a twelve-minute run. A
+    thermocouple that drops a sample is not a thermocouple that is gone."""
     evaluator = RulebookEvaluator()
     evaluator.register(YDRIVE_RULEBOOK)
+    absent = {**PUBLISHED_STATE, "temperature_4_c": None}
 
+    assert evaluator.evaluate(absent, 100.0) == []
+    assert evaluator.evaluate({**PUBLISHED_STATE, "temperature_4_c": 24.0}, 100.2) == []
+
+
+def test_a_channel_that_stays_open_stops_the_run():
+    """The other half: a bound that cannot be checked is not a bound that passed,
+    so a sensor that is actually gone still ends the run - just not on frame one."""
+    bound = TEMPERATURE_BOUNDS[0]
+    evaluator = RulebookEvaluator()
+    evaluator.register(YDRIVE_RULEBOOK)
+    absent = {**PUBLISHED_STATE, "temperature_4_c": None}
+
+    evaluator.evaluate(absent, 100.0)
     with pytest.raises(UnevaluableBoundError):
-        evaluator.evaluate({**PUBLISHED_STATE, "temperature_4_c": None}, 100.0)
+        evaluator.evaluate(absent, 100.0 + bound.unevaluable_grace_s + 0.1)
 
 
 def test_the_ceiling_fires_above_80_and_not_below():
