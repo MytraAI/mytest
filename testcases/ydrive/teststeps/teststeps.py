@@ -148,15 +148,21 @@ MOTOR_CURRENT_SOFT_MAX = 16.0  # A
 """What the controller is allowed to command. Torque is clamped here, so this is
 the number that decides how hard the axis can push."""
 
-MOTOR_CURRENT_HARD_MAX = 20.0  # A
+MOTOR_CURRENT_HARD_MAX = 25.0  # A
 """What the measured phase current may reach before the board latches
 CURRENT_LIMIT_VIOLATION and disarms.
 
 Above the soft limit, so ordinary clamping does not trip it: the gap is headroom
-for the overshoot a step command produces. This stand was found with a
-CURRENT_LIMIT_VIOLATION latched from a previous run, which is this ceiling being
-hit - so it is set explicitly rather than inherited from whatever the board was
-last configured with.
+for the overshoot a step command produces. 25 A over a 16 A soft limit is 56% of
+headroom, and it is 25 rather than 20 because 20 was reached and disarmed the axis
+mid-move: the loaded stand draws 15-17 A continuously while accelerating, so a
+ceiling only 25% above that sits inside a step response's overshoot rather than
+above it.
+
+Well inside what the board itself allows - it reports its own inverter limits as
+100 A soft and 150 A hard - so this is the motor's protection, not the board's.
+Set explicitly rather than inherited, because this stand was found with a
+CURRENT_LIMIT_VIOLATION already latched from a previous session.
 
 Motor current, not bus current, and both limits are reachable: the inverter acts
 as a transformer, drawing a small current at 48 V and putting a much larger one
@@ -197,6 +203,28 @@ def _clear_faults(test_case: BaseYdriveTest, timeout_s: float) -> None:
                 f"test {test_case.test_id}: the ODrive is not fit to operate after {timeout_s}s "
                 f"- {_explain_unclearable(remaining)}"
             )
+
+
+def _require_still_driving(test_case: BaseYdriveTest, motion, doing: str) -> None:
+    """Raise if the axis has stopped driving while it was supposed to be.
+
+    The ODrive disarms itself on a fault - a current limit violation, a spinout -
+    and nothing tells the test: the axis simply stops driving. A loop watching for
+    a position or a speed then keeps waiting, and the load coasts with the brake
+    released and the controller idle, held by neither, until a timeout measured in
+    tens of seconds fires. Observed: a return move whose axis disarmed on
+    CURRENT_LIMIT_VIOLATION coasted for 45 s before the move gave up.
+
+    So every loop that expects the axis to be driving checks it, and fails in one
+    frame with the reason the board gives - which teardown then follows by engaging
+    the brake."""
+    if motion.armed:
+        return
+    raise RuntimeError(
+        f"test {test_case.test_id}: the axis stopped driving while {doing} - it disarmed "
+        f"itself at {motion.position:.2f} turns doing {motion.velocity:.2f} turns/s. "
+        f"{test_case.testbed.describe_errors()}"
+    )
 
 
 def _explain_unclearable(remaining: dict) -> str:
@@ -370,6 +398,7 @@ def brake_from_speed(
         # One frame for both, so the speed recorded and the position it was
         # reached at describe the same instant.
         motion = testbed.get_motion()
+        _require_still_driving(test_case, motion, f"accelerating to {trigger_speed} turns/s")
         speed, position = abs(motion.velocity), motion.position
         if speed >= trigger_speed:
             break
@@ -463,9 +492,10 @@ def move_to(
     # telemetry stream rather than a hot spin.
     while True:
         test_case.check_should_continue()
-        # One frame for both, so "arrived AND settled" is judged at a single
+        # One frame for all of it, so "arrived AND settled" is judged at a single
         # moment rather than from instants a frame apart - see Motion.
         motion = testbed.get_motion()
+        _require_still_driving(test_case, motion, f"moving to {target}")
         within_tolerance: bool = (
             abs(motion.position - target) <= position_tolerance
             and abs(motion.velocity) <= velocity_tolerance

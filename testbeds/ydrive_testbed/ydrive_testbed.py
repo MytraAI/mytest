@@ -67,15 +67,21 @@ logger = logging.getLogger(__name__)
 
 
 class Motion(NamedTuple):
-    """Where the axis is and how fast it is going, from one telemetry frame.
+    """Where the axis is, how fast it is going, and whether it is still driving -
+    from one telemetry frame.
 
-    A pair rather than two reads because every question worth asking about a
-    moving axis is about both at once - "arrived and settled", "how far did it
-    travel after reaching this speed" - and two named reads would answer from two
-    different frames, a sample period apart, at twice the cost."""
+    One read rather than three because every question worth asking about a moving
+    axis is about all of them at once, and separate reads would answer from
+    different frames a sample period apart, at three times the cost.
+
+    `armed` is in here because a loop watching a move has to notice the axis
+    stopping driving. The ODrive disarms itself on a fault, so a move can end with
+    the load coasting and no exception anywhere - which reads exactly like a slow
+    move until its timeout."""
 
     position: float
     velocity: float
+    armed: bool
 
 
 CPX400DP_HOST = "169.254.166.16"
@@ -550,7 +556,11 @@ class YdriveTestbed:
     def get_motion(self) -> Motion:
         """Position and velocity, from one frame."""
         channels = self._channels()
-        return Motion(position=channels["pos_estimate"], velocity=channels["vel_estimate"])
+        return Motion(
+            position=channels["pos_estimate"],
+            velocity=channels["vel_estimate"],
+            armed=bool(channels["axis_is_armed"]),
+        )
 
     def get_faults(self) -> Dict[str, str]:
         """Every watched ODrive channel currently reading as a fault, decoded -

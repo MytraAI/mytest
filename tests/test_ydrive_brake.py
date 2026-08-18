@@ -64,7 +64,11 @@ class FakeSupplyTestbed:
     # channels dict, so neither does the fake standing in for one.
     def get_motion(self):
         channels = self._channels()
-        return Motion(position=channels["pos_estimate"], velocity=channels["vel_estimate"])
+        return Motion(
+            position=channels["pos_estimate"],
+            velocity=channels["vel_estimate"],
+            armed=bool(channels["axis_is_armed"]),
+        )
 
     def describe_errors(self):
         channels = self._channels()

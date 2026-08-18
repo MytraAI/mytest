@@ -52,7 +52,11 @@ class FakeBrakeTestbed:
 
     def get_motion(self):
         channels = self._channels()
-        return Motion(position=channels["pos_estimate"], velocity=channels["vel_estimate"])
+        return Motion(
+            position=channels["pos_estimate"],
+            velocity=channels["vel_estimate"],
+            armed=self.armed,
+        )
 
     def _channels(self):
         if self.braked and self._stopping_turns is None:
@@ -303,3 +307,54 @@ def test_the_dwell_sets_the_cycle_rate():
     cycle_s = test.DWELL_S + traverse_s
     assert cycle_s > test.DWELL_S, "the dwell is not the dominant term any more"
     assert 3600 / cycle_s < 100, "a cycle rate this high is not what a 60 s dwell implies"
+
+
+# --- an axis that stops driving on its own ------------------------------------
+
+
+class DisarmingTestbed(FakeBrakeTestbed):
+    """A board that disarms itself part-way through a move, as the real one does on
+    a current limit violation - by dropping to IDLE with no exception anywhere."""
+
+    def __init__(self, disarm_after: int = 3, **kwargs):
+        super().__init__(**kwargs)
+        self._reads = 0
+        self._disarm_after = disarm_after
+
+    def _channels(self):
+        self._reads += 1
+        if self._reads > self._disarm_after:
+            self.armed = False
+        return super()._channels()
+
+    def describe_errors(self):
+        return {"disarm_reason": "CURRENT_LIMIT_VIOLATION", "axis_current_state": "IDLE"}
+
+
+def test_a_move_stops_the_moment_the_axis_disarms():
+    """Observed on the stand: an axis disarmed on CURRENT_LIMIT_VIOLATION and the
+    load coasted for the full 45 s move timeout - brake released, controller idle,
+    held by neither. One frame is what that should cost."""
+    from testcases.ydrive.teststeps.teststeps import move_to
+
+    testbed = DisarmingTestbed()
+    with pytest.raises(RuntimeError) as excinfo:
+        move_to(FakeTestCase(testbed), 500.0, arrival_timeout_s=45.0)
+
+    message = str(excinfo.value)
+    assert "stopped driving" in message
+    assert "CURRENT_LIMIT_VIOLATION" in message, "the board's own reason is what to report"
+
+
+def test_a_run_up_stops_the_moment_the_axis_disarms():
+    """Same for the acceleration to the trigger speed, which otherwise waits out
+    its own timeout while the load coasts."""
+    from testcases.ydrive.teststeps.teststeps import brake_from_speed
+
+    # Disarms before the trigger speed is reached, which is when the axis is
+    # working hardest and so when the real board latched its violation.
+    testbed = DisarmingTestbed(reaches=TRIGGER_TURNS_S, disarm_after=1)
+    with pytest.raises(RuntimeError, match="stopped driving"):
+        brake_from_speed(FakeTestCase(testbed), target=0.0, trigger_speed=TRIGGER_TURNS_S)
+
+    assert "brake:engage" not in testbed.calls, "no brake event should be recorded"
