@@ -64,7 +64,7 @@ def test_a_stale_acknowledgement_does_not_skip_the_wait(tmp_path, monkeypatch):
     ack.touch()
     case = FakeTestCase(ack)
     monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-                        lambda test_id, message: FakeWindow())
+                        lambda test_id, message, fields=(): FakeWindow())
     monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
 
     await_operator(case, "do the thing")
@@ -78,7 +78,7 @@ def test_the_prompt_is_published_while_waiting_and_cleared_after(tmp_path, monke
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     windows = []
     monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-                        lambda test_id, message: windows.append(FakeWindow()) or windows[-1])
+                        lambda test_id, message, fields=(): windows.append(FakeWindow()) or windows[-1])
     monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
 
     await_operator(case, "move the load")
@@ -93,7 +93,7 @@ def test_the_window_is_closed_even_when_the_wait_is_aborted(tmp_path, monkeypatc
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     window = FakeWindow()
     monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-                        lambda test_id, message: window)
+                        lambda test_id, message, fields=(): window)
 
     # Not on the first call: @step checks at its own entry, before the window is
     # spawned, and an abort there has no window to close. The case worth pinning
@@ -143,3 +143,98 @@ def test_every_other_platform_uses_this_interpreter(monkeypatch):
 
     monkeypatch.setattr(utils.sys, "platform", "darwin")
     assert utils._windowless_python() == utils.sys.executable
+
+
+# --- the details that identify a run ------------------------------------------
+
+
+FIELDS = (("DUT SN", "dut_serial_number"), ("Load (lb)", "load_lb"))
+
+
+def _answer_with(case, answers):
+    """Stand in for an operator filling the window in, or the CLI's --answer."""
+    import json
+
+    def check():
+        case.checks += 1
+        if case.checks == 2:
+            case._ack_path.write_text(json.dumps(answers) if answers is not None else "")
+
+    case.check_should_continue = check
+
+
+def test_the_answers_are_published_as_run_state(tmp_path, monkeypatch):
+    """Published, so the engine merges them into every recorded row - a stored run
+    then says which DUT it was and under what load without a separate note."""
+    from testcases.ydrive.teststeps.teststeps import await_operator_details
+
+    case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
+    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
+                        lambda test_id, message, fields=(): FakeWindow())
+    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
+    _answer_with(case, {"DUT SN": "YD-014", "Load (lb)": "250"})
+
+    details = await_operator_details(case, FIELDS)
+
+    assert details == {"dut_serial_number": "YD-014", "load_lb": "250"}
+    assert case.state["dut_serial_number"] == "YD-014"
+    assert case.state["load_lb"] == "250"
+    assert case.state["operator_prompt"] is None, "the prompt outlived the answer"
+
+
+def test_the_prompt_labels_are_what_the_window_is_asked_for(tmp_path, monkeypatch):
+    """The label a person reads and the channel it lands in are written as a pair,
+    so renaming a prompt cannot rename a channel stored runs are keyed by."""
+    from testcases.ydrive.teststeps.teststeps import await_operator_details
+
+    case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
+    asked = []
+    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
+                        lambda test_id, message, fields=(): asked.extend(fields) or FakeWindow())
+    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
+    _answer_with(case, {"DUT SN": "YD-014", "Load (lb)": "250"})
+
+    await_operator_details(case, FIELDS)
+
+    assert asked == ["DUT SN", "Load (lb)"]
+
+
+def test_a_run_without_its_details_does_not_start(tmp_path, monkeypatch):
+    """An operator can dismiss the window with the CLI acknowledgement, which
+    answers nothing - and a run that cannot be attributed to a DUT is not worth the
+    hours it takes."""
+    from testcases.ydrive.teststeps.teststeps import await_operator_details
+
+    case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
+    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
+                        lambda test_id, message, fields=(): FakeWindow())
+    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
+    _answer_with(case, None)  # a plain acknowledgement, no values
+
+    with pytest.raises(RuntimeError, match="no answer for 'DUT SN'"):
+        await_operator_details(case, FIELDS)
+
+
+def test_the_details_reach_the_verdict_as_well_as_the_channels():
+    """The channels carry them per frame, which is right for reading one run back
+    and useless for finding every run against a ticket."""
+    from testcases.ydrive.testcases.testcases import BrakeEnduranceTest
+
+    test = BrakeEnduranceTest(require_engine=False)
+    test.run_details = {"dut_serial_number": "YD-014", "er_ticket": "ER-2291", "load_lb": "250"}
+
+    metadata = test.result_metadata()
+
+    assert metadata["dut_serial_number"] == "YD-014"
+    assert metadata["er_ticket"] == "ER-2291"
+    assert metadata["load_lb"] == "250"
+
+
+def test_every_asked_field_is_seeded_so_the_engine_keeps_it():
+    """The engine fixes a file's header from the first frame and drops channels that
+    appear later - an unseeded channel would be answered and then lost."""
+    from testcases.ydrive.channels import DEFAULT_STATE
+    from testcases.ydrive.testcases.testcases import BrakeEnduranceTest
+
+    for _, channel in BrakeEnduranceTest.RUN_DETAIL_FIELDS:
+        assert channel in DEFAULT_STATE, f"{channel} is not seeded"

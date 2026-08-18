@@ -9,6 +9,10 @@ await_operator: publishes an instruction and waits for a person to
 say they have done it, still polling for a fatal bound, a stop request
 and a lost recorder throughout.
 
+await_operator_details: the same wait, with free-text fields - the DUT,
+the ticket, the load - published as run state so a stored run says what
+it was run on.
+
 brake_from_speed: accelerates toward a target, and the moment the load
 reaches a trigger speed idles the motor and drops the brake rail, so
 the brake stops a moving load. Holds it there, then records the speed
@@ -50,6 +54,8 @@ thresholds in one call - in RAM, so a run leaves the board's saved
 configuration alone.
 """
 from __future__ import annotations
+
+import json
 
 import logging
 import time
@@ -315,47 +321,43 @@ def prepare_for_operation(
     _apply_tuning_params(test_case)
 
 
-@step
-def await_operator(test_case: BaseYdriveTest, instruction: str) -> None:
-    """Publish an instruction for a person and wait until they acknowledge it.
+def _await_ack(test_case: BaseYdriveTest, instruction: str, fields: Sequence[str] = ()) -> str:
+    """Publish an instruction, wait for the operator's marker, and return what it
+    says - empty for a plain acknowledgement, JSON for a prompt that asked for
+    values.
 
-    Waits indefinitely, because how long somebody takes is not something a test
-    can put a limit on. What it does not do is stop watching the stand: every
-    tick still calls check_should_continue(), so a fatal bound, an operator stop
-    or a lost recorder is noticed while the run sits here - which is the whole
-    reason this is a polled marker file rather than input(). A blocking read
-    would suspend all three during the one part of a test where somebody has
-    their hands on the hardware.
+    Waits indefinitely, because how long somebody takes is not something a test can
+    put a limit on. What it does not do is stop watching the stand: every tick still
+    calls check_should_continue(), so a fatal bound, an operator stop or a lost
+    recorder is noticed while the run sits here - which is the whole reason this is
+    a polled marker file rather than input(). A blocking read would suspend all
+    three during the one part of a test where somebody has their hands on the
+    hardware.
 
     The instruction is published as `operator_prompt` as well as logged, so a
     recorded run shows how long the stand sat waiting on a person - otherwise
     indistinguishable from a hang - and cleared afterwards so the channel means
-    "waiting for this, now".
-
-    A window opens with the instruction and a button (tools/operator_prompt.py);
-    `python -m tools.operator_ack` does the same thing from a terminal, which is
-    what a headless stand or an SSH session uses. Both write the one marker file
-    this polls for, so neither is a special case here, and the window is closed
-    once the wait ends however it ended."""
+    "waiting for this, now"."""
     path = test_case.operator_ack_path()
     path.unlink(missing_ok=True)  # a stale ack from an earlier run must not skip this
     test_case.set_state("operator_prompt", instruction)
     logger.warning("test %s: WAITING FOR OPERATOR - %s", test_case.test_id, instruction)
     logger.warning("test %s: click the window, or `python -m tools.operator_ack`", test_case.test_id)
 
-    window = spawn_operator_prompt(test_case.test_id, instruction)
+    window = spawn_operator_prompt(test_case.test_id, instruction, fields)
     clock: Stopwatch = Stopwatch()
     try:
         while True:
             test_case.check_should_continue()
             if path.exists():
+                answered = path.read_text()
                 path.unlink(missing_ok=True)
                 test_case.set_state("operator_prompt", None)
                 logger.info(
                     "test %s: operator acknowledged after %.0fs",
                     test_case.test_id, clock.elapsed_s(),
                 )
-                return
+                return answered
             time.sleep(OPERATOR_POLL_INTERVAL_S)
     finally:
         # However this ended - acknowledged, a fatal bound, an operator stop - the
@@ -363,6 +365,59 @@ def await_operator(test_case: BaseYdriveTest, instruction: str) -> None:
         # stale one left on a stand's screen is worse than none.
         if window is not None:
             window.terminate()
+
+
+@step
+def await_operator_details(
+    test_case: BaseYdriveTest, fields: Sequence[Tuple[str, str]]
+) -> Dict[str, str]:
+    """Ask the operator for the details that identify this run, and publish them.
+
+    `fields` pairs the label a person reads with the channel it is stored under -
+    written out rather than derived from the label, so renaming a prompt cannot
+    rename a channel in every stored run.
+
+    Published as run state, which means the engine merges them into every recorded
+    row: a stored run then says which DUT it was, under what load, against which
+    ticket, without anyone keeping a separate note. The channels have to be seeded
+    (see ../channels.py) or the engine fixes its header before they exist and drops
+    them from the file.
+
+    Asked before anything is energized, because it is the one part of a run that
+    needs a person and does not need the stand."""
+    answered = _await_ack(test_case, "enter this run's details", [label for label, _ in fields])
+    try:
+        answers = json.loads(answered) if answered else {}
+    except ValueError:
+        answers = {}
+
+    details: Dict[str, str] = {}
+    for label, channel in fields:
+        value = answers.get(label)
+        if not value:
+            raise RuntimeError(
+                f"test {test_case.test_id}: no answer for {label!r} - a run that cannot be "
+                "attributed to a DUT is not worth the hours it takes. Acknowledge with the "
+                "window, or `python -m tools.operator_ack --answer "
+                f"'{label}=...'` for a stand with no display"
+            )
+        details[channel] = value
+        test_case.set_state(channel, value)
+    logger.info("test %s: run details %s", test_case.test_id, details)
+    return details
+
+
+@step
+def await_operator(test_case: BaseYdriveTest, instruction: str) -> None:
+    """Publish an instruction for a person and wait until they acknowledge it.
+
+    A window opens with the instruction and a button (tools/operator_prompt.py);
+    `python -m tools.operator_ack` does the same thing from a terminal, which is
+    what a headless stand or an SSH session uses. Both write the one marker file
+    this polls for, so neither is a special case here - see _await_ack for the
+    waiting itself, which keeps checking for a fatal bound, a stop request and a
+    lost recorder throughout."""
+    _await_ack(test_case, instruction)
 
 
 @step

@@ -27,6 +27,15 @@ DEFAULT_STATE: Dict[str, Any] = {
     # the moment the stand comes up and stays that way until a step powers its
     # rail. Present from frame 1 so a recorded run reads as "engaged except
     # during moves" rather than the channel appearing at the first dwell.
+    "dut_serial_number": None,
+    "er_ticket": None,
+    "load_lb": None,
+    # Answered by the operator before anything is energized, and then carried on
+    # every recorded row - so a stored run says which DUT it was, under what load,
+    # against which ticket, without anyone keeping a separate note. Seeded because
+    # the engine fixes a file's header from the first frame and drops channels that
+    # appear later; free text, because a load is written on a plate and a ticket is
+    # whatever the tracker calls it.
     "operator_prompt": None,
     # What the test is waiting for a person to do, or None when it is waiting for
     # nobody. A recorded run then shows how long the stand sat waiting on an

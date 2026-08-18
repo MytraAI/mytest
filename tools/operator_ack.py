@@ -21,10 +21,12 @@ where the path is defined.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import tempfile
 from pathlib import Path
+from typing import Dict, Optional
 
 import zmq
 
@@ -56,11 +58,16 @@ def discover_running_test(endpoint: str, timeout_s: float) -> RunStateFrame:
     return RunStateFrame.from_bytes(raw)
 
 
-def acknowledge(test_id: str) -> Path:
+def acknowledge(test_id: str, answers: Optional[Dict[str, str]] = None) -> Path:
     """Leave the marker await_operator() polls for - see
-    TestCase.operator_ack_path() for the convention this must match."""
+    TestCase.operator_ack_path() for the convention this must match.
+
+    `answers` rides in the file as JSON when a prompt asked for values. An empty
+    file is a plain acknowledgement, which is why the waiting step treats an
+    unparseable or empty file as "yes" rather than as an error: the two prompts
+    share one marker, and only one of them has anything to say."""
     path = Path(tempfile.gettempdir()) / f"mytest-ack-{test_id}"
-    path.touch()
+    path.write_text(json.dumps(answers) if answers else "")
     return path
 
 
@@ -69,6 +76,10 @@ if __name__ == "__main__":
     parser.add_argument("--test-id", default=None, help="acknowledge this test instead of discovering it")
     parser.add_argument("--state-endpoint", default=DEFAULT_RUN_STATE_ENDPOINT)
     parser.add_argument("--discovery-timeout", type=float, default=DEFAULT_DISCOVERY_TIMEOUT_S)
+    parser.add_argument(
+        "--answer", action="append", default=[], metavar="NAME=VALUE",
+        help="answer a prompt that asked for values; repeatable. For a stand with no display",
+    )
     args = parser.parse_args()
 
     test_id = args.test_id
@@ -85,6 +96,7 @@ if __name__ == "__main__":
         else:
             logger.info("test %s is waiting for: %s", test_id, prompt)
 
-    path = acknowledge(test_id)
+    answers = dict(pair.split("=", 1) for pair in args.answer) if args.answer else None
+    path = acknowledge(test_id, answers)
     logger.info("acknowledged test %s (%s)", test_id, path)
     sys.exit(0)

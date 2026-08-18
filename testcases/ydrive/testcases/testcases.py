@@ -56,6 +56,7 @@ from .base_ydrive_test import BaseYdriveTest
 from ..teststeps.teststeps import (
     OVER_ENERGY_VELOCITY_LIMIT,
     await_operator,
+    await_operator_details,
     brake_from_speed,
     cycle_position,
     dwell_braked,
@@ -161,6 +162,18 @@ class BrakeEnduranceTest(BaseYdriveTest):
     attribute rather than passed inline because the return move's timeout is
     derived from it - see return_timeout_s."""
 
+    RUN_DETAIL_FIELDS = (
+        ("DUT SN", "dut_serial_number"),
+        ("ER Ticket", "er_ticket"),
+        ("Load (lb)", "load_lb"),
+    )
+    """What the operator is asked for before the run starts, as (prompt, channel).
+
+    Written as pairs rather than deriving one from the other, so rewording a prompt
+    cannot rename a channel that stored runs are already keyed by. Free text: a load
+    is whatever is stamped on the weights, and a ticket is whatever the tracker
+    calls it."""
+
     POST_BRAKE_DWELL_S = 5.0
     """How long the brake holds the load it has just stopped, before its stopping
     distance is taken and the controller takes it back.
@@ -212,6 +225,7 @@ class BrakeEnduranceTest(BaseYdriveTest):
         real test's speed."""
         super().__init__(test_id, use_mock, require_engine=require_engine)
         self.brake_cycles = 0
+        self.run_details: dict = {}
         self._trigger_speed_m_s = (
             trigger_speed_m_s if trigger_speed_m_s is not None else self.TRIGGER_SPEED_M_S
         )
@@ -220,7 +234,24 @@ class BrakeEnduranceTest(BaseYdriveTest):
     def trigger_speed_turns_s(self) -> float:
         return self._trigger_speed_m_s / METERS_PER_TURN
 
+    def result_metadata(self) -> dict:
+        """What this run was, for the verdict.
+
+        The same answers the operator typed, in the one record a reporting database
+        ingests - the state channels carry them per frame, which is right for
+        reading a run back, and wrong for finding every run against a ticket."""
+        return {
+            **self.run_details,
+            "brake_cycles": self.brake_cycles,
+            "trigger_speed_m_s": self._trigger_speed_m_s,
+        }
+
     def main_execution(self) -> None:
+        # Asked first, while nothing is energized: it needs a person and does not
+        # need the stand, and a run nobody can attribute to a DUT is not worth the
+        # hours it takes.
+        self.run_details = await_operator_details(self, self.RUN_DETAIL_FIELDS)
+
         prepare_for_operation(self)
         # The trigger speed is above what the normal tuning allows, so the
         # ceiling is raised before anything moves - otherwise the axis clamps

@@ -78,7 +78,13 @@ answered.
 
 ```
 python -m tools.operator_prompt --test-id <test_id> --message "do the thing"
+python -m tools.operator_prompt --test-id <id> --message "..." --field "DUT SN" --field "Load (lb)"
 ```
+
+With `--field` it collects free text instead of just confirming - one entry per
+field, in the order given - and writes the answers into the marker file as JSON.
+Every field must be filled: a run whose DUT serial nobody wrote down cannot be
+attributed later, which is the reason for asking.
 
 Not run by hand normally: `await_operator()` spawns it, and closes it when the
 wait ends however it ended. Its own process because a Tk main loop owns its
@@ -102,7 +108,11 @@ before it starts - and `await_operator()` publishes what it wants as
 ```
 python -m tools.operator_ack
 python -m tools.operator_ack --test-id <test_id>
+python -m tools.operator_ack --answer "DUT SN=YD-014" --answer "Load (lb)=250"
 ```
+
+`--answer` is how a prompt that asked for values is answered without a window -
+an SSH session, or a stand with no display.
 
 A file rather than `input()` for the same reason `stop_test.py` is one: the test
 keeps checking for a fatal bound, a stop request and a lost recorder while it

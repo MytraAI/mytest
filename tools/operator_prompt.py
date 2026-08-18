@@ -8,6 +8,13 @@ fatal bound, a stop request and a lost recorder throughout, which is what a
 blocking dialog inside the test process would have suspended.
 
     python -m tools.operator_prompt --test-id <test_id> --message "do the thing"
+    python -m tools.operator_prompt --test-id <id> --message "..." --field "DUT SN" --field "Load (lb)"
+
+With --field, the window collects free text instead of just confirming: one entry
+per field, in the order given, and the answers are written into the marker file as
+JSON for the waiting step to read. Every field must be filled - a run whose DUT
+serial nobody wrote down is a run whose results cannot be attributed later, which
+is the whole reason for asking at all.
 
 Its own process, not a window inside the test process, for the reason Tkinter
 insists on: a Tk main loop owns the thread it runs on. Inside the test process it
@@ -26,6 +33,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from typing import Sequence
 
 from tools.operator_ack import acknowledge
 
@@ -35,11 +43,13 @@ logger = logging.getLogger(__name__)
 WRAP_WIDTH_PX = 420
 
 
-def show(test_id: str, message: str) -> int:
+def show(test_id: str, message: str, fields: Sequence[str] = ()) -> int:
     """Show the window and block until it is closed. Returns 0 if the operator
     acknowledged, 1 if they closed it without doing so, 2 if no window could be
     opened at all - a headless stand, or a Python without tkinter, neither of
-    which should stop a test that is still perfectly answerable from the CLI."""
+    which should stop a test that is still perfectly answerable from the CLI.
+
+    With `fields`, the window collects a value for each before it will submit."""
     try:
         import tkinter as tk
     except ImportError:
@@ -47,11 +57,19 @@ def show(test_id: str, message: str) -> int:
         return 2
 
     acknowledged = False
+    entries: dict = {}
 
     def on_click() -> None:
         nonlocal acknowledged
+        answers = {name: entry.get().strip() for name, entry in entries.items()}
+        missing = [name for name, value in answers.items() if not value]
+        if missing:
+            # Refused rather than accepted blank: an unattributable run is worse
+            # than a run that waited for someone to type.
+            complaint.config(text=f"still needed: {', '.join(missing)}")
+            return
         acknowledged = True
-        acknowledge(test_id)
+        acknowledge(test_id, answers)
         root.destroy()
 
     try:
@@ -68,6 +86,20 @@ def show(test_id: str, message: str) -> int:
     tk.Label(frame, text=test_id, font=("TkDefaultFont", 10), fg="#666").pack(pady=(2, 14))
     tk.Label(frame, text=message, wraplength=WRAP_WIDTH_PX, justify="left",
              font=("TkDefaultFont", 12)).pack()
+
+    if fields:
+        form = tk.Frame(frame, pady=14)
+        form.pack(fill="x")
+        for row, name in enumerate(fields):
+            tk.Label(form, text=name, font=("TkDefaultFont", 11), anchor="e", width=12).grid(
+                row=row, column=0, sticky="e", pady=4, padx=(0, 8)
+            )
+            entry = tk.Entry(form, font=("TkDefaultFont", 12), width=28)
+            entry.grid(row=row, column=1, sticky="we", pady=4)
+            entries[name] = entry
+        next(iter(entries.values())).focus_set()
+    complaint = tk.Label(frame, text="", fg="#b00", font=("TkDefaultFont", 10))
+    complaint.pack()
     tk.Button(frame, text="Done - continue the test", command=on_click,
               font=("TkDefaultFont", 13, "bold"), padx=16, pady=10).pack(pady=(20, 4))
     tk.Label(frame, text="Closing this window does not acknowledge; the test keeps waiting.",
@@ -91,5 +123,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--test-id", required=True)
     parser.add_argument("--message", required=True)
+    parser.add_argument(
+        "--field", action="append", default=[], metavar="NAME",
+        help="collect free text under this label; repeatable, order is the form's order",
+    )
     args = parser.parse_args()
-    sys.exit(show(args.test_id, args.message))
+    sys.exit(show(args.test_id, args.message, args.field))
