@@ -28,10 +28,12 @@ python -m telemetry_engine.main          # in its own terminal, first
 
 A run's whole product is its record, so a test that would record nothing
 fails immediately rather than moving hardware for no result - and if the
-engine dies mid-run, the test aborts and tears down cleanly. Each run lands
-in `<output_dir>/runs/<test_id>/` as a `verdict.json` plus per-device wide
-telemetry CSVs; see `AI/Mytest.md`'s "The per-run result record". Only the
-demo scripts opt out of this (`require_engine=False`).
+engine dies mid-run, the test aborts and tears down cleanly. Each run lands in
+`<output_dir>/runs/<test_id>/` - by default
+`~/Desktop/mytestresults/runs/<test_name>_<date>/` - as a `verdict.json` plus
+per-device wide telemetry CSVs and driver logs; see `AI/Mytest.md`'s "The
+per-run result record". Only the demo scripts opt out of this
+(`require_engine=False`).
 
 `--mock` is forwarded to every factory uniformly; a test with no real/mock
 distinction (e.g. anything under `example_dut`) simply ignores it. Replaces
