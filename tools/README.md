@@ -84,7 +84,9 @@ python -m tools.operator_prompt --test-id <id> --message "..." --field "DUT SN" 
 With `--field` it collects free text instead of just confirming - one entry per
 field, in the order given - and writes the answers into the marker file as JSON.
 Every field must be filled: a run whose DUT serial nobody wrote down cannot be
-attributed later, which is the reason for asking.
+attributed later, which is the reason for asking. `--choice "NAME=A,B,C"` makes a
+field a read-only dropdown instead, so what lands in the record is one of a known
+set rather than a typo of one.
 
 Not run by hand normally: `await_operator()` spawns it, and closes it when the
 wait ends however it ended. Its own process because a Tk main loop owns its

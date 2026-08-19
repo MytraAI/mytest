@@ -9,6 +9,7 @@ blocking dialog inside the test process would have suspended.
 
     python -m tools.operator_prompt --test-id <test_id> --message "do the thing"
     python -m tools.operator_prompt --test-id <id> --message "..." --field "DUT SN" --field "Load (lb)"
+    python -m tools.operator_prompt ... --field "DUT SN" --choice "DUT SN=YDRIVE1,YDRIVE2"
 
 With --field, the window collects free text instead of just confirming: one entry
 per field, in the order given, and the answers are written into the marker file as
@@ -33,7 +34,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from typing import Sequence
+from typing import Dict, Optional, Sequence
 
 from tools.operator_ack import acknowledge
 
@@ -43,13 +44,21 @@ logger = logging.getLogger(__name__)
 WRAP_WIDTH_PX = 420
 
 
-def show(test_id: str, message: str, fields: Sequence[str] = ()) -> int:
+def show(
+    test_id: str,
+    message: str,
+    fields: Sequence[str] = (),
+    choices: Optional[Dict[str, Sequence[str]]] = None,
+) -> int:
     """Show the window and block until it is closed. Returns 0 if the operator
     acknowledged, 1 if they closed it without doing so, 2 if no window could be
     opened at all - a headless stand, or a Python without tkinter, neither of
     which should stop a test that is still perfectly answerable from the CLI.
 
-    With `fields`, the window collects a value for each before it will submit."""
+    With `fields`, the window collects a value for each before it will submit. A
+    field named in `choices` is a read-only dropdown of those values rather than an
+    entry, so what lands in the record is one of a known set and not a typo of
+    one."""
     try:
         import tkinter as tk
     except ImportError:
@@ -58,6 +67,7 @@ def show(test_id: str, message: str, fields: Sequence[str] = ()) -> int:
 
     acknowledged = False
     entries: dict = {}
+    choices = choices or {}
 
     def on_click() -> None:
         nonlocal acknowledged
@@ -94,7 +104,17 @@ def show(test_id: str, message: str, fields: Sequence[str] = ()) -> int:
             tk.Label(form, text=name, font=("TkDefaultFont", 11), anchor="e", width=12).grid(
                 row=row, column=0, sticky="e", pady=4, padx=(0, 8)
             )
-            entry = tk.Entry(form, font=("TkDefaultFont", 12), width=28)
+            if name in choices:
+                from tkinter import ttk
+
+                # Read-only, so the answer is one of the known values rather than a
+                # typo of one - a misspelled serial is a run attributed to nothing.
+                entry = ttk.Combobox(
+                    form, values=list(choices[name]), state="readonly",
+                    font=("TkDefaultFont", 12), width=26,
+                )
+            else:
+                entry = tk.Entry(form, font=("TkDefaultFont", 12), width=28)
             entry.grid(row=row, column=1, sticky="we", pady=4)
             entries[name] = entry
         next(iter(entries.values())).focus_set()
@@ -127,5 +147,13 @@ if __name__ == "__main__":
         "--field", action="append", default=[], metavar="NAME",
         help="collect free text under this label; repeatable, order is the form's order",
     )
+    parser.add_argument(
+        "--choice", action="append", default=[], metavar="NAME=A,B,C",
+        help="make that field a dropdown of these values instead of free text",
+    )
     args = parser.parse_args()
-    sys.exit(show(args.test_id, args.message, args.field))
+    choices = {}
+    for spec in args.choice:
+        name, _, values = spec.partition("=")
+        choices[name] = [v for v in values.split(",") if v]
+    sys.exit(show(args.test_id, args.message, args.field, choices))

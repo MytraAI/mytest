@@ -1,64 +1,45 @@
 """Test steps for ydrive.
 
-prepare_for_operation: brings the stand from cold to ready-to-arm -
-energizes the motor bus, clears whatever the ODrive has latched, sets
-the control mode and applies the tuning. Leaves the axis idle and the
-brake engaged, since arming is release_brake's to sequence.
+prepare_for_operation: cold stand to ready-to-arm - bus up, faults
+cleared, control and input mode set, tuning applied. Leaves the axis
+idle behind an engaged brake.
 
-await_operator: publishes an instruction and waits for a person to
-say they have done it, still polling for a fatal bound, a stop request
-and a lost recorder throughout.
+await_operator / prompt_for_SN_ER_load: wait for a person, the second
+collecting the run's serial, ticket and load. Both keep polling for a
+fatal bound, a stop request and a lost recorder while they wait.
 
-await_operator_details: the same wait, with free-text fields - the DUT,
-the ticket, the load - published as run state so a stored run says what
-it was run on.
-
-brake_from_speed: accelerates toward a target, and the moment the load
-reaches a trigger speed idles the motor and drops the brake rail, so
-the brake stops a moving load. Holds it there, then records the speed
-it engaged at and how far the load ended up from the brake command. The inverse of engage_brake's ordering,
-deliberately: see its own docstring.
+brake_from_speed: runs up to a trigger speed, then idles the motor and
+drops the brake rail so the brake stops a moving load. Records the speed
+and the stopping distance.
 
 release_brake_in_place: hands a stopped load back to the controller
-without moving it, by parking the setpoint where the axis actually is
-before arming.
+without moving it.
 
-dwell_braked: engages the brake, holds the load with the axis idle for
-a fixed time, then releases - the state that dissipates nothing, so a
-thermal reading recovers over it.
+move_to: commands one target position and blocks until arrived and
+settled.
 
-move_to: commands a single target position and blocks (closed-loop)
-until arrived and settled. Its own step - call it directly from a test
-case, or via cycle_position below.
+engage_brake / release_brake: the brake and the axis state moved together,
+each confirming the axis reached the state it was asked for - so the motor
+never drives against an engaged brake, and the brake never lets go of a load
+the controller has not taken. Not steps: they would bury their caller's
+`current_step`.
 
-engage_brake / release_brake: the brake and the axis state moved
-together, each confirming the axis actually reached the state it was
-asked for before the brake is trusted - so the motor never drives
-against an engaged brake, and the brake never lets go of a load the
-controller has not taken. Not steps: they are sub-actions a step calls,
-and publishing themselves as `current_step` would bury it.
+dwell_braked: holds the load on the brake, axis idle - the state that
+dissipates nothing.
 
-cycle_position: one low<->high position cycle (move_to, dwell, repeat
-other direction), then returns - call it repeatedly from
-main_execution() for a full cycling test. Assumes the axis is already
-armed AND the brake released before this step runs - pre_test_setup
-leaves the brake engaged deliberately, and a concrete test releases it
-once the controller is holding (see EnduranceCycleTest). Each dwell is
-then held by the brake rather than by the controller alone; see the
-step's own docstring.
+cycle_position: one low<->high cycle with a braked dwell at each end.
+Assumes the axis is armed and the brake released.
 
-set_tuning_params: sets the motor's current limits, the controller's
-velocity limit, position filter bandwidth,
-position/velocity/velocity-integrator gains, and spinout power
-thresholds in one call - in RAM, so a run leaves the board's saved
-configuration alone.
-"""
+set_tuning_params: the motor's current limits, the controller's velocity
+limit, filter bandwidth, gains and spinout thresholds - in RAM, so a run
+leaves the board's saved configuration alone."""
 from __future__ import annotations
 
 import json
 
 import logging
 import time
+from typing import Dict, NamedTuple, Optional, Sequence, Tuple
 
 from hardware.odrive import odrive_errors
 from testbeds.ydrive_testbed.ydrive_testbed import (
@@ -77,78 +58,37 @@ DEFAULT_POSITION_TOLERANCE = 0.5  # turns
 DEFAULT_VELOCITY_TOLERANCE = 0.05  # turns/s
 DEFAULT_ARRIVAL_TIMEOUT_S = 10.0
 DEFAULT_ARM_TIMEOUT_S = 3.0
-"""How long a brake transition waits for the axis to report the state it was
-asked for. Generous enough for the state machine to run, and the wait is paced by
-the telemetry stream at ~12 Hz.
-
-Must stay below TelemetryClient's own staleness deadline (5 s by default), since
-the wait polls through telemetry: at or above it, a silent stream raises
-TelemetryTimeout first and this timeout - the one that names the axis state and
-the decoded errors - never fires."""
+"""How long a brake transition waits for the axis to report the state it asked for.
+Under TelemetryClient's 5 s staleness deadline, or a silent stream raises first."""
 
 DEFAULT_CONTROL_MODE = "POSITION_CONTROL"
 
 INPUT_MODE_POS_FILTER = 3
-"""ODrive InputMode.POS_FILTER - the input mode a filtered position move needs.
-
-Set explicitly because it is persistent device state, and the value it is left at
-decides whether a commanded position does anything at all. A stand found in
-VEL_RAMP (2) accepted every `input_pos` this framework wrote, reported the axis
-armed in POSITION_CONTROL, and commanded zero torque against a 110-turn error -
-because VEL_RAMP tracks `input_vel`, which nothing here writes. Ten seconds of a
-perfectly healthy-looking stand not moving, diagnosable only from
-`controller_torque_setpoint` reading 0.
-
-POS_FILTER rather than PASSTHROUGH because set_tuning_params configures
-`input_filter_bandwidth`, which is the filter this mode applies; PASSTHROUGH would
-ignore it and step the setpoint."""
+"""ODrive InputMode.POS_FILTER, the mode a filtered position move needs. Set
+explicitly: a stand left in VEL_RAMP accepts every input_pos and ignores it."""
 DEFAULT_CLEAR_TIMEOUT_S = 5.0
-"""How long prepare_for_operation keeps clearing before it gives up.
-
-Long enough to cover the bus coming up: the supply's output ramps, and until it
-is above the ODrive's own under-voltage trip level the board re-latches
-DC_BUS_UNDER_VOLTAGE the moment it is cleared."""
+"""How long prepare_for_operation keeps clearing before it gives up - long enough
+for the bus to come up, since DC_BUS_UNDER_VOLTAGE re-latches until it has."""
 
 CLEAR_SETTLE_S = 0.25
-"""Seconds between clearing and reading the result, so the frame that is checked
-was produced after the clear rather than before it."""
+"""Seconds between clearing and reading the result, so the frame checked was
+produced after the clear rather than before it."""
 
 DEFAULT_POST_BRAKE_REST_S = 5.0
-"""How long the brake holds a load it has just stopped before its stopping
-distance is taken.
-
-Inside the brake event rather than after it, because the distance is measured at
-the end of it: a brake that stops the load and then creeps has not stopped it in
-that distance, and the number that matters is where the load ended up. The window
-is also when a brake is hottest and least likely to hold, with nothing driving -
-so any movement across it is the brake slipping, not a controller fighting
-something."""
+"""How long the brake holds a load it has just stopped before the stopping distance
+is taken, so creep while it holds counts against that distance."""
 
 DEFAULT_STOP_TIMEOUT_S = 10.0
-"""How long the load may take to come to rest after the brake is commanded. A
-brake that never stops it is a failure, not something to keep waiting on."""
+"""How long the load may take to come to rest after the brake closes. A brake that
+never stops it is a failure, not something to keep waiting on."""
 
 OPERATOR_POLL_INTERVAL_S = 0.1
-"""How often an operator-gated wait re-checks. Slower than Stopwatch's 10 ms
-tick, because a person is the thing being waited on - but every tick still runs
-the same abort checks."""
+"""How often an operator-gated wait re-checks - slower than Stopwatch's tick because
+a person is what is being waited on. Every tick still runs the abort checks."""
 
 OVER_ENERGY_VELOCITY_LIMIT = 24.0  # turns/s = 2.02 m/s at the stand's 0.084 m/turn
-"""Velocity limit for a test that has to reach a speed the normal tuning will not
-allow.
-
-MAX_LOAD_VELOCITY_LIMIT below caps the load at 1.54 m/s, so a brake test
-triggering at 1.75 m/s (20.83 turns/s) would sit at the clamp forever. This is 13%
-above that trigger, and the margin is the point rather than slack: a loaded axis
-approaches its ceiling asymptotically, so a limit set just above a trigger is a
-trigger that never fires. Measured on this stand, a ceiling of 22 turns/s produced
-a peak of 20.96 turns/s over the whole 8.75 m stroke - 5% short of its own
-ceiling.
-
-It raises the ceiling only - the gains below were tuned against a 130-turn step
-at 18.3 turns/s and are unchanged, so the axis is being run faster than it was
-tuned for. Deliberate: the point of the test is the kinetic energy the brake has
-to absorb, which is what this limit exists to allow."""
+"""Velocity ceiling for a test needing a speed the normal tuning forbids, 13% above
+the trigger: a loaded axis nears its ceiling asymptotically."""
 
 MAX_LOAD_VELOCITY_LIMIT = 18.3  # turns/s
 MAX_LOAD_FILTER_BW = 10.0  # 1/s
@@ -159,54 +99,25 @@ MAX_LOAD_SPINOUT_MECHANICAL_THRESHOLD = -100.0  # W
 MAX_LOAD_SPINOUT_ELECTRICAL_THRESHOLD = 100.0  # W
 
 MOTOR_CURRENT_SOFT_MAX = 18.0  # A
-"""What the controller is allowed to command. Torque is clamped here, so this is
-the number that decides how hard the axis can push.
+"""What the controller may command, so it decides how hard the axis pushes and how
+fast the load reaches speed. The loaded stand sits at it for most of a stroke."""
 
-The loaded ydrive stand sits at this limit for roughly 72% of its stroke -
-accelerating as hard as it is allowed for the first 4 m, then coasting up toward
-its velocity ceiling on less. So this is the number that sets how quickly the load
-reaches speed, and the one that decides whether it reaches a trigger at all."""
-
-MOTOR_CURRENT_HARD_MAX = 27.0  # A
-"""What the measured phase current may reach before the board latches
-CURRENT_LIMIT_VIOLATION and disarms.
-
-Half again above the soft limit, and the size of that gap matters: an axis that
-sits at its soft limit for most of a stroke - which this one does - meets the
-ceiling on the ordinary overshoot of a step response unless the ceiling is well
-clear of it. A gap of a few amps is inside the ripple, and the board latches
-CURRENT_LIMIT_VIOLATION and disarms mid-move.
-
-Well inside what the board itself allows - it reports its own inverter limits as
-100 A soft and 150 A hard - so this is the motor's protection, not the board's.
-Set explicitly rather than inherited, because a stand can be found with a
-CURRENT_LIMIT_VIOLATION already latched from a previous session.
-
-Motor current, not bus current, and both limits are reachable: the inverter acts
-as a transformer, drawing a small current at 48 V and putting a much larger one
-through the phases at a low effective phase voltage. Power is what is conserved,
-not current - so 20 A here is not 20 A asked of a supply that can deliver 8.75 A
-at 48 V. What that supply's envelope constrains is sustained power, which shows up
-as the rail sagging (in_power_limit_2, undervoltage_bound) rather than as bus
-current climbing."""
+MOTOR_CURRENT_HARD_MAX = 27.0  # A - reachable: the inverter is a transformer, phase amps exceed bus amps
+"""Where measured phase current latches CURRENT_LIMIT_VIOLATION and disarms. Half
+again above the soft limit, which the axis sits at for most of a stroke."""
 
 
 def _clear_faults(test_case: BaseYdriveTest, timeout_s: float) -> None:
-    """Clear the ODrive's latched errors, and confirm they actually cleared.
+    """Clear the ODrive's latched errors and confirm they cleared.
 
-    Clearing is retried rather than done once, because the bus is coming up
-    while this runs: below the board's under-voltage trip level, clearing
-    succeeds and DC_BUS_UNDER_VOLTAGE re-latches on the next control cycle.
-    Retrying until the reading is clean waits out the ramp without this step
-    having to invent a voltage threshold - the board's own trip level decides.
+    Retried rather than done once: below the board's under-voltage trip level a
+    clear succeeds and DC_BUS_UNDER_VOLTAGE re-latches, so retrying waits out the
+    bus ramp without this step inventing a voltage threshold. Raises with the
+    remaining faults decoded - an error that will not clear is one the axis will
+    refuse to arm with.
 
-    Raises with every remaining fault decoded, which is the useful failure: an
-    error that will not clear is one the axis will refuse to arm with, and
-    finding that out here beats finding it out at the first dwell.
-
-    What was cleared is not reported from here. The driver already logs each
-    watched channel that is set at startup and each transition back out of it,
-    decoded, into that device's own logs.txt."""
+    What cleared is not reported here; the driver logs every watched channel's
+    transitions into its own logs.txt."""
     testbed: YdriveTestbed = test_case.testbed
     deadline: Stopwatch = Stopwatch(duration_s=timeout_s)
     while True:
@@ -224,18 +135,12 @@ def _clear_faults(test_case: BaseYdriveTest, timeout_s: float) -> None:
 
 
 def _require_still_driving(test_case: BaseYdriveTest, motion, doing: str) -> None:
-    """Raise if the axis has stopped driving while it was supposed to be.
+    """Raise if the axis has stopped driving when it should be.
 
-    The ODrive disarms itself on a fault - a current limit violation, a spinout -
-    and nothing tells the test: the axis simply stops driving. A loop watching for
-    a position or a speed then keeps waiting, and the load coasts with the brake
-    released and the controller idle, held by neither, until a timeout measured in
-    tens of seconds fires. Observed: a return move whose axis disarmed on
-    CURRENT_LIMIT_VIOLATION coasted for 45 s before the move gave up.
-
-    So every loop that expects the axis to be driving checks it, and fails in one
-    frame with the reason the board gives - which teardown then follows by engaging
-    the brake."""
+    The ODrive disarms itself on a fault and tells nobody, so a loop watching for a
+    position or a speed keeps waiting while the load coasts - brake released,
+    controller idle, held by neither - until a timeout measured in tens of seconds.
+    Failing here costs one frame, and teardown then engages the brake."""
     if motion.armed:
         return
     raise RuntimeError(
@@ -246,13 +151,11 @@ def _require_still_driving(test_case: BaseYdriveTest, motion, doing: str) -> Non
 
 
 def _explain_unclearable(remaining: dict) -> str:
-    """Say which of the remaining faults clear_errors could have cleared, and which
-    it never could.
+    """Split the remaining faults into what clear_errors resets and what it never
+    could.
 
-    Worth the words at the one moment somebody is reading them: a latched register
-    still set means clearing did not take, while a live condition means clearing was
-    never the answer and the cause is physical or configured. Retrying either for
-    another five seconds looks identical in a log without this."""
+    A latched register still set means clearing did not take; a live condition means
+    clearing was never the answer. Undistinguished, both read as "retry"."""
     latched = {name: text for name, text in remaining.items() if name in odrive_errors.LATCHED_CHANNELS}
     conditions = {name: text for name, text in remaining.items() if name in odrive_errors.CONDITION_CHANNELS}
     parts = []
@@ -288,29 +191,21 @@ def prepare_for_operation(
     clear_timeout_s: float = DEFAULT_CLEAR_TIMEOUT_S,
 ) -> None:
     """Bring the stand from cold to ready-to-arm: bus up, no latched faults,
-    control mode and tuning set.
+    control and input mode set, tuning applied.
 
-    The order is what makes it work. The bus is energized first, because the
-    ODrive latches DC_BUS_UNDER_VOLTAGE while it is unpowered - a board that
-    boots on USB alone always has it set, and an error latched from a previous
-    run (a CURRENT_LIMIT_VIOLATION, say) sits alongside it. Clearing happens
-    after, and is confirmed rather than assumed, since a latched error is enough
-    for the ODrive to refuse CLOSED_LOOP_CONTROL: without this, arming fails at
-    the first dwell with the stand already energized.
+    Order matters. The bus is energized first, because the ODrive latches
+    DC_BUS_UNDER_VOLTAGE while unpowered; clearing then runs against a live bus and
+    is confirmed, since a latched error is enough for the board to refuse
+    CLOSED_LOOP_CONTROL. The input mode is set as well as the control mode - a stand
+    left in VEL_RAMP ignores commanded positions entirely (see
+    INPUT_MODE_POS_FILTER).
 
-    This is the only thing on the ydrive stand that energizes the motor bus.
-    Setup brings the stand up with both rails off, so a test that never calls
-    this one leaves it de-energized.
+    The only thing on this stand that energizes the motor bus, so a test that never
+    calls it leaves the stand cold.
 
-    Sets the input mode as well as the control mode, because a stand can be left
-    in one that ignores commanded positions entirely - see INPUT_MODE_POS_FILTER.
-
-    Does NOT arm the axis or touch the brake. The brake is left engaged and the
-    axis idle, so the load stays held by the brake until release_brake() hands
-    it to the controller in the one order that never leaves it held by neither.
-
-    Applies the default tuning; a test wanting different gains calls
-    set_tuning_params() afterwards."""
+    Does NOT arm the axis or touch the brake: the load stays held by the brake until
+    release_brake() hands it over. Applies the default tuning; call
+    set_tuning_params() afterwards for different gains."""
     testbed: YdriveTestbed = test_case.testbed
     testbed.power_motor_bus(True)
     _clear_faults(test_case, clear_timeout_s)
@@ -321,30 +216,27 @@ def prepare_for_operation(
     _apply_tuning_params(test_case)
 
 
-def _await_ack(test_case: BaseYdriveTest, instruction: str, fields: Sequence[str] = ()) -> str:
-    """Publish an instruction, wait for the operator's marker, and return what it
-    says - empty for a plain acknowledgement, JSON for a prompt that asked for
-    values.
+def _await_ack(
+    test_case: BaseYdriveTest,
+    instruction: str,
+    fields: Sequence[str] = (),
+    choices: Optional[Dict[str, Sequence[str]]] = None,
+) -> str:
+    """Publish an instruction, wait for the operator's marker, and return its
+    contents - empty for a plain acknowledgement, JSON when values were asked for.
 
-    Waits indefinitely, because how long somebody takes is not something a test can
-    put a limit on. What it does not do is stop watching the stand: every tick still
-    calls check_should_continue(), so a fatal bound, an operator stop or a lost
-    recorder is noticed while the run sits here - which is the whole reason this is
-    a polled marker file rather than input(). A blocking read would suspend all
-    three during the one part of a test where somebody has their hands on the
-    hardware.
-
-    The instruction is published as `operator_prompt` as well as logged, so a
-    recorded run shows how long the stand sat waiting on a person - otherwise
-    indistinguishable from a hang - and cleared afterwards so the channel means
-    "waiting for this, now"."""
+    Waits indefinitely, but not blindly: every tick calls check_should_continue(),
+    so a fatal bound, a stop request or a lost recorder is still noticed while
+    somebody has their hands on the hardware. That is why this is a polled marker
+    file and not input(). The instruction is published as `operator_prompt` and
+    cleared after, so a recorded run shows waiting rather than looking like a hang."""
     path = test_case.operator_ack_path()
     path.unlink(missing_ok=True)  # a stale ack from an earlier run must not skip this
     test_case.set_state("operator_prompt", instruction)
     logger.warning("test %s: WAITING FOR OPERATOR - %s", test_case.test_id, instruction)
     logger.warning("test %s: click the window, or `python -m tools.operator_ack`", test_case.test_id)
 
-    window = spawn_operator_prompt(test_case.test_id, instruction, fields)
+    window = spawn_operator_prompt(test_case.test_id, instruction, fields, choices)
     clock: Stopwatch = Stopwatch()
     try:
         while True:
@@ -367,42 +259,59 @@ def _await_ack(test_case: BaseYdriveTest, instruction: str, fields: Sequence[str
             window.terminate()
 
 
+class RunDetail(NamedTuple):
+    """One thing the operator is asked for before a run.
+
+    `label` is read, `channel` is stored, and they are separate so rewording a
+    prompt cannot rename a channel that stored runs are keyed by. `choices` makes
+    the prompt a dropdown, and is enforced on the answer however it arrives."""
+
+    label: str
+    channel: str
+    choices: Tuple[str, ...] = ()
+
+
 @step
-def await_operator_details(
-    test_case: BaseYdriveTest, fields: Sequence[Tuple[str, str]]
+def prompt_for_SN_ER_load(
+    test_case: BaseYdriveTest, fields: Sequence[RunDetail]
 ) -> Dict[str, str]:
     """Ask the operator for the details that identify this run, and publish them.
 
-    `fields` pairs the label a person reads with the channel it is stored under -
-    written out rather than derived from the label, so renaming a prompt cannot
-    rename a channel in every stored run.
+    A field with choices is a dropdown and its answer is checked against them - the
+    window cannot produce anything else, but `tools.operator_ack --answer` can.
 
-    Published as run state, which means the engine merges them into every recorded
-    row: a stored run then says which DUT it was, under what load, against which
-    ticket, without anyone keeping a separate note. The channels have to be seeded
-    (see ../channels.py) or the engine fixes its header before they exist and drops
-    them from the file.
-
-    Asked before anything is energized, because it is the one part of a run that
-    needs a person and does not need the stand."""
-    answered = _await_ack(test_case, "enter this run's details", [label for label, _ in fields])
+    Published as run state, so the engine merges them into every recorded row. The
+    channels have to be seeded (../channels.py) or the engine fixes its header
+    before they exist and drops them. Asked before anything is energized."""
+    answered = _await_ack(
+        test_case,
+        "enter this run's details",
+        [field.label for field in fields],
+        {field.label: field.choices for field in fields if field.choices},
+    )
     try:
         answers = json.loads(answered) if answered else {}
     except ValueError:
         answers = {}
 
     details: Dict[str, str] = {}
-    for label, channel in fields:
-        value = answers.get(label)
+    for field in fields:
+        value = answers.get(field.label)
         if not value:
             raise RuntimeError(
-                f"test {test_case.test_id}: no answer for {label!r} - a run that cannot be "
+                f"test {test_case.test_id}: no answer for {field.label!r} - a run that cannot be "
                 "attributed to a DUT is not worth the hours it takes. Acknowledge with the "
                 "window, or `python -m tools.operator_ack --answer "
-                f"'{label}=...'` for a stand with no display"
+                f"'{field.label}=...'` for a stand with no display"
             )
-        details[channel] = value
-        test_case.set_state(channel, value)
+        if field.choices and value not in field.choices:
+            raise RuntimeError(
+                f"test {test_case.test_id}: {value!r} is not one of the values {field.label!r} "
+                f"accepts ({', '.join(field.choices)}). A serial the record cannot match to a DUT "
+                "is worse than no serial, so this is refused rather than stored"
+            )
+        details[field.channel] = value
+        test_case.set_state(field.channel, value)
     logger.info("test %s: run details %s", test_case.test_id, details)
     return details
 
@@ -411,12 +320,9 @@ def await_operator_details(
 def await_operator(test_case: BaseYdriveTest, instruction: str) -> None:
     """Publish an instruction for a person and wait until they acknowledge it.
 
-    A window opens with the instruction and a button (tools/operator_prompt.py);
-    `python -m tools.operator_ack` does the same thing from a terminal, which is
-    what a headless stand or an SSH session uses. Both write the one marker file
-    this polls for, so neither is a special case here - see _await_ack for the
-    waiting itself, which keeps checking for a fatal bound, a stop request and a
-    lost recorder throughout."""
+    A window opens with a button (tools/operator_prompt.py), and
+    `python -m tools.operator_ack` answers the same marker from a terminal, which
+    is what a headless stand uses. See _await_ack for the wait itself."""
     _await_ack(test_case, instruction)
 
 
@@ -433,47 +339,20 @@ def brake_from_speed(
     """Accelerate toward `target` and let the brake stop the load once it reaches
     `trigger_speed` turns/s.
 
-    THE ORDER IS THE INVERSE OF engage_brake(), and has to be. That one drops the
-    rail first so a stationary load is held before the controller lets go of it;
-    here the load is moving, so the motor is idled first and the brake then closes
-    on a coasting axis. Doing it the other way would have the motor driving into a
-    closing brake, which is the one thing every step here avoids.
-
-    The axis is never commanded to stop. It is idled, so what stops the load is
-    the brake and the load's own friction - which is the measurement.
-
-    Records the speed at engagement and how far the load travelled afterwards, as
-    `brake_speed_m_s` and `stopping_distance_m` in metres, since that is what a
-    limit is written in and what an operator reads.
+    THE ORDER IS THE INVERSE OF engage_brake(): the motor is idled first and the
+    brake closes on a coasting axis, since doing it the other way would drive the
+    motor into a closing brake. The axis is never commanded to stop - what stops the
+    load is the brake, which is the measurement.
 
     STOPPING DISTANCE IS EVERYTHING AFTER THE BRAKE IS COMMANDED: the coast before
-    it bites, the deceleration itself, and any creep in the `rest_s` after the load
-    comes to rest. One number, three phases, and both ends are picked so it cannot
-    flatter the brake - starting at first deceleration would hide the coast through
-    BRAKE_SETTLE_S, and stopping at first standstill would hide the creep.
+    it bites, the deceleration, and any creep during `rest_s`. The start is the
+    trigger frame - the command, not the physical engagement, which is up to
+    BRAKE_SETTLE_S later and unobservable from here.
 
-    The start is the frame the trigger was seen in, which is the command rather
-    than the moment the brake physically engages - the two differ by up to
-    BRAKE_SETTLE_S, about 0.18 m at 1.75 m/s. Nothing on this stand can observe
-    actual engagement, and charging the command latency to the brake is the
-    conservative side of that ignorance.
-
-    Publishing `stopping_distance_m` is what aborts the run on a bad stop:
-    ydrive_rulebook bounds it fatally at 2 m, the runner merges published state
-    into what it evaluates, and this step's own exit check raises once that lands.
-
-    THE RUN-UP IS BOUNDED BY THE STROKE, NOT BY A CLOCK. It ends when the trigger
-    speed is reached or when the axis arrives at `target` - whichever happens
-    first. A time limit answered a different question: a loaded axis drove the
-    whole 8.75 m stroke, peaked 2% under the trigger, decelerated into the target
-    and then sat there, and the failure reported the speed at the moment the timer
-    expired rather than the speed it had actually achieved. Arriving without ever
-    reaching the trigger is the real finding, and it is a fact about the stroke.
-
-    Raises then, reporting the *peak* speed rather than the last sample, since the
-    peak is what says whether the requested speed is achievable at all. Also raises
-    if the load never comes to rest after the brake closes - a brake that does not
-    stop the load is a failure, not something to wait on."""
+    Bounded by the stroke, not a clock: it ends at the trigger speed or on arrival,
+    and arriving short raises with the peak speed reached, since the peak says
+    whether the speed is achievable at all. Also raises if the load never comes to
+    rest. Publishes `brake_speed_m_s` and `stopping_distance_m`, in metres."""
     testbed: YdriveTestbed = test_case.testbed
 
     testbed.command.set_position(target)
@@ -536,16 +415,11 @@ def brake_from_speed(
 def release_brake_in_place(test_case: BaseYdriveTest) -> None:
     """Hand a stopped load back to the controller without moving it.
 
-    release_brake() arms the axis before powering the rail, which is safe only
-    while the position setpoint still matches where the axis is. After a brake
-    stop it does not: the last command was a move to the far end of the stroke,
-    and the load stopped wherever the brake caught it. Arming on that stale
-    setpoint would have the controller lunge for the old target the instant the
-    brake let go.
-
-    So the setpoint is parked at the current position first. Not a step: it is a
-    sub-action, and publishing itself as `current_step` would bury whichever step
-    called it."""
+    release_brake() arms before powering the rail, which is safe only while the
+    setpoint matches the axis. After a brake stop it does not - the last command was
+    the far end of the stroke - so arming would lunge for it. The setpoint is parked
+    at the current position first. Not a step: publishing itself as `current_step`
+    would bury whichever step called it."""
     testbed: YdriveTestbed = test_case.testbed
     held_at = testbed.get_pos_estimate()
     testbed.command.set_position(held_at)
@@ -557,16 +431,10 @@ def release_brake_in_place(test_case: BaseYdriveTest) -> None:
 def dwell_braked(test_case: BaseYdriveTest, dwell_s: float) -> None:
     """Hold the load on the brake for `dwell_s`, with the axis idle.
 
-    Held by the brake rather than by the controller because that is the state
-    that dissipates nothing: the brake is magnet-applied, so holding costs no
-    coil power, and an idled axis draws no motor current. A minute of the
-    controller holding position instead would heat the motor through the very
-    interval a thermal reading is supposed to be recovering over.
-
-    Not unwound in a `finally`. wait_for() raises on a fatal bound, a stop request
-    or a lost recorder, and on any of those the load should stay where the brake
-    has it - handing it back to a controller at the one moment the reason for
-    stopping is unknown is the wrong reflex, and teardown commands no motion."""
+    The brake is magnet-applied, so holding costs no coil power, and an idled axis
+    draws no current - nothing dissipates, which is what a thermal reading recovers
+    over. Not unwound in a `finally`: if wait_for() raises, the load should stay
+    where the brake has it."""
     engage_brake(test_case)
     test_case.wait_for(dwell_s)
     release_brake(test_case)
@@ -610,16 +478,11 @@ def move_to(
 def _await_axis_armed(test_case: BaseYdriveTest, armed: bool, timeout_s: float) -> None:
     """Block until `axis_is_armed` reads `armed`, or raise.
 
-    Requesting an axis state only writes `requested_state`; the ODrive acts on it
-    asynchronously and can decline - a latched error refuses CLOSED_LOOP_CONTROL.
-    So neither brake transition assumes its request took effect; both wait for the
-    axis to report it.
-
-    Paced by the telemetry stream, since each read blocks for the next frame, and
-    polls check_should_continue() so a fatal bound, a stop request or a lost
-    recorder is noticed here rather than
-    after the wait. The diagnostic on timeout comes from the testbed's
-    describe_errors(), so its values are all from one instant."""
+    Requesting an axis state only writes `requested_state`, and the ODrive can
+    decline it - a latched error refuses CLOSED_LOOP_CONTROL - so both brake
+    transitions wait for the axis to report it rather than assuming. Paced by the
+    telemetry stream, polling check_should_continue() throughout. The timeout
+    diagnostic comes from describe_errors(), so its values share one instant."""
     testbed: YdriveTestbed = test_case.testbed
     deadline: Stopwatch = Stopwatch(duration_s=timeout_s)
     while True:
@@ -637,22 +500,17 @@ def _await_axis_armed(test_case: BaseYdriveTest, armed: bool, timeout_s: float) 
 
 
 def engage_brake(test_case: BaseYdriveTest, arm_timeout_s: float = DEFAULT_ARM_TIMEOUT_S) -> None:
-    """Engage the brake, then idle the axis, confirming the axis is idle before
-    returning.
+    """Engage the brake, then idle the axis, confirming it idled.
 
-    The brake grabs first, so the load is held by the brake before the controller
-    lets go of it - the reverse order leaves the load held by nothing for the
-    brake's settle time. The axis is then idled, because a braked axis must not be
-    armed: the controller would hold position against a locked output, and any
+    The brake grabs first, so the load is held before the controller lets go; the
+    reverse leaves it held by nothing for the settle time. A braked axis must not be
+    armed - the controller would hold position against a locked output, and any
     position error becomes torque into a mechanical stop.
 
-    Raises if the axis does not report itself idle, which means the controller is
-    still driving against an engaged brake. The brake is holding by then, so
-    raising is safe.
-
-    The settle wait goes through test_case.wait_for(), which polls for a fatal
-    bound, a stop request and a lost recorder on every tick - a plain sleep would
-    be the one blind wait in a cycle that otherwise checks throughout."""
+    Raises if the axis does not idle, which means the controller is still driving
+    against an engaged brake; the brake is holding by then, so raising is safe. The
+    settle wait goes through wait_for(), which keeps polling rather than sleeping
+    blind."""
     testbed: YdriveTestbed = test_case.testbed
     testbed.power_brake_bus(False)
     test_case.wait_for(BRAKE_SETTLE_S)
@@ -662,22 +520,17 @@ def engage_brake(test_case: BaseYdriveTest, arm_timeout_s: float = DEFAULT_ARM_T
 
 
 def release_brake(test_case: BaseYdriveTest, arm_timeout_s: float = DEFAULT_ARM_TIMEOUT_S) -> None:
-    """Arm the axis, confirm it is actually armed, and only then release the brake
-    - the inverse of engage_brake().
+    """Arm the axis, confirm it armed, and only then release the brake - the inverse
+    of engage_brake().
 
-    The controller takes hold before the brake lets go, so the load is never
-    unheld. Arming against an engaged brake is safe as long as the position
-    setpoint still matches where the axis is, which it does when the last move left
-    `input_pos` at the position being dwelt at.
+    The controller takes hold before the brake lets go, so the load is never unheld.
+    Safe only while the position setpoint still matches the axis, which holds when
+    the last move left `input_pos` where the axis is dwelling - see
+    release_brake_in_place() for when it does not.
 
-    The confirmation is the point rather than a formality. Arming is asynchronous
-    and can be declined - a latched error is enough - so releasing the brake on the
-    strength of having *asked* for CLOSED_LOOP_CONTROL would drop the load onto a
-    controller that never took it. This raises with the axis state and the decoded
-    errors instead, leaving the brake engaged.
-
-    Returns only once the brake has had time to let go, so a move commanded
-    straight afterwards is not driven into it."""
+    The confirmation is the point: arming is asynchronous and can be declined, so
+    releasing on the strength of having asked would drop the load onto a controller
+    that never took it. Returns once the brake has had time to let go."""
     testbed: YdriveTestbed = test_case.testbed
     testbed.command.set_axis_state("CLOSED_LOOP_CONTROL")
     _await_axis_armed(test_case, armed=True, timeout_s=arm_timeout_s)
@@ -697,24 +550,15 @@ def cycle_position(
     arrival_timeout_s: float = DEFAULT_ARRIVAL_TIMEOUT_S,
     brake_during_dwell: bool = True,
 ) -> None:
-    """One low<->high cycle, with the brake holding each dwell and the axis idled
-    while it does.
+    """One low<->high cycle, the brake holding each dwell with the axis idled.
 
-    The brake is engaged only once the axis has arrived and settled - move_to()
-    blocks until both - and released before the next move is commanded. Engaging
-    mid-move would brake a moving axis; commanding a move before the brake let go
-    would drive the motor into a mechanical stop.
+    The brake engages only once move_to() reports arrived and settled, and releases
+    before the next move: engaging mid-move brakes a moving axis, and moving before
+    the brake lets go drives into it. Across every transition the load is held by
+    the controller, the brake, or both - never neither.
 
-    Across each transition the load is held by the controller, or the brake, or
-    both - never neither, and never by a controller pulling against an engaged
-    brake. engage_brake()/release_brake() are what enforce that.
-
-    An aborted dwell leaves the brake engaged and the axis idle rather than
-    unwinding, so whatever stopped the test stops it with the load held.
-
-    brake_during_dwell=False cycles without touching the brake or the axis state
-    at all, for a stand whose brake isn't wired to the supply, or to compare runs
-    with and without it."""
+    An aborted dwell leaves the brake engaged and the axis idle.
+    brake_during_dwell=False cycles without touching the brake or the axis state."""
 
     def dwell() -> None:
         if not brake_during_dwell:
@@ -778,11 +622,9 @@ def _apply_tuning_params(
 ) -> None:
     """Write the controller and motor configuration this stand runs under.
 
-    In RAM, every run: nothing here calls save_configuration(), so the board keeps
-    whatever is in its flash and a run cannot leave a stand configured differently
-    than it found it. What that costs is that these have to be set on every run -
-    which is the point, since a value inherited from a previous session is how a
-    stand ends up running under limits nobody chose."""
+    In RAM every run - nothing here calls save_configuration() - so a run cannot
+    leave a stand configured differently than it found it, at the cost of having to
+    set them every time."""
     testbed: YdriveTestbed = test_case.testbed
     # Hard ceiling before the soft limit that has to sit under it, so the pair is
     # never briefly inverted on a board whose previous soft limit was higher than

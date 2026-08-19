@@ -32,7 +32,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterator, Optional, Sequence
+from typing import TYPE_CHECKING, Dict, Iterator, Optional, Sequence
 
 if TYPE_CHECKING:
     from tools.operator_dashboard import OperatorDashboard
@@ -101,7 +101,10 @@ def _windowless_python() -> str:
 
 
 def spawn_operator_prompt(
-    test_id: str, message: str, fields: Sequence[str] = ()
+    test_id: str,
+    message: str,
+    fields: Sequence[str] = (),
+    choices: Optional[Dict[str, Sequence[str]]] = None,
 ) -> Optional[subprocess.Popen]:
     """Open a window asking the operator to do something, and return the process
     so the caller can close it once the wait is over however it ended.
@@ -119,6 +122,11 @@ def spawn_operator_prompt(
             [_windowless_python(), "-m", "tools.operator_prompt", "--test-id", test_id,
              "--message", message]
             + [arg for field in fields for arg in ("--field", field)]
+            + [
+                arg
+                for name, values in (choices or {}).items()
+                for arg in ("--choice", f"{name}={','.join(values)}")
+            ]
         )
     except OSError as exc:
         logger.warning("test %s: couldn't open the operator prompt window: %s", test_id, exc)
