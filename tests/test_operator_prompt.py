@@ -169,7 +169,7 @@ def _answer_with(case, answers):
 def test_the_answers_are_published_as_run_state(tmp_path, monkeypatch):
     """Published, so the engine merges them into every recorded row - a stored run
     then says which DUT it was and under what load without a separate note."""
-    from testcases.ydrive.teststeps.teststeps import RunDetail, await_operator_details
+    from testcases.ydrive.teststeps.teststeps import RunDetail, prompt_for_SN_ER_load
 
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
@@ -177,7 +177,7 @@ def test_the_answers_are_published_as_run_state(tmp_path, monkeypatch):
     monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
     _answer_with(case, {"DUT SN": "YD-014", "Load (lb)": "250"})
 
-    details = await_operator_details(case, FIELDS)
+    details = prompt_for_SN_ER_load(case, FIELDS)
 
     assert details == {"dut_serial_number": "YD-014", "load_lb": "250"}
     assert case.state["dut_serial_number"] == "YD-014"
@@ -188,7 +188,7 @@ def test_the_answers_are_published_as_run_state(tmp_path, monkeypatch):
 def test_the_prompt_labels_are_what_the_window_is_asked_for(tmp_path, monkeypatch):
     """The label a person reads and the channel it lands in are written as a pair,
     so renaming a prompt cannot rename a channel stored runs are keyed by."""
-    from testcases.ydrive.teststeps.teststeps import RunDetail, await_operator_details
+    from testcases.ydrive.teststeps.teststeps import RunDetail, prompt_for_SN_ER_load
 
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     asked = []
@@ -197,7 +197,7 @@ def test_the_prompt_labels_are_what_the_window_is_asked_for(tmp_path, monkeypatc
     monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
     _answer_with(case, {"DUT SN": "YD-014", "Load (lb)": "250"})
 
-    await_operator_details(case, FIELDS)
+    prompt_for_SN_ER_load(case, FIELDS)
 
     assert asked == ["DUT SN", "Load (lb)"]
 
@@ -206,7 +206,7 @@ def test_a_run_without_its_details_does_not_start(tmp_path, monkeypatch):
     """An operator can dismiss the window with the CLI acknowledgement, which
     answers nothing - and a run that cannot be attributed to a DUT is not worth the
     hours it takes."""
-    from testcases.ydrive.teststeps.teststeps import RunDetail, await_operator_details
+    from testcases.ydrive.teststeps.teststeps import RunDetail, prompt_for_SN_ER_load
 
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
@@ -215,14 +215,14 @@ def test_a_run_without_its_details_does_not_start(tmp_path, monkeypatch):
     _answer_with(case, None)  # a plain acknowledgement, no values
 
     with pytest.raises(RuntimeError, match="no answer for 'DUT SN'"):
-        await_operator_details(case, FIELDS)
+        prompt_for_SN_ER_load(case, FIELDS)
 
 
 def test_the_serial_is_picked_from_a_list_and_a_typo_is_refused(tmp_path, monkeypatch):
     """The window cannot produce anything but a listed value, but the CLI
     acknowledgement can - and a serial the record cannot match to a DUT is worse
     than no serial."""
-    from testcases.ydrive.teststeps.teststeps import await_operator_details
+    from testcases.ydrive.teststeps.teststeps import prompt_for_SN_ER_load
 
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     offered = {}
@@ -234,7 +234,7 @@ def test_the_serial_is_picked_from_a_list_and_a_typo_is_refused(tmp_path, monkey
     _answer_with(case, {"DUT SN": "YD-O14", "Load (lb)": "250"})  # letter O, not zero
 
     with pytest.raises(RuntimeError, match="is not one of the values"):
-        await_operator_details(case, FIELDS)
+        prompt_for_SN_ER_load(case, FIELDS)
 
     assert offered == {"DUT SN": ("YD-014", "YD-015")}, "the dropdown was not offered its values"
 

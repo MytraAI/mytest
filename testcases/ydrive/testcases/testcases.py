@@ -33,7 +33,7 @@ from ..teststeps.teststeps import (
     OVER_ENERGY_VELOCITY_LIMIT,
     RunDetail,
     await_operator,
-    await_operator_details,
+    prompt_for_SN_ER_load,
     brake_from_speed,
     cycle_position,
     dwell_braked,
@@ -170,7 +170,7 @@ class BrakeEnduranceTest(BaseYdriveTest):
         # Asked first, while nothing is energized: it needs a person and does not
         # need the stand, and a run nobody can attribute to a DUT is not worth the
         # hours it takes.
-        self.run_details = await_operator_details(self, self.RUN_DETAIL_FIELDS)
+        self.run_details = prompt_for_SN_ER_load(self, self.RUN_DETAIL_FIELDS)
 
         prepare_for_operation(self)
         # The trigger speed is above what the normal tuning allows, so the

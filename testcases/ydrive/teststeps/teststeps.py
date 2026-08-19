@@ -4,9 +4,9 @@ prepare_for_operation: cold stand to ready-to-arm - bus up, faults
 cleared, control and input mode set, tuning applied. Leaves the axis
 idle behind an engaged brake.
 
-await_operator / await_operator_details: wait for a person, the second
-collecting free text or a choice. Both keep polling for a fatal bound, a
-stop request and a lost recorder while they wait.
+await_operator / prompt_for_SN_ER_load: wait for a person, the second
+collecting the run's serial, ticket and load. Both keep polling for a
+fatal bound, a stop request and a lost recorder while they wait.
 
 brake_from_speed: runs up to a trigger speed, then idles the motor and
 drops the brake rail so the brake stops a moving load. Records the speed
@@ -272,7 +272,7 @@ class RunDetail(NamedTuple):
 
 
 @step
-def await_operator_details(
+def prompt_for_SN_ER_load(
     test_case: BaseYdriveTest, fields: Sequence[RunDetail]
 ) -> Dict[str, str]:
     """Ask the operator for the details that identify this run, and publish them.
