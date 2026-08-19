@@ -55,6 +55,7 @@ from ..rulebooks.ydrive_rulebook import (
 from .base_ydrive_test import BaseYdriveTest
 from ..teststeps.teststeps import (
     OVER_ENERGY_VELOCITY_LIMIT,
+    RunDetail,
     await_operator,
     await_operator_details,
     brake_from_speed,
@@ -162,16 +163,25 @@ class BrakeEnduranceTest(BaseYdriveTest):
     attribute rather than passed inline because the return move's timeout is
     derived from it - see return_timeout_s."""
 
-    RUN_DETAIL_FIELDS = (
-        ("DUT SN", "dut_serial_number"),
-        ("ER Ticket", "er_ticket"),
-        ("Load (lb)", "load_lb"),
-    )
-    """What the operator is asked for before the run starts, as (prompt, channel).
+    DUT_SERIAL_NUMBERS = ("YDRIVE1", "YDRIVE2", "ZDRIVE2IN")
+    """Every DUT this test can be run on, and the only answers its serial prompt
+    accepts.
 
-    Written as pairs rather than deriving one from the other, so rewording a prompt
-    cannot rename a channel that stored runs are already keyed by. Free text: a load
-    is whatever is stamped on the weights, and a ticket is whatever the tracker
+    A list rather than free text because a serial is what a stored run is matched to
+    a DUT by, and a typo in one is a run attributed to nothing - unrecoverably, since
+    nobody can tell later whether YDRIVE1 meant YDRIVE1. Short enough to pick from
+    today; when it stops being, or when a second test needs the same list, it wants a
+    home outside this class rather than a copy in the next one."""
+
+    RUN_DETAIL_FIELDS = (
+        RunDetail("DUT SN", "dut_serial_number", DUT_SERIAL_NUMBERS),
+        RunDetail("ER Ticket", "er_ticket"),
+        RunDetail("Load (lb)", "load_lb"),
+    )
+    """What the operator is asked for before the run starts.
+
+    The serial is picked from a list; the ticket and the load are free text, because a
+    load is whatever is stamped on the weights and a ticket is whatever the tracker
     calls it."""
 
     POST_BRAKE_DWELL_S = 5.0

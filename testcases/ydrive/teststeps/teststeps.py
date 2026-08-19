@@ -59,6 +59,7 @@ import json
 
 import logging
 import time
+from typing import Dict, NamedTuple, Optional, Sequence, Tuple
 
 from hardware.odrive import odrive_errors
 from testbeds.ydrive_testbed.ydrive_testbed import (
@@ -321,7 +322,12 @@ def prepare_for_operation(
     _apply_tuning_params(test_case)
 
 
-def _await_ack(test_case: BaseYdriveTest, instruction: str, fields: Sequence[str] = ()) -> str:
+def _await_ack(
+    test_case: BaseYdriveTest,
+    instruction: str,
+    fields: Sequence[str] = (),
+    choices: Optional[Dict[str, Sequence[str]]] = None,
+) -> str:
     """Publish an instruction, wait for the operator's marker, and return what it
     says - empty for a plain acknowledgement, JSON for a prompt that asked for
     values.
@@ -344,7 +350,7 @@ def _await_ack(test_case: BaseYdriveTest, instruction: str, fields: Sequence[str
     logger.warning("test %s: WAITING FOR OPERATOR - %s", test_case.test_id, instruction)
     logger.warning("test %s: click the window, or `python -m tools.operator_ack`", test_case.test_id)
 
-    window = spawn_operator_prompt(test_case.test_id, instruction, fields)
+    window = spawn_operator_prompt(test_case.test_id, instruction, fields, choices)
     clock: Stopwatch = Stopwatch()
     try:
         while True:
@@ -367,15 +373,30 @@ def _await_ack(test_case: BaseYdriveTest, instruction: str, fields: Sequence[str
             window.terminate()
 
 
+class RunDetail(NamedTuple):
+    """One thing the operator is asked for before a run.
+
+    `label` is what a person reads, `channel` is where the answer is stored, and
+    they are written separately so rewording a prompt cannot rename a channel that
+    stored runs are keyed by. `choices`, when given, makes the prompt a dropdown and
+    the answer is checked against it - so a serial in the record is one of a known
+    set rather than a typo of one, however it was answered."""
+
+    label: str
+    channel: str
+    choices: Tuple[str, ...] = ()
+
+
 @step
 def await_operator_details(
-    test_case: BaseYdriveTest, fields: Sequence[Tuple[str, str]]
+    test_case: BaseYdriveTest, fields: Sequence[RunDetail]
 ) -> Dict[str, str]:
     """Ask the operator for the details that identify this run, and publish them.
 
-    `fields` pairs the label a person reads with the channel it is stored under -
-    written out rather than derived from the label, so renaming a prompt cannot
-    rename a channel in every stored run.
+    A field with `choices` is offered as a dropdown, and its answer is rejected if
+    it is not one of them - the window cannot produce anything else, but
+    `tools.operator_ack --answer` can, and a misspelled serial is a run attributed
+    to nothing.
 
     Published as run state, which means the engine merges them into every recorded
     row: a stored run then says which DUT it was, under what load, against which
@@ -385,24 +406,35 @@ def await_operator_details(
 
     Asked before anything is energized, because it is the one part of a run that
     needs a person and does not need the stand."""
-    answered = _await_ack(test_case, "enter this run's details", [label for label, _ in fields])
+    answered = _await_ack(
+        test_case,
+        "enter this run's details",
+        [field.label for field in fields],
+        {field.label: field.choices for field in fields if field.choices},
+    )
     try:
         answers = json.loads(answered) if answered else {}
     except ValueError:
         answers = {}
 
     details: Dict[str, str] = {}
-    for label, channel in fields:
-        value = answers.get(label)
+    for field in fields:
+        value = answers.get(field.label)
         if not value:
             raise RuntimeError(
-                f"test {test_case.test_id}: no answer for {label!r} - a run that cannot be "
+                f"test {test_case.test_id}: no answer for {field.label!r} - a run that cannot be "
                 "attributed to a DUT is not worth the hours it takes. Acknowledge with the "
                 "window, or `python -m tools.operator_ack --answer "
-                f"'{label}=...'` for a stand with no display"
+                f"'{field.label}=...'` for a stand with no display"
             )
-        details[channel] = value
-        test_case.set_state(channel, value)
+        if field.choices and value not in field.choices:
+            raise RuntimeError(
+                f"test {test_case.test_id}: {value!r} is not one of the values {field.label!r} "
+                f"accepts ({', '.join(field.choices)}). A serial the record cannot match to a DUT "
+                "is worse than no serial, so this is refused rather than stored"
+            )
+        details[field.channel] = value
+        test_case.set_state(field.channel, value)
     logger.info("test %s: run details %s", test_case.test_id, details)
     return details
 
