@@ -1,45 +1,21 @@
 """Concrete ydrive test cases.
 
-EnduranceCycleTest: cycles ydrive indefinitely between two position
-setpoints (no fixed duration or cycle count - runs until a fatal
-Rulebook violation stops it, or the process is stopped externally),
-tracking cumulative distance traveled as total_distance_m state.
+EnduranceCycleTest: cycles indefinitely between two positions, tracking
+cumulative distance as total_distance_m. Distance is computed from the
+setpoints via METERS_PER_TURN, not measured, so it assumes each cycle
+reaches its target. Teardown moves nothing: it stops where the last cycle
+left it, and main_execution re-establishes its own reference next run.
 
-Moves to LOW_POSITION once before cycling begins, so distance
-accounting starts from a known reference point. Distance itself is
-computed analytically from LOW_POSITION/HIGH_POSITION via
-METERS_PER_TURN, not measured telemetry - assumes each cycle_position()
-call actually reaches its target.
+BrakeEnduranceTest: stops a moving load with the brake over and over -
+run 110 -> 0, brake at speed, hold, return, rest - recording the speed it
+engaged at and how far the load ended up.
 
-Teardown does not move the axis. It stops where the last cycle left it,
-and the base class's teardown engages the brake, idles the axis and
-drops the bus. Parking at a particular position would mean commanding
-motion during teardown - which is when the axis is least trustworthy,
-since teardown also runs after a fatal violation or a failure part-way
-through a brake transition. Nothing needs it: main_execution moves to
-LOW_POSITION before it starts cycling, so the next run establishes its
-own reference wherever this one stopped.
-
-ManualTest: no test sequence of its own. Starts live Rulebook
-evaluation, then blocks indefinitely via wait_for(float("inf")) -
-Stopwatch never expires on its own, so the only way this returns is
-check_fatal_violation() raising on a fatal bound, at the same 10ms
-polling cadence every other step already relies on. This keeps the
-ODrive driver process and its command/telemetry endpoints alive for as
-long as an operator (e.g. via a GUI) needs them, for manually viewing
-and commanding hardware directly. Deliberately leaves the axis in
-IDLE, unconfigured - control mode, tuning, and arming are the
-operator's own choice to make in the moment, not this test's to assume.
-It never calls prepare_for_operation(), so the 48 V motor bus stays off and
-nothing about opening this test energizes the stand: no bus, no arming,
-no brake change. Powering a rail is the operator's to decide, the same
-way control mode and arming already are - the supply's own command
-endpoint can be added in tools/manual_gui.py alongside the ODrive's,
-which is how they energize it and release the brake by hand.
-post_test_teardown() is inherited unchanged from BaseYdriveTest for the
-same reason: it has no idea where the operator left the axis, so it
-commands no motion.
-"""
+ManualTest: no sequence of its own. Starts live evaluation and blocks on
+wait_for(inf), so only a fatal bound ends it, keeping the drivers and
+their endpoints alive for an operator (e.g. tools/manual_gui.py). Leaves
+the axis IDLE and unconfigured and the bus off: control mode, tuning,
+arming and powering a rail are the operator's to choose, and teardown
+commands no motion because it cannot know where they left the axis."""
 from __future__ import annotations
 
 import logging
@@ -119,108 +95,44 @@ class BrakeEnduranceTest(BaseYdriveTest):
     TEST_NAME = BRAKE_ENDURANCE_TEST_NAME
 
     START_POSITION = 110.0
-    """Where each braking run begins. The axis is driven here under position
-    control between cycles - the only part of a cycle the controller decides."""
+    """Where each braking run begins. The axis is driven here under position control
+    between cycles - the only part of a cycle the controller decides."""
 
     BRAKE_TARGET_POSITION = 0.0
-    """Where each braking run is aimed. The axis never arrives: the brake stops it
-    somewhere short, and this only has to be far enough away that the load reaches
-    the trigger speed first.
-
-    Travel is 110 -> 0, so the overshoot after a brake event runs *toward* 0 and
-    the stroke below it is the clearance a late stop eats into. A stop at the 2 m
-    limit is 23.8 turns, so a run-up that reaches trigger speed near 24 turns from
-    0 has nothing left - which is what stopping_distance_bound stops the run
-    over, after the fact rather than before it."""
+    """Where each braking run is aimed; the brake stops the axis short of it. Travel is
+    110 -> 0, so a late stop's overshoot eats into the clearance below 0."""
 
     TRIGGER_SPEED_M_S = 1.75
-    """Load speed at which the motor is idled and the brake closes. In m/s
-    because that is the number the test is specified in; converted through the
-    stand's own METERS_PER_TURN, since the controller works in turns.
-
-    IT IS A FLOOR, NOT THE SPEED THE BRAKE ACTUALLY SEES, and which of the
-    two you get depends on the load. Unloaded, the axis goes from rest to the
-    velocity limit inside one telemetry frame (measured: 0 -> 21.3 turns/s in
-    77 ms at 12.6 Hz), so the first sample is already past this trigger and the
-    brake engages at whatever the limit allows - 52 events asked for 0.5 m/s and
-    engaged at 1.61-1.79 m/s. Loaded, the axis climbs for seconds and this trigger
-    is what it crosses, so the engagement speed is close to it.
-
-    Set below the loaded stand's measured peak rather than at the round number
-    above it: a trigger the axis cannot quite reach fires never, and the run ends
-    having driven the whole stroke instead. Making the requested speed the one that
-    always happens means making it the cruise speed - see AI/Mytest.md.
-
-    A cycle is: run down toward 0, brake at this speed, hold the stopped load on
-    the brake, hand it back to the controller, return to START_POSITION, and rest
-    there. Both rests and the return are part of the cycle rather than something
-    teardown does - teardown commands no motion at all here, inherited
-    unchanged from BaseYdriveTest, so a run that ends leaves the load wherever
-    its last complete action put it."""
+    """A floor, not the speed the brake sees - unloaded, the axis crosses it within one
+    frame and engages at the velocity limit. Set below the loaded stand's peak."""
 
     VELOCITY_LIMIT = OVER_ENERGY_VELOCITY_LIMIT
-    """What this test tunes the controller to before it moves anything. Held as an
-    attribute rather than passed inline because the return move's timeout is
-    derived from it - see return_timeout_s."""
+    """What this test tunes the controller to before anything moves. An attribute
+    because the move timeout is checked against it."""
 
     DUT_SERIAL_NUMBERS = ("YDRIVE1", "YDRIVE2", "ZDRIVE2IN")
-    """Every DUT this test can be run on, and the only answers its serial prompt
-    accepts.
-
-    A list rather than free text because a serial is what a stored run is matched to
-    a DUT by, and a typo in one is a run attributed to nothing - unrecoverably, since
-    nobody can tell later whether YDRIVE1 meant YDRIVE1. Short enough to pick from
-    today; when it stops being, or when a second test needs the same list, it wants a
-    home outside this class rather than a copy in the next one."""
+    """Every DUT this test can run on, and the only answers its serial prompt accepts:
+    a stored run is matched to a DUT by this, and a typo attributes it to nothing."""
 
     RUN_DETAIL_FIELDS = (
         RunDetail("DUT SN", "dut_serial_number", DUT_SERIAL_NUMBERS),
         RunDetail("ER Ticket", "er_ticket"),
         RunDetail("Load (lb)", "load_lb"),
     )
-    """What the operator is asked for before the run starts.
-
-    The serial is picked from a list; the ticket and the load are free text, because a
-    load is whatever is stamped on the weights and a ticket is whatever the tracker
-    calls it."""
+    """What the operator is asked for before the run starts. The serial is picked from a
+    list; the ticket and the load are free text."""
 
     POST_BRAKE_DWELL_S = 5.0
-    """How long the brake holds the load it has just stopped, before its stopping
-    distance is taken and the controller takes it back.
-
-    Part of the brake event rather than something after it: the distance is
-    measured at the end of this window, so a brake that stops the load and then
-    creeps is reported as not having stopped it in that distance. The window is
-    also when a brake is hottest and least likely to hold, with nothing driving, so
-    movement across it is slip rather than a controller fighting something."""
+    """How long the brake holds what it stopped before the distance is taken, so creep
+    counts against that distance. Nothing drives, so movement across it is slip."""
 
     DWELL_S = 600.0
-    """How long each cycle rests at the start line before the next run-up, held on
-    the brake with the axis idle.
-
-    Nothing dissipates during it - a magnet-applied brake needs no power to hold,
-    and an idled axis draws no current - so it is what a thermal reading recovers
-    over, and it gives the brake a static-hold duty cycle alongside the dynamic
-    stops.
-
-    Ten minutes makes it the whole cycle: about six brake events an hour, each from
-    a brake that has had time to return to ambient, so what varies between events is
-    wear rather than how hot the last stop left it. The telemetry rate is unchanged
-    either way - a run records the same frames per hour whatever the dwell, so a
-    longer one buys repeatability at the cost of events per gigabyte."""
+    """How long each cycle rests at the start line, on the brake with the axis idle -
+    nothing dissipates. Ten minutes is ~6 events an hour, each from a cold brake."""
 
     MOVE_TIMEOUT_S = 45.0
-    """How long a move to the start line may take.
-
-    Flat rather than derived from the velocity limit, and generous on purpose: the
-    stroke is 110 turns, which is 5 s at this test's raised limit and 18.5 s at a
-    limit set to cruise at 0.5 m/s, so one number covers both and lowering the
-    limit cannot break the return. move_to's own 10 s default fits neither, which
-    is why this is passed explicitly.
-
-    Still bounded, because a move that will not finish has to be caught: 45 s is
-    roughly nine times the traverse it normally takes, and a stalled axis reports
-    within it rather than being waited out for the length of a dwell."""
+    """How long a move to the start line may take: 110 turns is 5 s at this ceiling and
+    18.5 s at a 0.5 m/s cruise. Bounded, so a stalled axis reports inside a dwell."""
 
     def __init__(
         self,
@@ -229,10 +141,8 @@ class BrakeEnduranceTest(BaseYdriveTest):
         require_engine: bool = True,
         trigger_speed_m_s: Optional[float] = None,
     ):
-        """trigger_speed_m_s overrides TRIGGER_SPEED_M_S, purely so a slower
-        shakedown run can be done without editing the class - the same reason
-        CycleDutPositionTest takes a shortened duration. The class default is the
-        real test's speed."""
+        """trigger_speed_m_s overrides TRIGGER_SPEED_M_S, so a slower shakedown needs no
+        edit to the class - as CycleDutPositionTest takes a shortened duration."""
         super().__init__(test_id, use_mock, require_engine=require_engine)
         self.brake_cycles = 0
         self.run_details: dict = {}
@@ -248,8 +158,8 @@ class BrakeEnduranceTest(BaseYdriveTest):
         """What this run was, for the verdict.
 
         The same answers the operator typed, in the one record a reporting database
-        ingests - the state channels carry them per frame, which is right for
-        reading a run back, and wrong for finding every run against a ticket."""
+        ingests - the state channels carry them per frame, which is right for reading
+        a run back and wrong for finding every run against a ticket."""
         return {
             **self.run_details,
             "brake_cycles": self.brake_cycles,
