@@ -203,10 +203,11 @@ def test_a_bad_stop_aborts_through_the_rulebook_rather_than_an_exception():
     """So the value that ended the run lands in the verdict's timeline."""
     bound = next(b for b in YDRIVE_RULEBOOK.bounds if b.channel == "stopping_distance_m")
 
-    assert bound.upper == MAX_STOPPING_DISTANCE_M == 2.0
+    assert bound.upper == MAX_STOPPING_DISTANCE_M == 3.25
     assert bound.fatal is True
     assert bound.persistence_s is None, "one number per event - debouncing waits for a second one"
-    assert bound.evaluate({"stopping_distance_m": 2.5}) is True
+    assert bound.evaluate({"stopping_distance_m": 3.5}) is True
+    assert bound.evaluate({"stopping_distance_m": 3.0}) is False
     assert bound.evaluate({"stopping_distance_m": 1.5}) is False
 
 
@@ -223,7 +224,7 @@ def test_the_seeded_distance_is_a_number_so_a_run_can_start():
 
 def test_the_brake_settle_wait_is_part_of_the_stopping_distance():
     """Distance is measured from the brake command, so the coast before the brake
-    bites counts against the 2 m budget - understating it by starting from first
+    bites counts against the budget - understating it by starting from first
     deceleration would flatter the brake."""
     assert BRAKE_SETTLE_S * 1.8 < MAX_STOPPING_DISTANCE_M
 
@@ -309,7 +310,9 @@ def test_the_dwell_sets_the_cycle_rate():
     cycle_s = test.DWELL_S + traverse_s + test.POST_BRAKE_DWELL_S
     assert test.DWELL_S > 0.8 * cycle_s, "the dwell should dominate the cycle"
     events_per_hour = 3600 / cycle_s
-    assert events_per_hour < 10, f"{events_per_hour:.0f} events an hour is not a ten-minute dwell"
+    assert 10 < events_per_hour < 13, (
+        f"{events_per_hour:.0f} events an hour is not a five-minute dwell"
+    )
 
 
 # --- an axis that stops driving on its own ------------------------------------

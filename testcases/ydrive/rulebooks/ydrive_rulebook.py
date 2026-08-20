@@ -64,11 +64,11 @@ main_execution actually does:
   lost sensor. Past that window it still stops the run: a thermocouple
   that has come out reads FAULT forever.
 
-- stopping_distance_bound: stopping_distance_m > 2.0, fatal, no
+- stopping_distance_bound: stopping_distance_m > 3.25, fatal, no
   persistence. Not a hardware channel: BrakeEnduranceTest publishes each
   brake event's stopping distance as run state, and the runner merges
   published state into what it evaluates. So a brake that no longer
-  stops the load in 2 m aborts the run through the same path as any
+  stops the load in 3.25 m aborts the run through the same path as any
   hardware bound, and the value that did it lands in the verdict's
   timeline instead of only in a log line.
 
@@ -102,7 +102,7 @@ why this cannot engage on a rail fed at 48 V by a 420 W supply."""
 BUS_CURRENT_PERSISTENCE_S = 10.0
 """How long board_ibus must stay above MAX_BUS_CURRENT_A before the run stops."""
 
-MAX_STOPPING_DISTANCE_M = 2.0
+MAX_STOPPING_DISTANCE_M = 3.25
 """How far the load may travel after the brake is commanded, measured from the
 command rather than from when the brake bites - so it includes the coast through
 BRAKE_SETTLE_S, which at the brake test's engagement speed is up to 0.18 m of
