@@ -4,7 +4,7 @@ the line protocol and its failure modes.
 
 There is deliberately no mock backend. As with the CPX400DP, this driver's risk
 is not wrong device paths but wrong *response parsing and message building* -
-57 queries batched into one message, three status registers decoded bit by bit -
+60 queries batched into one message, three status registers decoded bit by bit -
 and a HardwareBackend-level mock would replace exactly the code most likely to
 be wrong. Tests substitute a fake *transport* instead, so the real parsing runs
 against replies recorded from the instrument (tests/test_n6974a.py).
@@ -27,11 +27,14 @@ is. The framework never assumes a supply's output should be on because it
 connected, and equally does not assume it may de-energize something a person
 deliberately energized.
 
-EVERY DECLARED QUERY IS PROBED ONCE, AT CONNECT. A command this unit does not
-implement is answered with silence and discards the whole message it was part
-of, so a single wrong mnemonic inside the frame would cost a read timeout and a
-link resynchronisation on every frame for the entire run. Probed individually
-at connect it is instead a setup-time error naming the channel.
+EVERY READABLE QUERY IS PROBED ONCE, AT CONNECT - all 136, not just the 60 a
+frame uses. A command this unit does not implement is answered with silence and
+discards the whole message it was part of, so a single wrong mnemonic inside the
+frame would cost a read timeout and a link resynchronisation on every frame for
+the entire run, and a wrong one among the readback-only queries would do the
+same inside a write and be reported against a command that actually succeeded.
+Probed individually at connect it is instead a setup-time error naming the
+channel, for about a tenth of a second.
 
 EVERY WRITE IS CHECKED, AND ITS READBACK IS A SECOND MESSAGE. A command travels
 with its `SYSTem:ERRor?` check in one message, so the error cannot belong to
@@ -170,7 +173,13 @@ The lever that actually moves the frame rate is `set_nplc`: the acquisition is
 NPLC power line cycles long, so 0.1 PLC gives a ~4 ms frame and ~90 Hz at the
 cost of the line-frequency noise rejection the 1 PLC default buys. That is a
 test-engineering decision rather than a driver one, which is why it is an action
-and not a constructor argument."""
+and not a constructor argument.
+
+On Windows expect a coarser and lumpier period than the ~19 Hz measured on
+macOS: the default system timer granularity is about 15.6 ms, so a 20 ms sleep
+lands somewhere between 15 and 31 ms. Nothing breaks - the frame carries its own
+`t` and a consumer should read it rather than assume a period - but a recorded
+run from a Windows stand will not have the same cadence as one from a Mac."""
 
 EXPECTED_MODEL = "N6974A"
 """Checked against the model field of `*IDN?` at connect. The N6900/N7900 family
@@ -687,8 +696,13 @@ for _register in ("operation", "questionable", "questionable2"):
     _VALUE_COMMANDS[f"set_{_register}_ntr"] = (f"STAT:{_scpi}:NTR {{value}}", _register_mask, (f"{_register}_ntr",))
 _QUERY_ACTIONS["read_operation_enable"] = _QUERIES["operation_enable"]
 _QUERY_ACTIONS["read_questionable_enable"] = _QUERIES["questionable_enable"]
+_QUERY_ACTIONS["read_questionable2_enable"] = _QUERIES["questionable2_enable"]
 _QUERY_ACTIONS["read_operation_ptr"] = _QUERIES["operation_ptr"]
 _QUERY_ACTIONS["read_questionable_ptr"] = _QUERIES["questionable_ptr"]
+_QUERY_ACTIONS["read_questionable2_ptr"] = _QUERIES["questionable2_ptr"]
+_QUERY_ACTIONS["read_operation_ntr"] = _QUERIES["operation_ntr"]
+_QUERY_ACTIONS["read_questionable_ntr"] = _QUERIES["questionable_ntr"]
+_QUERY_ACTIONS["read_questionable2_ntr"] = _QUERIES["questionable2_ntr"]
 _BARE_COMMANDS["preset_status"] = ("STAT:PRES", ("operation_ptr", "questionable_ptr"))
 for _n in (1, 2):
     _VALUE_COMMANDS[f"set_operation_user_source_{_n}"] = (
@@ -722,7 +736,6 @@ _VALUE_COMMANDS["set_date"] = ("SYST:DATE {value}", _as_str, ())
 _VALUE_COMMANDS["set_time"] = ("SYST:TIME {value}", _as_str, ())
 _QUERY_ACTIONS["read_date"] = ("SYST:DATE?", _as_str)
 _QUERY_ACTIONS["read_time"] = ("SYST:TIME?", _as_str)
-_BARE_COMMANDS["reboot"] = ("SYST:REB", ())
 
 # IEEE-488 common commands
 _BARE_COMMANDS["clear_status"] = ("*CLS", ())
@@ -746,6 +759,9 @@ _DRIVER_ACTIONS = (
     "clear_clamped_latch",
     "read_ratings",
     "drain_errors",
+    # Not verifiable like every other write: it takes the link with it, so it
+    # cannot be followed by an error check in the same message.
+    "reboot",
     # Two queries rather than one: which quantity a comparator watches decides
     # which of its five level registers is the one in use, so the function is
     # read first and the matching level second.
@@ -801,7 +817,11 @@ def _validate_channel_coverage() -> None:
 
     overlapping = (set(_VALUE_COMMANDS) & set(_BARE_COMMANDS)) | (set(_VALUE_COMMANDS) & set(_QUERY_ACTIONS))
     overlapping |= set(_BARE_COMMANDS) & set(_QUERY_ACTIONS)
-    overlapping |= implemented & set(_DRIVER_ACTIONS) - set(_DRIVER_ACTIONS)
+    # A driver action that is ALSO in an instrument table would be silently
+    # shadowed by execute()'s driver-action branch. Compared against the
+    # instrument tables specifically, since `implemented` already contains the
+    # driver actions and would make this vacuous.
+    overlapping |= (set(_VALUE_COMMANDS) | set(_BARE_COMMANDS) | set(_QUERY_ACTIONS)) & set(_DRIVER_ACTIONS)
     if overlapping:
         raise AssertionError(f"actions appear in more than one command table: {sorted(overlapping)}")
 
@@ -886,8 +906,13 @@ class N6974aBackend(HardwareBackend):
             logger.debug("already connected to %s, ignoring redundant connect", self._transport.address)
             return
 
-        self._teardown_requested = False
+        # Cleared only once the socket is actually open. Clearing it first would
+        # leave the telemetry loop reading "the link is closed and this driver
+        # did not close it" for the whole ~400 ms handshake, which is 20 frames -
+        # enough to hit MAX_CONSECUTIVE_FRAME_FAILURES and take the process down
+        # on a reconnect that was going to succeed.
         await self._transport.open()
+        self._teardown_requested = False
         try:
             await self._confirm_data_format()
             await self._confirm_identity()
@@ -907,7 +932,13 @@ class N6974aBackend(HardwareBackend):
             await self._read_limits()
             await self._verify_dissipators()
             await self._verify_declared_channels_exist()
-            await self._log_adopted_state(await self._read_frame_in_transaction())
+            # Under the lock, as that method requires: on a reconnect the
+            # telemetry loop is already running and starts locking for its own
+            # frames the moment the socket is open, so an unlocked compound
+            # message here would put two outstanding messages on one link.
+            async with self._transport.transaction():
+                first_frame = await self._read_frame_in_transaction()
+            await self._log_adopted_state(first_frame)
         except Exception:
             # Connect failed partway. Leave no socket behind holding one of the
             # instrument's six connection slots against the next attempt.
@@ -1024,7 +1055,7 @@ class N6974aBackend(HardwareBackend):
         )
 
     async def _verify_declared_channels_exist(self) -> None:
-        """Issue every declared query once, individually, and name the ones that
+        """Issue every readable query once, individually, and name the ones that
         do not answer.
 
         Individually is the whole point. A command this unit does not implement
@@ -1034,14 +1065,27 @@ class N6974aBackend(HardwareBackend):
         while looking like nothing worse than a slow instrument. Probed one at a
         time it is a setup-time error naming the channel and the mnemonic.
 
+        EVERY readable query, not only the ones a frame uses. The frame's 60 are
+        the ones that would break a run outright, but the rest - comparator
+        levels, digital pin functions and polarities, signal expressions, the
+        status enable/PTR/NTR registers, trigger sources - are read back after
+        the writes that change them. An absent one there would appear mid-run as
+        a five-second stall and a reopened link inside `_write_checked`, reported
+        as a failed write even though the write itself took effect. Probing all
+        of them costs about a tenth of a second, once.
+
         The error queue is read after each probe, so a channel that fails can be
         reported with the instrument's own explanation - which distinguishes an
         uninstalled option (`+302`) from a command this model never had
         (`+310`) from a typo (`-113`).
 
-        Read-only by construction: every probe is a query, never a write."""
+        Read-only by construction: every probe is a query, never a write. The
+        query-only *actions* are deliberately not probed: several are MEASure
+        acquisitions costing 21 ms each, and `*TST?` runs a 5 s self-test, so
+        sweeping them would add seconds to every connect to check commands that
+        no telemetry frame or readback depends on."""
         missing: List[Tuple[str, str, str]] = []
-        for channel in _FRAME_CHANNELS:
+        for channel in sorted(_QUERIES):
             query = _QUERIES[channel][0]
             try:
                 await self._transport.query(query)
@@ -1057,11 +1101,12 @@ class N6974aBackend(HardwareBackend):
 
         if not missing:
             logger.info(
-                "verified all %d declared telemetry channels answer on this instrument", len(_FRAME_CHANNELS)
+                "verified all %d readable channels answer on this instrument (%d of them in every "
+                "frame, the rest read back after a write)", len(_QUERIES), len(_FRAME_CHANNELS),
             )
             return
 
-        if len(missing) == len(_FRAME_CHANNELS):
+        if len(missing) == len(_QUERIES):
             raise HardwareError(
                 f"no declared channel answered on {self._transport.address} - the link is "
                 "unresponsive rather than the channels being absent"
@@ -1282,11 +1327,24 @@ class N6974aBackend(HardwareBackend):
                 raise
             except (TypeError, ValueError) as exc:
                 raise HardwareError(f"action {action!r} got an unusable value {params['value']!r}") from exc
-            if action == "set_priority_mode":
-                await self._refuse_priority_change_while_energized(value)
             value = self._clamp(action, value)
             command = template.format(value=value)
-            applied = await self._write_checked(command, readback)
+            if action == "set_priority_mode":
+                # Guard and write under one lock. Read separately, the output
+                # could be enabled between the check and the switch - by another
+                # command, the front panel, or the second socket client this
+                # driver explicitly assumes may act - which is precisely the
+                # hazard the guard exists to prevent.
+                async with self._transport.transaction():
+                    if _as_bool(await self._transport.query_in_transaction("OUTP?")):
+                        raise HardwareError(
+                            f"refusing to set the priority mode to {value} while the output is on: "
+                            "the instrument would switch the output off and revert every output "
+                            "setting to its reset value. Disable the output first"
+                        )
+                    applied = await self._write_checked_in_transaction(command, readback)
+            else:
+                applied = await self._write_checked(command, readback)
             self._warn_if_readback_disagrees(action, command, value, applied)
             if action == "recall_state":
                 self._check_recalled_setpoints(applied)
@@ -1295,7 +1353,9 @@ class N6974aBackend(HardwareBackend):
         raise HardwareError(f"unknown action: {action}")
 
     async def _execute_driver_action(self, action: str) -> Any:
-        """The three actions that are not instrument commands."""
+        """The actions that are not a single instrument command: the two that
+        touch driver-side state, the two that need more than one query, and the
+        one write that cannot be verified."""
         if action == "clear_clamped_latch":
             previous = {
                 quantity: {"clamped": self._clamped[quantity], "request": self._clamped_request[quantity]}
@@ -1312,6 +1372,8 @@ class N6974aBackend(HardwareBackend):
             }
         if action == "drain_errors":
             return await self._drain_errors("on request")
+        if action == "reboot":
+            return await self._reboot()
         if action.startswith("read_threshold_level_"):
             comparator = int(action.rsplit("_", 1)[1])
             # Both queries under one transaction: the function decides which
@@ -1331,20 +1393,35 @@ class N6974aBackend(HardwareBackend):
             return {"function": function, "level": level}
         raise HardwareError(f"unknown action: {action}")
 
-    async def _refuse_priority_change_while_energized(self, value: str) -> None:
-        """Refuse a priority-mode change while the output is on.
+    async def _reboot(self) -> Dict[str, Any]:
+        """Reboot the instrument and put this driver into teardown.
 
-        Switching mode turns the output off and reverts every output setting to
-        its reset value, so on an energized supply it drops the load's rail and
-        loses the configuration that was driving it in one step. The instrument
-        allows it; a test asking for it while energized is far more likely to
-        have meant something else."""
-        if _as_bool(await self._transport.query("OUTP?")):
-            raise HardwareError(
-                f"refusing to set the priority mode to {value} while the output is on: the "
-                "instrument would switch the output off and revert every output setting to its "
-                "reset value. Disable the output first"
-            )
+        Every other write travels with a `SYSTem:ERRor?` check, which needs a
+        reply. This one cannot have it: the instrument drops the link as it
+        restarts, so the check would stall for the full read timeout, be reported
+        as a failed command although the reboot happened, and then leave the
+        transport trying and failing to reopen against a unit that needs ~30 s to
+        come back - three frames later the telemetry task raises and the process
+        exits.
+
+        So it is sent unverified and the link is closed deliberately, which puts
+        this driver in the same state as an orderly disconnect: the telemetry
+        stream stops rather than reporting a fault it cannot fix. The caller owns
+        the rest, and `connect()` is what resumes streaming."""
+        logger.warning(
+            "rebooting %s: the link is being closed on purpose, telemetry stops here, and the "
+            "instrument needs about 30 seconds before it will answer again. Call connect() to "
+            "resume - nothing else in this driver will do it", self._transport.address,
+        )
+        await self._transport.write_no_reply("SYST:REB")
+        self._teardown_requested = True
+        await self._transport.close()
+        return {
+            "rebooting": True,
+            "link_closed": True,
+            "reconnect_required": True,
+            "expect_ready_after_s": 30,
+        }
 
     def _clamp(self, action: str, value: Any) -> Any:
         """Hold a commanded value inside what the instrument and the declared
@@ -1410,19 +1487,28 @@ class N6974aBackend(HardwareBackend):
         between the write and its readback, and the value read back cannot have
         been changed by another command in between."""
         async with self._transport.transaction():
-            entry = (await self._transport.command_then_query_in_transaction(
-                command, [ERROR_QUERY], timeout_s=timeout_s
-            ))[0]
-            if not entry.startswith(NO_ERROR_PREFIXES):
-                drained = await self._drain_errors_in_transaction(f"after {command!r}")
-                raise HardwareError(
-                    f"{command!r} was refused: {entry}"
-                    + (f" (also queued: {'; '.join(drained)})" if drained else "")
-                )
-            if not readback:
-                return None
-            queries = [_QUERIES[channel][0] for channel in readback]
-            replies = await self._transport.query_all_in_transaction(queries)
+            return await self._write_checked_in_transaction(command, readback, timeout_s)
+
+    async def _write_checked_in_transaction(
+        self, command: str, readback: Sequence[str], timeout_s: Optional[float] = None
+    ) -> Any:
+        """As _write_checked(), without taking the lock. For a caller that needs
+        the write to be indivisible from something it did first - the
+        priority-mode guard reads the output state and must know it still holds
+        when the switch lands."""
+        entry = (await self._transport.command_then_query_in_transaction(
+            command, [ERROR_QUERY], timeout_s=timeout_s
+        ))[0]
+        if not entry.startswith(NO_ERROR_PREFIXES):
+            drained = await self._drain_errors_in_transaction(f"after {command!r}")
+            raise HardwareError(
+                f"{command!r} was refused: {entry}"
+                + (f" (also queued: {'; '.join(drained)})" if drained else "")
+            )
+        if not readback:
+            return None
+        queries = [_QUERIES[channel][0] for channel in readback]
+        replies = await self._transport.query_all_in_transaction(queries)
         values = {
             channel: _QUERIES[channel][1](reply) for channel, reply in zip(readback, replies)
         }

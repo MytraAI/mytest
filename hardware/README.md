@@ -25,20 +25,23 @@ holds both `OdriveBackend` (real, talks to an actual ODrive motor
 controller over USB via the official `odrive` package) and
 `MockOdriveBackend` (simulated, for local development without hardware
 attached) side by side - see that folder's own section below.
-`n6974a/` is the third real device: a Keysight N6974A Advanced Power
-System (80 V, 25 A, 2 kW, two-quadrant), also over ethernet, spoken to
-as SCPI on Keysight's standard socket port 5025. Like `cpx400dp/` it has
-no mock backend - see its section below, and note how differently it is
-built despite both being ethernet SCPI supplies: it batches an entire
-telemetry frame into one compound message and keeps no settings cache at
-all.
-
 `cpx400dp/` is the second real device and the first reached over
 **ethernet** rather than a local bus: a TTi CPX400DP dual-output bench
 power supply, spoken to as line-oriented SCPI over a raw TCP socket.
 Unlike `odrive/` it has **no** mock backend - see its section below for
-why. Each device runs as its own process, on its own ports - see
-"Running it" below.
+why.
+
+`n6974a/` is the third real device and the second over ethernet: a
+Keysight N6974A Advanced Power System (80 V, 25 A, 2 kW, and
+two-quadrant - it sinks as well as sources), spoken to as SCPI on
+Keysight's standard socket port 5025. Like `cpx400dp/` it has no mock
+backend, and it is worth reading the two side by side: they are the same
+class of instrument over the same transport, and almost nothing about
+their implementations matches. This one batches an entire telemetry frame
+into a single compound message and keeps no settings cache at all.
+
+Each device runs as its own process, on its own ports - see "Running it"
+below.
 
 ## Layout
 
@@ -178,6 +181,87 @@ type). ODrive ports default to `tcp://127.0.0.1:5580`/`5581`.
 `odrive.find_any()`), so running it without hardware attached will
 fail at connect. Pass `--serial-number` if more than one ODrive is on
 the same machine.
+
+## `cpx400dp/` - the CPX400DP power supply, over ethernet
+
+A TTi CPX400DP dual-output bench supply, driven as line-oriented SCPI
+over a raw TCP socket on port 9221. Ports default to
+`tcp://127.0.0.1:5590`/`5591`.
+
+**No mock backend, on purpose.** The ODrive keeps a real and a
+simulated backend side by side because its risk was wrong attribute
+paths, which a mock can mirror faithfully. This driver's risk is
+different: it is **response parsing**. The instrument replies to
+`OVP1?` with `VP1 66.00` and to `OCP1?` with `CP1 22.00` - not the
+mnemonics that were sent - measured readbacks carry unit suffixes
+(`-0.005V`), and `OP1?` answers a bare integer. A backend-level mock
+would replace exactly the code most likely to be wrong. So the seam
+for testing is the *transport*, not the backend: `tests/test_cpx400dp.py`
+substitutes a fake instrument whose replies are byte-exact transcripts
+from the real device, and everything above it is the real
+implementation. The consequence is that `main.py` has no `--mock` flag
+and needs a real supply.
+
+**Four telemetry tiers.** All 41 declared channels appear in every
+frame, but they are acquired four different ways, and the differences
+are load-bearing rather than cosmetic:
+
+1. **State** (4 queries/frame) - output on/off and the limit status
+   register. Instrument state, which changes at the speed of the events
+   causing it. Polling this fast is what caught an OVP trip inside a
+   single frame period.
+2. **Metered** (4 queries, at 5 Hz) - measured voltage and current.
+   These are capped by the instrument itself: its specification gives
+   a **4 Hz meter reading rate**, with 10 mV / 10 mA resolution and
+   0.1% / 0.3% of reading ±2 digits accuracy. Polling them per frame
+   re-read a register refreshed four times a second - visible directly
+   in our capture, where a decaying output read back as a staircase
+   holding each value across 6-10 consecutive polls. They are now read
+   at 5 Hz (a deliberate margin over 4 Hz, so the poll cannot sit just
+   behind the instrument's unsynchronised update) and held in between.
+   A repeated value in consecutive recorded rows may therefore be a
+   held reading rather than a re-measured one - as it already was when
+   the instrument itself returned the duplicates.
+3. **Cached** - setpoints, OVP/OCP, step sizes, tracking config,
+   address. Settings that only this driver writes, read once at connect
+   and refreshed after a command that changes them, then carried in
+   every frame from memory at no round-trip cost. This rests on the
+   assumption that nobody turns the front-panel knobs mid-run.
+4. **Not telemetry** - the read-and-clear error registers (`EER?`,
+   `QER?`, `*ESR?`), consumed by the driver's own post-write check.
+   Streaming them would race that check for a single-copy value. They
+   are reachable as explicit actions instead.
+
+Note the 4 Hz ceiling is a *reporting* rate, not a control or
+protection one - the supply reacts far faster than it reports. OVP is
+specified at ~1 ms and tripped inside one 19 ms frame; OCP is
+"measure-and-compare implemented in firmware" at ~500 ms, about two
+meter updates, consistent with that comparison being fed by the same
+measurement path.
+
+**Every write is checked.** The instrument accepts writes it then
+silently discards: `V2 999` leaves the setpoint untouched, sends
+nothing back, and reports itself only as `EER?` = 100. Both registers
+are read after every command because they catch different failures - a
+range error sets `EER?` and `*ESR?` bit 4, an unrecognised mnemonic
+sets only `*ESR?` bit 5.
+
+**Connect and disconnect are passive.** `connect()` opens the link,
+confirms the model in `*IDN?`, clears its own error registers, verifies
+every declared channel answers, reads the cached tier, and logs the
+output state it inherited. It does not enable an output, disable one it
+finds on, or set protection levels. `disconnect()` closes the link and
+releases an interface lock if it took one; it does **not** switch
+outputs off. Energized-state safety that does not depend on this
+process belongs to the instrument's own OVP/OCP, which this driver
+exposes but never asserts.
+
+**Optional guards, both off by default.** `--max-voltage`/`--max-current`
+are a driver-side ceiling: they change nothing on the instrument, they
+make this process refuse to *command* a setpoint above them. That
+catches the failure the instrument cannot - a value well inside its own
+60 V range and fatal to the load. `--interface-lock` takes `IFLOCK` at
+connect so the web page and VXI-11 cannot change settings mid-run.
 
 ## `n6974a/` - the Keysight N6974A Advanced Power System, over ethernet
 
@@ -346,87 +430,6 @@ supports but this driver will not expose: the `CALibrate` subsystem
 a password), `SYSTem:SECurity:IMMediate` (erases all user memory and
 reboots), and `HCOPy:SDUMp:DATA?` (a binary image block a line-oriented
 transport cannot carry).
-
-## `cpx400dp/` - the CPX400DP power supply, over ethernet
-
-A TTi CPX400DP dual-output bench supply, driven as line-oriented SCPI
-over a raw TCP socket on port 9221. Ports default to
-`tcp://127.0.0.1:5590`/`5591`.
-
-**No mock backend, on purpose.** The ODrive keeps a real and a
-simulated backend side by side because its risk was wrong attribute
-paths, which a mock can mirror faithfully. This driver's risk is
-different: it is **response parsing**. The instrument replies to
-`OVP1?` with `VP1 66.00` and to `OCP1?` with `CP1 22.00` - not the
-mnemonics that were sent - measured readbacks carry unit suffixes
-(`-0.005V`), and `OP1?` answers a bare integer. A backend-level mock
-would replace exactly the code most likely to be wrong. So the seam
-for testing is the *transport*, not the backend: `tests/test_cpx400dp.py`
-substitutes a fake instrument whose replies are byte-exact transcripts
-from the real device, and everything above it is the real
-implementation. The consequence is that `main.py` has no `--mock` flag
-and needs a real supply.
-
-**Four telemetry tiers.** All 41 declared channels appear in every
-frame, but they are acquired four different ways, and the differences
-are load-bearing rather than cosmetic:
-
-1. **State** (4 queries/frame) - output on/off and the limit status
-   register. Instrument state, which changes at the speed of the events
-   causing it. Polling this fast is what caught an OVP trip inside a
-   single frame period.
-2. **Metered** (4 queries, at 5 Hz) - measured voltage and current.
-   These are capped by the instrument itself: its specification gives
-   a **4 Hz meter reading rate**, with 10 mV / 10 mA resolution and
-   0.1% / 0.3% of reading ±2 digits accuracy. Polling them per frame
-   re-read a register refreshed four times a second - visible directly
-   in our capture, where a decaying output read back as a staircase
-   holding each value across 6-10 consecutive polls. They are now read
-   at 5 Hz (a deliberate margin over 4 Hz, so the poll cannot sit just
-   behind the instrument's unsynchronised update) and held in between.
-   A repeated value in consecutive recorded rows may therefore be a
-   held reading rather than a re-measured one - as it already was when
-   the instrument itself returned the duplicates.
-3. **Cached** - setpoints, OVP/OCP, step sizes, tracking config,
-   address. Settings that only this driver writes, read once at connect
-   and refreshed after a command that changes them, then carried in
-   every frame from memory at no round-trip cost. This rests on the
-   assumption that nobody turns the front-panel knobs mid-run.
-4. **Not telemetry** - the read-and-clear error registers (`EER?`,
-   `QER?`, `*ESR?`), consumed by the driver's own post-write check.
-   Streaming them would race that check for a single-copy value. They
-   are reachable as explicit actions instead.
-
-Note the 4 Hz ceiling is a *reporting* rate, not a control or
-protection one - the supply reacts far faster than it reports. OVP is
-specified at ~1 ms and tripped inside one 19 ms frame; OCP is
-"measure-and-compare implemented in firmware" at ~500 ms, about two
-meter updates, consistent with that comparison being fed by the same
-measurement path.
-
-**Every write is checked.** The instrument accepts writes it then
-silently discards: `V2 999` leaves the setpoint untouched, sends
-nothing back, and reports itself only as `EER?` = 100. Both registers
-are read after every command because they catch different failures - a
-range error sets `EER?` and `*ESR?` bit 4, an unrecognised mnemonic
-sets only `*ESR?` bit 5.
-
-**Connect and disconnect are passive.** `connect()` opens the link,
-confirms the model in `*IDN?`, clears its own error registers, verifies
-every declared channel answers, reads the cached tier, and logs the
-output state it inherited. It does not enable an output, disable one it
-finds on, or set protection levels. `disconnect()` closes the link and
-releases an interface lock if it took one; it does **not** switch
-outputs off. Energized-state safety that does not depend on this
-process belongs to the instrument's own OVP/OCP, which this driver
-exposes but never asserts.
-
-**Optional guards, both off by default.** `--max-voltage`/`--max-current`
-are a driver-side ceiling: they change nothing on the instrument, they
-make this process refuse to *command* a setpoint above them. That
-catches the failure the instrument cannot - a value well inside its own
-60 V range and fatal to the load. `--interface-lock` takes `IFLOCK` at
-connect so the web page and VXI-11 cannot change settings mid-run.
 
 ## Adding a new device type
 

@@ -472,7 +472,7 @@ class N6974aCommandClient(CommandClient):
         """DIGital:TOUTput:BUS - allow BUS triggers on digital port pins."""
         return self.execute("set_digital_trigger_out_bus", value=enabled)
 
-    def set_digital_pin_function(self, pin: int, function: str) -> str:
+    def set_digital_pin_function(self, pin: int, function: str) -> Dict[str, Any]:
         """DIGital:PIN<n>:FUNCtion - DIO, DINPut, TOUTput, TINPut or EXPR1-8 on
         any pin, plus FAULt on pin 1, INHibit on pin 3, and ONCouple/OFFCouple
         on pins 4-7. Those restrictions were measured, not documented; see
@@ -671,6 +671,27 @@ class N6974aCommandClient(CommandClient):
         """STATus:QUEStionable:PTRansition?"""
         return self.execute("read_questionable_ptr")
 
+    def read_questionable2_enable(self) -> int:
+        """STATus:QUEStionable2:ENABle?"""
+        return self.execute("read_questionable2_enable")
+
+    def read_questionable2_ptr(self) -> int:
+        """STATus:QUEStionable2:PTRansition? - 127 at preset."""
+        return self.execute("read_questionable2_ptr")
+
+    def read_operation_ntr(self) -> int:
+        """STATus:OPERation:NTRansition? - 0 at preset, so no falling edge
+        reaches the operation event register unless something sets it."""
+        return self.execute("read_operation_ntr")
+
+    def read_questionable_ntr(self) -> int:
+        """STATus:QUEStionable:NTRansition? - 0 at preset."""
+        return self.execute("read_questionable_ntr")
+
+    def read_questionable2_ntr(self) -> int:
+        """STATus:QUEStionable2:NTRansition? - 0 at preset."""
+        return self.execute("read_questionable2_ntr")
+
     def preset_status(self) -> Any:
         """STATus:PRESet - reset every Enable, PTR and NTR register.
 
@@ -830,11 +851,14 @@ class N6974aCommandClient(CommandClient):
         """SYSTem:TIME?"""
         return self.execute("read_time")
 
-    def reboot(self) -> None:
+    def reboot(self) -> Dict[str, Any]:
         """SYSTem:REBoot - restart the instrument.
 
-        Drops this link: the driver must reconnect afterwards, and the
-        instrument takes about 30 seconds to become usable again."""
+        The one write that cannot be verified, because the instrument takes the
+        link down as it restarts. So the driver sends it unchecked, closes the
+        link deliberately, and stops streaming telemetry rather than reporting a
+        fault it cannot fix. Nothing reconnects on its own: call connect_backend()
+        once the instrument is back, which takes about 30 seconds."""
         return self.execute("reboot")
 
     # --- IEEE-488 common commands ------------------------------------------

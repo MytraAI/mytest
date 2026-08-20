@@ -285,12 +285,26 @@ class FakeInstrument:
         self._lock = asyncio.Lock()
         self._queue: List[str] = []
         self.opens = 0
+        self.open_gate: Optional[asyncio.Event] = None
+        """Set to an unset Event to hold open() open, for testing the reconnect
+        window."""
+        self.backend = None
+        self.observed_teardown_flag_during_open: List[bool] = []
 
     # --- transport surface -------------------------------------------------
 
     async def open(self) -> None:
+        if self.open_gate is not None:
+            self.observed_teardown_flag_during_open.append(self.backend._teardown_requested)
+            await self.open_gate.wait()
         self.is_open = True
         self.opens += 1
+
+    async def write_no_reply(self, command: str) -> None:
+        if not self.is_open:
+            raise HardwareError("transport is not open")
+        self.messages.append(command)
+        self.sent.append(command)
 
     async def close(self) -> None:
         self.is_open = False
@@ -427,7 +441,8 @@ async def test_connect_refuses_a_different_model():
 @sync
 async def test_connect_refuses_binary_reply_format():
     """FORMat REAL makes every reply a binary block this transport cannot read,
-    and the setting survives *RST, so it is checked rather than assumed."""
+    and only block-data queries are affected, so this is a cheap guard rather
+    than a load-bearing one. *RST returns it to ASCII."""
     replies = dict(RECORDED_REPLIES)
     replies["FORM?"] = "REAL"
     backend = N6974aBackend(dissipators=1, transport=FakeInstrument(replies=replies))
@@ -991,3 +1006,176 @@ async def test_setting_a_pin_function_reads_its_polarity_back_too():
     backend, _ = await connected_backend()
     applied = await backend.execute("set_digital_pin_function_4", value="ONC")
     assert set(applied) == {"digital_pin_function_4", "digital_pin_polarity_4"}
+
+
+# --- link failure and recovery --------------------------------------------
+
+@sync
+async def test_a_reconnect_does_not_look_like_a_lost_link_while_it_opens():
+    """The socket is shut for the whole ~400 ms handshake. If the teardown flag
+    were cleared before open() returned, the 20 ms telemetry loop would read
+    "the link is closed and this driver did not close it" twenty times over and
+    take the process down on a reconnect that was about to succeed."""
+    backend, fake = await connected_backend()
+    await backend.disconnect()
+
+    fake.backend = backend
+    fake.open_gate = asyncio.Event()
+    connecting = asyncio.create_task(backend.connect())
+    await asyncio.sleep(0)  # let connect() reach open()
+
+    # A frame read while the socket is still shut must be silent, not fatal.
+    for _ in range(MAX_CONSECUTIVE_FRAME_FAILURES + 2):
+        assert await backend._read_frame() is None
+
+    fake.open_gate.set()
+    await connecting
+    assert fake.observed_teardown_flag_during_open == [True], \
+        "the flag must still say 'tearing down' while the socket is being opened"
+    assert await backend._read_frame() is not None
+
+
+def test_the_transport_turns_a_reset_into_a_hardware_error():
+    """A ConnectionResetError escaping as itself would bypass _read_frame's
+    handler and the command server's device-error path alike."""
+    from hardware.n6974a.transport import KeysightSocketTransport
+
+    class ResettingWriter:
+        def write(self, _data): raise ConnectionResetError(54, "Connection reset by peer")
+        async def drain(self): pass
+        def close(self): pass
+        async def wait_closed(self): pass
+
+    class DeadReader:
+        async def readuntil(self, _sep): raise ConnectionResetError(54, "Connection reset by peer")
+
+    async def body():
+        transport = KeysightSocketTransport("192.0.2.1")
+        transport._writer, transport._reader = ResettingWriter(), DeadReader()
+        with pytest.raises(HardwareError, match="could not send"):
+            await transport.query("VOLT?")
+
+        # and the same failure arriving on the read rather than the write
+        class QuietWriter(ResettingWriter):
+            def write(self, _data): pass
+        transport._writer, transport._reader = QuietWriter(), DeadReader()
+        with pytest.raises(HardwareError, match="failed while awaiting a response"):
+            await transport.query("VOLT?")
+
+    asyncio.run(body())
+
+
+@sync
+async def test_reboot_closes_the_link_instead_of_hanging_on_a_check():
+    """Every other write carries an error check, which needs a reply. This one
+    cannot have it - the instrument drops the link as it restarts - so it is sent
+    unverified and the link is closed deliberately."""
+    backend, fake = await connected_backend()
+    fake.messages.clear()
+    result = await backend.execute("reboot")
+    assert fake.messages == ["SYST:REB"], "no error query may follow it"
+    assert result["reconnect_required"] is True
+    assert not fake.is_open
+    # Teardown, not a fault: the telemetry loop must go quiet rather than raise.
+    assert await backend._read_frame() is None
+    assert await backend._read_frame() is None
+
+
+# --- atomicity ------------------------------------------------------------
+
+@sync
+async def test_the_priority_guard_and_the_switch_share_one_transaction():
+    """Read separately, the output could be enabled between the check and the
+    switch - by another command, the front panel, or a second socket client."""
+    backend, fake = await connected_backend()
+    fake.messages.clear()
+    lock = fake.transaction()
+    await lock.acquire()  # stand in for a telemetry frame holding the link
+    pending = asyncio.create_task(backend.execute("set_priority_mode", value="CURR"))
+    await asyncio.sleep(0)
+    assert not pending.done(), "the guard must wait for the link, not read around it"
+    assert fake.messages == [], "nothing may be read while another caller holds the link"
+    lock.release()
+    await pending
+    assert fake.messages[0] == "OUTP?"
+    assert fake.messages[1] == "FUNC CURR;:SYST:ERR?"
+
+
+# --- the declared surface, again ------------------------------------------
+
+@sync
+async def test_connect_probes_the_readback_only_queries_too():
+    """A frame uses 60 of the 136 readable queries. An absent one among the rest
+    would surface mid-run as a stall inside a write, blamed on a command that
+    actually succeeded."""
+    from hardware.n6974a.n6974a_backend import _QUERIES
+    backend, fake = await connected_backend()
+    probed = set(fake.messages)
+    for channel in ("threshold_voltage_1", "digital_pin_polarity_7", "signal_expression_8",
+                    "questionable2_ntr", "acquire_trigger_source"):
+        assert _QUERIES[channel][0] in probed, f"{channel} was never probed"
+
+
+def test_a_driver_action_may_not_also_be_an_instrument_command():
+    """execute() dispatches driver actions first, so one that also sat in an
+    instrument table would be silently shadowed."""
+    from hardware.n6974a import n6974a_backend as module
+    module._QUERY_ACTIONS["drain_errors"] = ("SYST:ERR?", module._as_str)
+    try:
+        with pytest.raises(AssertionError, match="more than one command table"):
+            module._validate_channel_coverage()
+    finally:
+        del module._QUERY_ACTIONS["drain_errors"]
+    module._validate_channel_coverage()  # still clean once removed
+
+
+# --- Windows -------------------------------------------------------------
+
+def test_the_entry_point_starts_on_a_loop_that_can_poll_zeromq():
+    """Windows defaults to the proactor loop, which has no add_reader() - the
+    call pyzmq's asyncio sockets are built on - so a driver started with a bare
+    asyncio.run() dies on its first command-server poll there and never
+    recovers. Asserted against the source because the entry point is
+    __main__-guarded and cannot be imported and inspected."""
+    import inspect
+
+    from hardware.n6974a import main as entry_point
+
+    source = inspect.getsource(entry_point)
+    assert "asyncio_compat.run(" in source
+    assert "asyncio.run(" not in source
+
+
+def test_the_driver_runs_on_the_windows_loop(monkeypatch):
+    """The Windows branch builds its own SelectorEventLoop through
+    asyncio.Runner rather than taking the platform default. Exercised by forcing
+    the branch, since the suite runs where sys.platform is not win32."""
+    from protocol import asyncio_compat
+
+    monkeypatch.setattr(asyncio_compat.sys, "platform", "win32")
+
+    async def body():
+        assert hasattr(asyncio.get_running_loop(), "add_reader")
+        backend = N6974aBackend(dissipators=1, transport=FakeInstrument())
+        await backend.connect()
+        frame = await backend._read_frame()
+        await backend.execute("set_ovp", value=50.0)
+        await backend.disconnect()
+        return frame
+
+    frame = asyncio_compat.run(body())
+    assert set(frame) == set(TELEMETRY_CHANNELS)
+
+
+def test_nothing_in_the_driver_is_platform_specific():
+    """A driver that only runs on the machine it was written on is a stand that
+    cannot move. Nothing here should reach for a POSIX-only module, a path
+    separator, or a shell."""
+    import pathlib
+
+    banned = ("import fcntl", "import termios", "import pwd", "import grp", "os.uname",
+              "signal.SIG", "subprocess", "/dev/", "os.fork", "\\\\", "os.sep")
+    for path in sorted(pathlib.Path("hardware/n6974a").glob("*.py")):
+        source = path.read_text()
+        for token in banned:
+            assert token not in source, f"{path.name} uses {token!r}"

@@ -504,8 +504,13 @@ COMMAND_CHANNELS: List[str] = [
     "set_questionable2_ntr",  # STATus:QUEStionable2:NTRansition <mask>
     "read_operation_enable",  # STATus:OPERation:ENABle?
     "read_questionable_enable",  # STATus:QUEStionable:ENABle?
+    "read_questionable2_enable",  # STATus:QUEStionable2:ENABle?
     "read_operation_ptr",  # STATus:OPERation:PTRansition? - 511 at preset, which is why no software latch is needed
     "read_questionable_ptr",  # STATus:QUEStionable:PTRansition? - 16383 at preset
+    "read_questionable2_ptr",  # STATus:QUEStionable2:PTRansition? - 127 at preset
+    "read_operation_ntr",  # STATus:OPERation:NTRansition? - 0 at preset; nothing here latches falling edges
+    "read_questionable_ntr",  # STATus:QUEStionable:NTRansition?
+    "read_questionable2_ntr",  # STATus:QUEStionable2:NTRansition?
     "preset_status",  # STATus:PRESet - resets every Enable, PTR and NTR register
     *(f"set_operation_user_source_{n}" for n in (1, 2)),  # STATus:OPERation:USER<n>:SOURce EXPRession<1-8>|NONE
     *(f"read_operation_user_source_{n}" for n in (1, 2)),  # STATus:OPERation:USER<n>:SOURce?

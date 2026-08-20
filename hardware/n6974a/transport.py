@@ -25,6 +25,12 @@ ONE MESSAGE AT A TIME. `_lock` makes each exchange atomic, so a command's reply
 can never be delivered to the telemetry loop's read, or vice versa. Callers
 needing several exchanges to be indivisible use `transaction()`.
 
+EVERY FAILURE LEAVES HERE AS A HardwareError. Nothing in this module raises a
+bare OSError: a reset, a refused write, an EOF and a timeout are all device
+failures from a caller's point of view, and the backend's frame loop and the
+command server both dispatch on HardwareError. One escaping as a
+ConnectionResetError would bypass both.
+
 A MALFORMED MESSAGE IS DISCARDED WHOLE, AND DESYNCS THE LINK. This is the
 failure mode that shapes the error handling here. If any command in a message
 is not understood, the instrument abandons the entire message - including
@@ -242,6 +248,21 @@ class KeysightSocketTransport:
         """As command_then_query(), without taking the lock."""
         return await self._exchange([command, *queries], expected=len(queries), timeout_s=timeout_s)
 
+    async def write_no_reply(self, command: str) -> None:
+        """Send one command and do not wait for anything back.
+
+        For the single command that answers nothing because it takes the link
+        with it: `SYSTem:REBoot`. Every other write is verified, which requires a
+        reply; this one cannot be, so the caller owns what happens next."""
+        async with self._lock:
+            if self._writer is None:
+                raise HardwareError("transport is not open")
+            try:
+                self._writer.write(command.encode("ascii") + TERMINATOR)
+                await self._writer.drain()
+            except OSError as exc:
+                raise HardwareError(f"could not send {command!r} to {self.address}: {exc}") from exc
+
     async def _exchange(
         self, parts: Sequence[str], expected: int, timeout_s: Optional[float] = None
     ) -> List[str]:
@@ -258,11 +279,31 @@ class KeysightSocketTransport:
             raise HardwareError("transport is not open")
         deadline = self._timeout_s if timeout_s is None else timeout_s
         message = join_message(parts)
-        self._writer.write(message.encode("ascii") + TERMINATOR)
-        await self._writer.drain()
+        try:
+            self._writer.write(message.encode("ascii") + TERMINATOR)
+            await self._writer.drain()
+        except OSError as exc:
+            # A reset arriving between exchanges surfaces on the write, not the
+            # read. Raised as a HardwareError like every other link failure, so
+            # a caller that handles device failure handles this too.
+            await self._resynchronise(f"{type(exc).__name__} sending {message!r}: {exc}")
+            raise HardwareError(
+                f"could not send {message!r} to {self.address}: {exc} - the link has been reopened"
+            ) from exc
 
         try:
             raw = await asyncio.wait_for(self._reader.readuntil(TERMINATOR), timeout=deadline)
+        except OSError as exc:
+            # The instrument resetting the connection - switched off, rebooted,
+            # or its socket budget reclaimed - arrives here as
+            # ConnectionResetError rather than as the EOF that IncompleteRead
+            # covers. Left unhandled it escapes as a non-HardwareError, which
+            # skips every device-failure path this driver has.
+            await self._resynchronise(f"{type(exc).__name__} awaiting a response to {message!r}: {exc}")
+            raise HardwareError(
+                f"the link to {self.address} failed while awaiting a response to {message!r}: "
+                f"{exc} - the link has been reopened"
+            ) from exc
         except asyncio.TimeoutError as exc:
             await self._resynchronise(f"no response to {message!r} within {deadline:.1f}s")
             raise HardwareError(
@@ -275,6 +316,15 @@ class KeysightSocketTransport:
             await self.close()
             raise HardwareError(
                 f"connection to {self.address} closed while awaiting a response to {message!r}"
+            ) from exc
+        except asyncio.LimitOverrunError as exc:
+            # A reply longer than the stream reader's buffer with no terminator
+            # in it. Nothing this driver asks for is that large, so it means the
+            # link is carrying something unexpected.
+            await self._resynchronise(f"a reply to {message!r} overran the read buffer")
+            raise HardwareError(
+                f"the reply to {message!r} from {self.address} overran the read buffer without a "
+                f"terminator ({exc}) - the link has been reopened"
             ) from exc
 
         reply = raw[: -len(TERMINATOR)].decode("ascii", errors="replace").strip()
