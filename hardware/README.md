@@ -331,12 +331,33 @@ beyond what the hardware allows is applied *at* the limit, with a warning
 naming asked-versus-applied, the applied value returned to the caller,
 and a sticky `clamped_*` telemetry channel keeping it visible for the rest
 of the run. Bounds are read from the instrument (`VOLTage? MAX` and
-friends - it allows 2% over nameplate, so 81.6 V and 25.5 A), with the
-negative bound additionally held to what the declared dissipator count
-permits. Only quantities that carry energy are clamped; a watchdog delay
-or comparator level out of range raises with the instrument's own error
-text instead, since silently altering those would hide a mistake rather
-than contain a hazard.
+friends - it allows 2% over nameplate, so 81.6 V and 25.5 A) and then
+narrowed to the model's rating, **80 V and 25 A**, so the rating is what a
+setpoint is actually held to. The negative bound is additionally held to
+what the declared dissipator count permits. What is read from the
+instrument stays as read: the dissipator check derives its expected sink
+floor from it, so the two must not be conflated. Only quantities that
+carry energy are clamped; a watchdog delay or comparator level out of
+range raises with the instrument's own error text instead, since silently
+altering those would hide a mistake rather than contain a hazard.
+
+The rating is the ceiling because it is a fact about an N6974A, and this
+driver serves any stand - including one running a higher bus than the next.
+A stand needing something tighter owns that itself: see
+`ZdriveTestbed.check_rails()`, which is what holds zdrive to 48 V.
+
+`OUTPut:PROTection` levels are the exception, and deliberately: OVP keeps
+the instrument's own 96 V range, because a threshold set above the rated
+output is a legitimate way to keep over-voltage protection out of the way.
+
+**Opening the socket is retried.** For a while after this instrument powers
+on, a connection to the SCPI port can hang until it times out while ICMP
+and the port itself already answer, and a fresh handshake gets in where
+waiting on the stalled one does not. `open()` therefore makes
+`CONNECT_ATTEMPTS` tries at `DEFAULT_CONNECT_TIMEOUT_S` each, logging every
+failure and naming the count when it finally raises. This matters more than
+it sounds: since an N7909A is only discovered at power-on, power-cycling the
+supply is routine on any stand that uses one.
 
 **Behaviours of this instrument that shape the driver**, all measured:
 
