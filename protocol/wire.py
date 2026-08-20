@@ -81,6 +81,14 @@ DEFAULT_CPX400DP_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5591"
 DEFAULT_TC_DAQ_COMMAND_ENDPOINT = "tcp://127.0.0.1:5600"
 DEFAULT_TC_DAQ_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5601"
 
+# The Keysight N6974A Advanced Power System, a third real device and the second
+# reached over ethernet (see hardware/n6974a/). Its own port pair, so it runs
+# alongside every other driver above. As with the CPX400DP, these are this
+# driver's *ZeroMQ* endpoints on localhost - the instrument's own address on the
+# lab network lives in hardware/n6974a/n6974a_backend.py, not here.
+DEFAULT_N6974A_COMMAND_ENDPOINT = "tcp://127.0.0.1:5610"
+DEFAULT_N6974A_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5611"
+
 # Single topic used on the telemetry PUB socket, kept as one constant
 # rather than per-channel topics because subscribers currently want
 # the full frame. Splitting by channel is an easy future change if a
@@ -136,6 +144,13 @@ shares none of those names. Since a device name keys a directory of recorded
 output, two backends publishing different channel sets under one name would
 make a stored run ambiguous about which supply produced it."""
 
+DEVICE_N6974A = "n6974a"
+"""The real Keysight N6974A Advanced Power System. Named for the model rather
+than DEVICE_POWER_SUPPLY for the same reason DEVICE_CPX400DP is: a device name
+keys a directory of recorded output, and this instrument's channel surface -
+two-quadrant, priority-mode, three status registers wide - shares almost no
+names with either the simulated supply or the CPX400DP."""
+
 # Every device this stand knows about, and where it publishes telemetry.
 #
 # One mapping rather than a constant per device, because two callers need to
@@ -155,6 +170,7 @@ TELEMETRY_ENDPOINTS: Dict[str, str] = {
     DEVICE_ODRIVE: DEFAULT_ODRIVE_TELEMETRY_ENDPOINT,
     DEVICE_CPX400DP: DEFAULT_CPX400DP_TELEMETRY_ENDPOINT,
     DEVICE_TC_DAQ: DEFAULT_TC_DAQ_TELEMETRY_ENDPOINT,
+    DEVICE_N6974A: DEFAULT_N6974A_TELEMETRY_ENDPOINT,
 }
 
 # High-water marks. ZeroMQ's default is 1000 *messages* on both ends, and

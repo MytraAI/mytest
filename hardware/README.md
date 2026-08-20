@@ -29,8 +29,19 @@ attached) side by side - see that folder's own section below.
 **ethernet** rather than a local bus: a TTi CPX400DP dual-output bench
 power supply, spoken to as line-oriented SCPI over a raw TCP socket.
 Unlike `odrive/` it has **no** mock backend - see its section below for
-why. Each device runs as its own process, on its own ports - see
-"Running it" below.
+why.
+
+`n6974a/` is the third real device and the second over ethernet: a
+Keysight N6974A Advanced Power System (80 V, 25 A, 2 kW, and
+two-quadrant - it sinks as well as sources), spoken to as SCPI on
+Keysight's standard socket port 5025. Like `cpx400dp/` it has no mock
+backend, and it is worth reading the two side by side: they are the same
+class of instrument over the same transport, and almost nothing about
+their implementations matches. This one batches an entire telemetry frame
+into a single compound message and keeps no settings cache at all.
+
+Each device runs as its own process, on its own ports - see "Running it"
+below.
 
 ## Layout
 
@@ -80,6 +91,12 @@ Mytest/
       rails.py                     the supply's power envelope, and a Rail describing one of its outputs - shared by the stands that use this model
       cpx400dp_command_client.py   Cpx400dpCommandClient - named sugar per command channel; 10 s default timeout, since `with verify` blocks 5 s
       main.py                      entry point: always real hardware, --host/--port/--max-voltage/--max-current/--interface-lock, calls runner.run()
+    n6974a/
+      n6974a_backend.py            N6974aBackend - REAL, a Keysight N6974A Advanced Power System over ethernet (raw SCPI socket, port 5025). No mock counterpart.
+      transport.py                 KeysightSocketTransport - the line protocol alone (LF both ways), compound multi-query messages, count-checked, with reopen-on-desync
+      n6974a_channels.py           TELEMETRY_CHANNELS/COMMAND_CHANNELS - 121 telemetry channels in one message per frame, and 234 commands
+      n6974a_command_client.py     N6974aCommandClient - named sugar per command channel; 25 s default timeout, since `*TST?` blocks 5.2 s
+      main.py                      entry point: always real hardware, --host/--port and a required --dissipators, calls runner.run()
     clients/
       command_client.py            generic CommandClient - universal core + execute() + verify_actions()
       telemetry_client.py          Telemetry Client/subscriber - fully generic + verify_channels(), no device-specific subclasses needed
@@ -150,6 +167,7 @@ python -m hardware.mock_dut.main             # DUT
 python -m hardware.odrive.main --mock        # ODrive, simulated
 python -m hardware.odrive.main               # ODrive, REAL hardware over USB
 python -m hardware.cpx400dp.main             # CPX400DP, REAL hardware over ethernet
+python -m hardware.n6974a.main --dissipators 1   # N6974A APS, REAL hardware over ethernet
 ```
 
 Each device is its own OS process with its own dedicated entry-point
@@ -244,6 +262,174 @@ make this process refuse to *command* a setpoint above them. That
 catches the failure the instrument cannot - a value well inside its own
 60 V range and fatal to the load. `--interface-lock` takes `IFLOCK` at
 connect so the web page and VXI-11 cannot change settings mid-run.
+
+## `n6974a/` - the Keysight N6974A Advanced Power System, over ethernet
+
+A Keysight N6974A: 80 V, 25 A, 2 kW, single output, and **two-quadrant**
+- it sinks as well as sources. Driven as SCPI over a raw TCP socket on
+port 5025. Ports default to `tcp://127.0.0.1:5610`/`5611`.
+
+**No mock backend, for the same reason as the CPX400DP** but against a
+different risk. Here the risk is *message building*: a telemetry frame is
+60 queries batched into one compound SCPI message, and three status
+registers are decoded bit by bit. A backend-level mock would replace
+exactly that. So the seam is the transport, and
+`tests/test_n6974a.py` substitutes a fake instrument whose replies were
+recorded from the real unit *by asking the driver's own query tables*, so
+the fixture cannot quietly agree with the driver instead of the
+instrument.
+
+**One message per frame, and no cached tier.** Semicolons batch commands
+into one message, and the whole reply comes back as one line of
+semicolon-separated values, so every one of the 121 declared channels is
+re-read on every frame for a single round trip. That is the opposite of
+the CPX400DP's four tiers, and it is affordable for a specific reason:
+the settings queries cost ~1.4 ms *combined*, while the measurement
+inside the frame costs ~21 ms on its own. Since nothing is cached, this
+driver makes no assumption that it is the only thing touching the
+instrument - a front-panel knob or a second socket client shows up in the
+next frame.
+
+The lever on frame rate is therefore not the poll interval but
+`set_nplc`: a MEASure is an acquisition over `SENSe:SWEep:NPLCycles`
+power line cycles. At the 1 PLC default a frame is ~32 ms and the driver
+publishes at ~19 Hz; at 0.1 PLC a frame is ~4 ms, at the cost of the
+line-frequency noise rejection an integral number of cycles buys.
+
+**Measure once, fetch the rest.** `MEASure:VOLTage?` performs the
+acquisition and `FETCh:CURRent?`/`FETCh:POWer?` read the *same* one. That
+halves the frame cost and, more importantly, makes V, I and P
+simultaneous - power computed from a row agrees with the power reported
+in it.
+
+**Condition and event registers, so no software latch is needed.** Each
+of the three status registers is read twice per frame: the condition
+register for what is true now, the event register for what became true
+since the last frame. The instrument's positive-transition filter passes
+every bit (`STATus:QUEStionable:PTRansition?` reads 16383), so a
+protection that trips and clears between two frames still lands in that
+frame's `*_event` channel. Where the CPX400DP driver needs a sticky
+software latch, this one gets the same guarantee from the hardware. Two
+event bits are self-inflicted: `measure_active_event` and
+`waiting_for_measure_trigger_event` fire every frame because the frame's
+own MEASure initiates the measurement system.
+
+**`--dissipators` is required, and verified.** Each Keysight N7909A power
+dissipator adds 1 kW of sinking capability; a 2 kW model needs two to
+sink 100% of its rating, and with one it sinks 50%. This decides how hard
+the supply may discharge whatever is attached, so it is declared rather
+than assumed - and checked, because the instrument offers no query for
+it. Per the guide the only indication is the magnitude of
+`CURRent:LIMit:NEGative? MIN`, which reads 10%, 50% or 100% of the maximum
+programmable current. A declared count the instrument contradicts refuses
+to start: an N7909A is only recognised at **power-on**, so one cabled to a
+running supply reads as absent and does nothing, which is exactly the
+case a trusted declaration would paper over.
+
+**Setpoints are clamped, not refused.** A commanded voltage or current
+beyond what the hardware allows is applied *at* the limit, with a warning
+naming asked-versus-applied, the applied value returned to the caller,
+and a sticky `clamped_*` telemetry channel keeping it visible for the rest
+of the run. Bounds are read from the instrument (`VOLTage? MAX` and
+friends - it allows 2% over nameplate, so 81.6 V and 25.5 A), with the
+negative bound additionally held to what the declared dissipator count
+permits. Only quantities that carry energy are clamped; a watchdog delay
+or comparator level out of range raises with the instrument's own error
+text instead, since silently altering those would hide a mistake rather
+than contain a hazard.
+
+**Behaviours of this instrument that shape the driver**, all measured:
+
+- **A malformed command discards the whole message.** `OUTP?;:BOGUS?;:FUNC?`
+  answers *nothing at all*, and the `OUTP?` reply is left in the output
+  queue **without its terminating newline**, so the next query's answer is
+  appended to it (a following `SYST:ERR?` was read back as
+  `0-113,"Undefined header"`). Every read after that point is answered by
+  the wrong query. So a timeout or a wrong value count is treated as a
+  desynchronised link, not a slow one, and the transport closes and
+  reopens the socket - the only reliable resynchronisation, ~400 ms, and
+  it also gets a clean error queue since the queue is per-I/O-session.
+  `link_resynchronisations` is published as telemetry, because a link
+  recovering repeatedly is a fault even when each recovery works.
+- **An unavailable command is answered with silence**, naming itself only
+  in the error queue (`+302,"Option not installed"`,
+  `+310,"...not supported by this model"`, `-113,"Undefined header"`).
+  Combined with the above, one absent channel inside the frame would
+  desync the link on every frame for a whole run - which is why connect()
+  probes all 60 declared queries **individually**, and reports each
+  failure with the instrument's own explanation.
+- **A setting readback in the same message as its write answers one step
+  stale.** `VOLT 2.5;:VOLT?` returns the *previous* setpoint,
+  deterministically, for the source-programming parameters (`VOLTage`,
+  `CURRent:LIMit`, `CURRent:LIMit:NEGative`), while protection parameters
+  answer freshly. Neither `*WAI` nor `*OPC?` between them changes it. So a
+  write is two messages inside one transaction - command with its
+  `SYSTem:ERRor?` check, then the readback - for ~0.9 ms instead of
+  ~0.5 ms. Worth it: the readback is what tells a caller a clamp
+  happened, so a stale one is worse than none.
+- **A common command takes no root colon.** `VOLT 1;:*WAI` is
+  `-113,"Undefined header"` and, per the first point, costs the entire
+  message; `VOLT 1;*WAI` is correct. `join_message` picks the separator.
+- **An error message can contain a semicolon** -
+  `+310,"The command is not supported by this model;"` - so a reply is
+  split at most `expected - 1` times and any query whose answer may
+  contain one goes last in the message.
+- **A parameter belonging to the other priority mode may be silently
+  ignored.** `CURRent` written in voltage priority is accepted with no
+  error and does not take effect, where `VOLTage:LIMit` at least answers
+  `+315,"Settings conflict error"`. Rather than enumerate which parameter
+  belongs to which mode, every numeric write compares the readback
+  against what was commanded and warns when they differ.
+- **Switching priority mode turns the output off and reverts every output
+  setting** to its reset value, so `set_priority_mode` is refused while
+  the output is on.
+- **`*TST?` runs a real self-test and takes 5.2 s**, longer than the
+  ordinary read ceiling - it and `*OPC?`/`*WAI` get their own longer
+  timeout, rather than raising the ceiling for everything and turning an
+  unimplemented mnemonic's silence into a long stall.
+- **`protection_mode` LOWZ** (the reset default) actively sinks the load's
+  energy for 2 ms at up to 120% of the current rating while shutting down;
+  HIGHZ disconnects without sinking. HIGHZ is the one for a load that
+  stores energy. The instrument reverts to LOWZ by itself on a priority
+  mode change.
+- **The three sense-lead faults are not equivalent.** An OPEN sense lead
+  raises the sense fault (SF, questionable bit 13) within ~50 us; the
+  instrument falls back to local sensing and **keeps regulating**, with the
+  output terminals ~1% above the programmed value, and clears by itself when
+  the leads are reconnected. That is an accuracy fault, not a shutdown - and
+  1% of the programmed value is 0.8 V at 80 V, wider than most tolerances a
+  test would assert. Whether the measured `voltage` channel shows that error is
+  undocumented and unverified here, so `sense_fault` is the evidence, not the
+  reading. A
+  SHORTED sense lead trips over-voltage protection and disables the output; a
+  REVERSED one trips negative over-voltage protection. Neither of the latter
+  two is programmable, and neither is detectable until the output is enabled,
+  so mis-wiring is only found by briefly energizing the load. A test that
+  cannot tolerate the 1% should promote the fault to a shutdown: `OpenSense`
+  is a signal-expression input, so routing it to the user protection makes it
+  latching (verified on the instrument).
+- **The I/O watchdog** (`OUTPut:PROTection:WDOG`) shuts the output down
+  when SCPI traffic stops, which is a genuine dead-man's switch for a
+  driver that polls continuously - a SIGKILLed driver leaves the
+  instrument to de-energize itself. This driver exposes it and never arms
+  it: that is a test's decision. Note traffic on *any* remote interface
+  resets the timer, so a browser on the instrument's web page holds it
+  off.
+
+**What is deliberately not declared.** This unit reports `*OPT?` as `0`,
+so the option-gated subsystems are absent and are not declared: output
+lists and Arb (Option 303), the digitizer's programmable sample rate,
+external datalogging and array readback (302), the low current range and
+seamless ranging (301), the black box recorder, and the
+disconnect/polarity-reverse relays (760/761). Also unavailable on this
+model regardless: `VOLTage:BWIDth`, `SENSe:WINDow` and
+`MEASure:POWer:MAXimum?`/`MINimum?` - though the voltage and current
+MAX/MIN/HIGH/LOW measurements do work. And three things the instrument
+supports but this driver will not expose: the `CALibrate` subsystem
+(which can degrade accuracy, and which the instrument itself guards with
+a password), `SYSTem:SECurity:IMMediate` (erases all user memory and
+reboots), and `HCOPy:SDUMp:DATA?` (a binary image block a line-oriented
+transport cannot carry).
 
 ## Adding a new device type
 
