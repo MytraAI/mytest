@@ -126,9 +126,10 @@ class BrakeEnduranceTest(BaseYdriveTest):
     """How long the brake holds what it stopped before the distance is taken, so creep
     counts against that distance. Nothing drives, so movement across it is slip."""
 
-    DWELL_S = 600.0
+    DWELL_S = 300.0
     """How long each cycle rests at the start line, on the brake with the axis idle -
-    nothing dissipates. Ten minutes is ~6 events an hour, each from a cold brake."""
+    nothing dissipates. Five minutes is ~12 events an hour, each from a brake that has
+    had half as long to give its heat back."""
 
     MOVE_TIMEOUT_S = 45.0
     """How long a move to the start line may take: 110 turns is 5 s at this ceiling and
