@@ -33,9 +33,12 @@ import pytest
 
 from hardware.backend import HardwareError, MissingChannelError
 from hardware.n6974a.n6974a_backend import (
+    CEILING_CURRENT_A,
+    CEILING_VOLTAGE_V,
     MAX_CONSECUTIVE_FRAME_FAILURES,
     N6974aBackend,
     SLOW_ACTIONS,
+    UNRATED_CHANNELS,
     _FRAME_CHANNELS,
 )
 from hardware.n6974a.n6974a_channels import (
@@ -761,11 +764,13 @@ async def test_the_slow_commands_get_a_longer_read_timeout():
 # --- clamping --------------------------------------------------------------
 
 @sync
-async def test_a_voltage_above_the_instrument_maximum_is_clamped_not_refused():
+async def test_a_voltage_above_the_rating_is_clamped_not_refused():
+    """Clamped to the 80 V rating, not the 81.6 V the instrument reports as its
+    programmable maximum."""
     backend, fake = await connected_backend()
     fake.messages.clear()
     await backend.execute("set_voltage", value=200.0)
-    assert fake.messages[0] == "VOLT 81.6;:SYST:ERR?"
+    assert fake.messages[0] == f"VOLT {CEILING_VOLTAGE_V};:SYST:ERR?"
     frame = await backend._read_frame()
     assert frame["clamped_voltage"] is True
     assert frame["clamped_voltage_request"] == pytest.approx(200.0)
@@ -773,14 +778,32 @@ async def test_a_voltage_above_the_instrument_maximum_is_clamped_not_refused():
 
 
 @sync
-async def test_a_current_above_the_instrument_maximum_is_clamped():
+async def test_a_current_above_the_rating_is_clamped():
     backend, fake = await connected_backend()
     fake.messages.clear()
     await backend.execute("set_current_limit", value=40.0)
-    assert fake.messages[0] == "CURR:LIM 25.5;:SYST:ERR?"
+    assert fake.messages[0] == f"CURR:LIM {CEILING_CURRENT_A};:SYST:ERR?"
     frame = await backend._read_frame()
     assert frame["clamped_current"] is True
     assert frame["clamped_current_request"] == pytest.approx(40.0)
+
+
+def test_the_rating_is_tighter_than_what_the_instrument_reports():
+    """The whole reason the ceiling exists. If the instrument ever reported a
+    range inside its rating, the ceiling would be dead code and the clamp would
+    silently be governed by the reported range alone."""
+    assert CEILING_VOLTAGE_V < 81.6
+    assert CEILING_CURRENT_A < 25.5
+
+
+def test_the_ovp_threshold_keeps_the_instrument_s_own_range():
+    """OVP is a protection threshold, not an output setpoint: one set above the
+    rated output is a legitimate way to keep it out of the way, so it is not
+    held to 80 V."""
+    assert "ovp_level" in UNRATED_CHANNELS
+    backend = N6974aBackend(host="ignored", dissipators=1)
+    backend._limits = {"ovp_level": (0.0, 96.0)}
+    assert backend._clamp("set_ovp", 96.0) == 96.0
 
 
 @sync
@@ -1063,6 +1086,108 @@ def test_the_transport_turns_a_reset_into_a_hardware_error():
             await transport.query("VOLT?")
 
     asyncio.run(body())
+
+
+def test_a_stalled_first_connect_is_retried(monkeypatch):
+    """After this instrument powers on, a connection to the SCPI port can hang
+    until it times out while the host is otherwise answering; a fresh handshake
+    gets in. Since an N7909A is only discovered at power-on, a stand that uses
+    one meets this on every power cycle."""
+    import hardware.n6974a.transport as transport_module
+    from hardware.n6974a.transport import KeysightSocketTransport
+
+    attempts = []
+
+    async def flaky_open_connection(host, port):
+        attempts.append((host, port))
+        if len(attempts) < 3:
+            await asyncio.sleep(3600)  # hangs until the per-attempt timeout
+        return ("reader", "writer")
+
+    monkeypatch.setattr(transport_module.asyncio, "open_connection", flaky_open_connection)
+
+    async def body():
+        transport = KeysightSocketTransport(
+            "192.0.2.1", connect_timeout_s=0.01, connect_retry_delay_s=0
+        )
+        await transport.open()
+        assert transport.is_open
+        assert len(attempts) == 3, "each attempt must open a new connection, not await the old one"
+
+    asyncio.run(body())
+
+
+def test_every_connect_attempt_failing_raises_and_names_the_count(monkeypatch):
+    import hardware.n6974a.transport as transport_module
+    from hardware.n6974a.transport import KeysightSocketTransport
+    from hardware.n6974a.transport import CONNECT_ATTEMPTS
+
+    attempts = []
+
+    async def always_hangs(host, port):
+        attempts.append((host, port))
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(transport_module.asyncio, "open_connection", always_hangs)
+
+    async def body():
+        transport = KeysightSocketTransport(
+            "192.0.2.1", connect_timeout_s=0.01, connect_retry_delay_s=0
+        )
+        with pytest.raises(HardwareError, match=f"{CONNECT_ATTEMPTS} attempts"):
+            await transport.open()
+        assert not transport.is_open
+        assert len(attempts) == CONNECT_ATTEMPTS
+
+    asyncio.run(body())
+
+
+def test_a_refused_connection_is_retried_and_still_explains_the_connection_budget(monkeypatch):
+    """An OSError is as retryable as a timeout here, and the message a caller
+    finally gets must still name the six-connection limit."""
+    import hardware.n6974a.transport as transport_module
+    from hardware.n6974a.transport import KeysightSocketTransport
+    from hardware.n6974a.transport import CONNECT_ATTEMPTS
+
+    attempts = []
+
+    async def always_refused(host, port):
+        attempts.append((host, port))
+        raise ConnectionRefusedError(61, "Connection refused")
+
+    monkeypatch.setattr(transport_module.asyncio, "open_connection", always_refused)
+
+    async def body():
+        transport = KeysightSocketTransport(
+            "192.0.2.1", connect_timeout_s=0.01, connect_retry_delay_s=0
+        )
+        with pytest.raises(HardwareError, match="six") as caught:
+            await transport.open()
+        assert f"{CONNECT_ATTEMPTS} attempts" in str(caught.value)
+        assert len(attempts) == CONNECT_ATTEMPTS
+
+    asyncio.run(body())
+
+
+def test_the_connect_budget_fits_inside_a_command_client_timeout():
+    """connect_backend() carries the retries and then probes every declared
+    query, all inside the command client's timeout. If the retry budget alone
+    approached that, a slow-but-reachable instrument would be abandoned
+    mid-connect."""
+    from hardware.n6974a.n6974a_command_client import DEFAULT_TIMEOUT_MS
+    from hardware.n6974a.transport import (
+        CONNECT_ATTEMPTS,
+        CONNECT_RETRY_DELAY_S,
+        DEFAULT_CONNECT_TIMEOUT_S,
+    )
+
+    worst_case_s = CONNECT_ATTEMPTS * DEFAULT_CONNECT_TIMEOUT_S + (
+        (CONNECT_ATTEMPTS - 1) * CONNECT_RETRY_DELAY_S
+    )
+    assert worst_case_s < DEFAULT_TIMEOUT_MS / 1000 / 2, (
+        f"the connect retry budget is {worst_case_s:.1f}s against a "
+        f"{DEFAULT_TIMEOUT_MS / 1000:.0f}s client timeout, leaving too little for the query probe"
+    )
 
 
 @sync

@@ -83,10 +83,23 @@ silence, not a slow instrument - which is why the few commands that really do
 block for longer pass their own timeout instead of this being raised for
 everything (see the backend's SLOW_ACTIONS)."""
 
-DEFAULT_CONNECT_TIMEOUT_S = 5.0
-"""Ceiling for opening the socket. Generous relative to the ~400 ms this
-instrument takes to complete a TCP handshake, so a busy instrument is not
-mistaken for an absent one."""
+DEFAULT_CONNECT_TIMEOUT_S = 2.0
+"""Ceiling for one attempt at opening the socket. Generous relative to the
+~400 ms this instrument takes to complete a TCP handshake, and short enough that
+CONNECT_ATTEMPTS of them still finish well inside a command client's timeout."""
+
+CONNECT_ATTEMPTS = 3
+"""How many times to try opening the socket before giving up.
+
+For a while after this instrument powers on, a connection to the SCPI port can
+hang until it times out while ICMP and the port itself already answer - a fresh
+handshake succeeds where waiting on the stalled one does not. Since an N7909A
+dissipator is only discovered at power-on, power-cycling the supply is routine on
+a stand that uses one, so a first attempt meeting that window is expected rather
+than exceptional."""
+
+CONNECT_RETRY_DELAY_S = 1.0
+"""How long to wait between attempts at opening the socket."""
 
 TERMINATOR = b"\n"
 """Response message terminator. Keysight sockets terminate every query response
@@ -139,11 +152,17 @@ class KeysightSocketTransport:
         port: int = DEFAULT_PORT,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
+        connect_attempts: int = CONNECT_ATTEMPTS,
+        connect_retry_delay_s: float = CONNECT_RETRY_DELAY_S,
     ) -> None:
         self._host = host
         self._port = port
         self._timeout_s = timeout_s
         self._connect_timeout_s = connect_timeout_s
+        if connect_attempts < 1:
+            raise ValueError(f"connect_attempts must be at least 1, got {connect_attempts}")
+        self._connect_attempts = connect_attempts
+        self._connect_retry_delay_s = connect_retry_delay_s
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._lock = asyncio.Lock()
@@ -161,25 +180,47 @@ class KeysightSocketTransport:
         return f"{self._host}:{self._port}"
 
     async def open(self) -> None:
-        """Open the socket, or raise HardwareError explaining what to check."""
-        try:
-            self._reader, self._writer = await asyncio.wait_for(
-                asyncio.open_connection(self._host, self._port), timeout=self._connect_timeout_s
+        """Open the socket, retrying a stalled handshake, or raise HardwareError
+        explaining what to check.
+
+        Every attempt is logged, so an instrument that is genuinely absent says
+        so in the log rather than only taking longer to fail."""
+        attempts = self._connect_attempts
+        for attempt in range(1, attempts + 1):
+            try:
+                self._reader, self._writer = await asyncio.wait_for(
+                    asyncio.open_connection(self._host, self._port), timeout=self._connect_timeout_s
+                )
+            # TimeoutError is a subclass of OSError, so this catches the stalled
+            # handshake and a refusal alike; they are told apart below.
+            except OSError as exc:
+                cause = exc
+            else:
+                logger.info(
+                    "opened %s%s", self.address, f" on attempt {attempt}" if attempt > 1 else ""
+                )
+                return
+            logger.warning(
+                "attempt %d of %d to open %s failed: %r",
+                attempt, attempts, self.address, cause,
             )
-        except asyncio.TimeoutError as exc:
-            raise HardwareError(
-                f"no answer from {self.address} within {self._connect_timeout_s:.1f}s - check the "
-                "instrument is powered and the address is current (it self-assigns a link-local "
-                "address when no DHCP server is present, and mDNS advertises it as "
+            if attempt < attempts:
+                await asyncio.sleep(self._connect_retry_delay_s)
+
+        if isinstance(cause, TimeoutError):
+            detail = (
+                f"no answer within {self._connect_timeout_s:.1f}s on any of {attempts} attempts - "
+                "check the instrument is powered and the address is current (it self-assigns a "
+                "link-local address when no DHCP server is present, and mDNS advertises it as "
                 "A-<model>-<serial>.local)"
-            ) from exc
-        except OSError as exc:
-            raise HardwareError(
-                f"could not open {self.address}: {exc} - the instrument allows up to six "
+            )
+        else:
+            detail = (
+                f"{cause} on every one of {attempts} attempts - the instrument allows up to six "
                 "simultaneous socket and telnet connections in total, so this can mean that "
                 "budget is exhausted by other clients"
-            ) from exc
-        logger.info("opened %s", self.address)
+            )
+        raise HardwareError(f"could not open {self.address}: {detail}") from cause
 
     async def close(self) -> None:
         """Close the socket, tolerating a link that is already gone.

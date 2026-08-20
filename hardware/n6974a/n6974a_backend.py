@@ -70,13 +70,18 @@ COMMANDED SETPOINTS ARE CLAMPED, NOT REFUSED. A voltage or current beyond what
 the instrument allows is applied at the limit instead, with a warning naming
 what was asked and what was applied, and a sticky telemetry channel recording
 that it happened. The bounds are read from the instrument itself
-(`VOLTage? MAX`, `CURRent:LIMit:NEGative? MIN` and so on) rather than written
-down, and the negative bound is additionally held to what the declared N7909A
-count permits. Clamping applies only to the quantities that carry energy -
-setpoints, limits, triggered levels and the OVP threshold. Everything else is
-passed through and an out-of-range value raises with the instrument's own error
-text, because silently altering a watchdog delay or a comparator level would
-hide a mistake rather than contain a hazard.
+(`VOLTage? MAX`, `CURRent:LIMit:NEGative? MIN` and so on), narrowed to this
+model's rating where that is tighter than the programmable range it reports
+(CEILING_VOLTAGE_V/CEILING_CURRENT_A), and the negative bound is additionally
+held to what the declared N7909A count permits. The rating is a fact about an
+N6974A, so a stand needing a tighter ceiling than 80 V/25 A owns that itself.
+Clamping applies only to the quantities that carry energy - setpoints, limits and
+triggered levels. Everything else is passed through and an out-of-range value
+raises with the instrument's own error text, because silently altering a watchdog
+delay or a comparator level would hide a mistake rather than contain a hazard.
+The OVP threshold is clamped too, but to the instrument's own range rather than
+the rating: a threshold above the rated output is a legitimate way to leave
+over-voltage protection out of the way.
 
 BEHAVIOUR OF THIS INSTRUMENT worth knowing before writing a test against it:
   - ~0.4 ms per query round trip, and a compound message costs one round trip
@@ -447,6 +452,29 @@ _CLAMP_QUANTITY: Dict[str, str] = {
 hits the upper bound. A clamp at the lower bound of a signed quantity is
 recorded under `sink_current` instead, since that is the direction it was
 heading."""
+
+CEILING_VOLTAGE_V = 80.0
+CEILING_CURRENT_A = 25.0
+"""This model's rated output, and the most this driver will command.
+
+The instrument reports a programmable range wider than its rating - 81.6 V and
+25.5 A - so a setpoint is held to the smaller of the two. These are properties of
+an N6974A rather than of any stand: a testbed that needs a tighter ceiling than
+the hardware's own owns that limit itself, because the same driver serves a stand
+running a higher bus."""
+
+UNRATED_CHANNELS = frozenset({"ovp_level"})
+"""The clamped channels the rating does NOT bind, which keep the instrument's own
+reported range instead.
+
+Every other clamped channel gets the rating, so a clamped action added later is
+held to it without anyone remembering to opt in - the failure of an opt-in list
+would be a setpoint quietly clamped at 81.6 V again, which is the thing the
+rating exists to prevent.
+
+`ovp_level` is here because it is a protection threshold rather than an output
+setpoint: one set above the rated output is a legitimate way to leave
+over-voltage protection out of the way, so it keeps its 0..96 V range."""
 
 
 # --- Command tables --------------------------------------------------------
@@ -840,6 +868,12 @@ def _validate_channel_coverage() -> None:
             raise AssertionError(f"{action} is clamped against {channel}, which has no query")
     if set(_CLAMP_QUANTITY.values()) - set(CLAMPED_QUANTITIES):
         raise AssertionError("a clamped action names a quantity with no clamped_* channel")
+    unknown = UNRATED_CHANNELS - {channel for channel, _ in _CLAMPED.values()}
+    if unknown:
+        raise AssertionError(
+            f"UNRATED_CHANNELS names channels nothing clamps, so the exemption does "
+            f"nothing: {sorted(unknown)}"
+        )
 
 
 _validate_channel_coverage()
@@ -1007,9 +1041,12 @@ class N6974aBackend(HardwareBackend):
 
         The instrument is the authority on its own limits and reports them
         differently from the nameplate - 81.6 V and 25.5 A against 80 V and
-        25 A - so they are asked for rather than written down. This also picks
-        up the negative-current floor, which is the one number that reflects
-        how many N7909A dissipators the supply recognised at power-on."""
+        25 A - so they are asked for rather than written down. What is read here
+        stays as reported: `_verify_dissipators` derives the expected sink floor
+        from it, and `_clamp` narrows setpoints to the rating separately. This
+        also picks up the negative-current floor, which is the one number that
+        reflects how many N7909A dissipators the supply recognised at
+        power-on."""
         for action, (channel, _) in _CLAMPED.items():
             query = _QUERIES[channel][0]
             base = query.rstrip("?")
@@ -1437,6 +1474,13 @@ class N6974aBackend(HardwareBackend):
             return value
         channel, sink_capped = limited
         low, high = self._limits[channel]
+        if channel not in UNRATED_CHANNELS:
+            # The instrument reports a range wider than the model's rating, so
+            # the rating binds as well.
+            ceiling = (
+                CEILING_VOLTAGE_V if _CLAMP_QUANTITY[action] == "voltage" else CEILING_CURRENT_A
+            )
+            low, high = max(low, -ceiling), min(high, ceiling)
         if sink_capped and self._sink_ceiling_a is not None:
             # The instrument's own floor already reflects the dissipators it
             # recognised, and connect() has confirmed the two agree. Taking the
@@ -1457,7 +1501,7 @@ class N6974aBackend(HardwareBackend):
         self._clamped_request[quantity] = requested
         unit = "V" if quantity == "voltage" else "A"
         logger.warning(
-            "clamped %s: asked %g %s, applying %g %s (this instrument's %s range is %g..%g %s%s)",
+            "clamped %s: asked %g %s, applying %g %s (the permitted %s range is %g..%g %s%s)",
             action, requested, unit, applied, unit, channel, low, high, unit,
             f", with the sink floor held to {self._dissipators} dissipator(s)" if sink_capped else "",
         )
