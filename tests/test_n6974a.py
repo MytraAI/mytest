@@ -40,6 +40,7 @@ from hardware.n6974a.n6974a_backend import (
     SLOW_ACTIONS,
     UNRATED_CHANNELS,
     _FRAME_CHANNELS,
+    _QUERIES,
 )
 from hardware.n6974a.n6974a_channels import (
     CLAMPED_QUANTITIES,
@@ -293,6 +294,14 @@ class FakeInstrument:
         window."""
         self.backend = None
         self.observed_teardown_flag_during_open: List[bool] = []
+        self.acquired = False
+        """Whether a MEASure has happened, so a FETCh has data to return.
+
+        The real instrument answers a FETCh with SILENCE until something has
+        acquired - "Fetch commands return measurement data that has been
+        previously acquired... FETCh queries do not generate new measurements".
+        A fake that answers anyway lets a connect-time probe order that cannot
+        work on the bench pass here."""
 
     # --- transport surface -------------------------------------------------
 
@@ -354,6 +363,15 @@ class FakeInstrument:
                 # as a timeout, and the transport reopens the link.
                 self.resynchronisations += 1
                 raise HardwareError(f"no response to {message!r} within 5.0s (fake)")
+            if part.startswith("MEAS:"):
+                self.acquired = True
+            elif part.startswith("FETC:") and not self.acquired:
+                # Nothing acquired yet, so nothing to fetch: silence, and the
+                # whole message goes with it.
+                self.resynchronisations += 1
+                raise HardwareError(
+                    f"no response to {message!r} within 5.0s (fake: FETCh before any MEASure)"
+                )
             if part in self.errors:
                 self._queue.append(self.errors[part])
 
@@ -1304,3 +1322,36 @@ def test_nothing_in_the_driver_is_platform_specific():
         source = path.read_text()
         for token in banned:
             assert token not in source, f"{path.name} uses {token!r}"
+
+
+@sync
+async def test_connect_acquires_before_probing_the_fetch_channels():
+    """A FETCh returns previously acquired data and never acquires, so on an
+    instrument that has not measured since power-on FETC:CURR? and FETC:POW?
+    answer with silence - indistinguishable here from an absent command.
+
+    `current` and `power` sort ahead of `voltage`, which is the query that
+    acquires, so a plain channel-order sweep reports both as unimplemented and
+    refuses to connect a perfectly healthy instrument. Power-cycling is routine
+    wherever an N7909A is fitted, since it is only discovered at power-on, so
+    this is the normal state of the hardware rather than an edge case."""
+    backend, fake = await connected_backend()
+
+    first_measure = next(i for i, part in enumerate(fake.sent) if part.startswith("MEAS:"))
+    first_fetch = next(i for i, part in enumerate(fake.sent) if part.startswith("FETC:"))
+    assert first_measure < first_fetch, (
+        "connect fetched before it measured, which answers with silence on real hardware"
+    )
+    assert fake.sent[first_measure] == _QUERIES["voltage"][0]
+
+
+@sync
+async def test_a_fetch_channel_that_really_is_absent_is_still_reported():
+    """Priming must not paper over an actually missing FETCh command - the
+    distinction is silence-because-nothing-acquired against
+    silence-because-unimplemented, and only the first is the driver's fault."""
+    fake = FakeInstrument(unsupported=["FETC:POW?"])
+    backend = N6974aBackend(host="fake", dissipators=1, transport=fake)
+    fake.backend = backend
+    with pytest.raises(MissingChannelError, match="power"):
+        await backend.connect()

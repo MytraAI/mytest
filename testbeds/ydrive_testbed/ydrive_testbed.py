@@ -366,6 +366,19 @@ class YdriveTestbed:
     check_rails() calls it wrong. The instrument reports voltage setpoints to
     10 mV and current to 1 mA, so this is a rounding allowance, not a band."""
 
+    SETPOINT_SETTLE_ATTEMPTS = 6
+    SETPOINT_SETTLE_DELAY_S = 0.2
+    """How many times, and how far apart, check_rails() re-reads before calling a
+    setpoint wrong.
+
+    A telemetry frame can be older than the write it is being asked about. This
+    driver holds setpoints in a cached tier, re-read at connect and after a write
+    rather than every frame, and latest_frame() answers with the newest frame
+    already queued rather than waiting for one published after the write. So the
+    first read can legitimately still carry the previous run's values - which is
+    invisible whenever those happen to match, and a spurious failure whenever
+    they do not."""
+
     def check_rails(self) -> None:
         """Confirm both rails still hold their configured setpoints, raising if
         not.
@@ -375,7 +388,25 @@ class YdriveTestbed:
         setpoint. Also worth calling from a test wherever a rail's integrity
         matters: the driver's ceiling is per-backend, so it cannot stop 48 V
         being commanded onto the 24 V brake rail, and a test holds the same
-        supply client this testbed does."""
+        supply client this testbed does.
+
+        Re-reads a few times before failing - see SETPOINT_SETTLE_ATTEMPTS."""
+        for attempt in range(self.SETPOINT_SETTLE_ATTEMPTS):
+            wrong = self._setpoint_disagreements()
+            if not wrong:
+                return
+            if attempt + 1 < self.SETPOINT_SETTLE_ATTEMPTS:
+                time.sleep(self.SETPOINT_SETTLE_DELAY_S)
+        raise RuntimeError(
+            "the supply's rail setpoints do not match this stand's configuration:\n  "
+            + "\n  ".join(wrong)
+            + "\nSomething commanded a setpoint outside this testbed, or a write was refused. "
+            "See MOTOR_BUS/BRAKE_BUS in this module for what the rails should be."
+        )
+
+    def _setpoint_disagreements(self) -> List[str]:
+        """Every configured rail setpoint the supply is not currently holding,
+        from one telemetry frame."""
         channels = self._supply_channels()
         wrong = []
         for rail in RAILS:
@@ -386,13 +417,7 @@ class YdriveTestbed:
                 actual = channels[channel]
                 if abs(float(actual) - expected) > self.SETPOINT_TOLERANCE:
                     wrong.append(f"{rail.name} {quantity}: expected {expected}, instrument holds {actual}")
-        if wrong:
-            raise RuntimeError(
-                "the supply's rail setpoints do not match this stand's configuration:\n  "
-                + "\n  ".join(wrong)
-                + "\nSomething commanded a setpoint outside this testbed, or a write was refused. "
-                "See MOTOR_BUS/BRAKE_BUS in this module for what the rails should be."
-            )
+        return wrong
 
     def stop(self) -> None:
         """Tear the stand down in a safe order, and finish even if a step fails.

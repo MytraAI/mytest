@@ -59,7 +59,6 @@ from testcases.zdrive.rulebooks.zdrive_rulebook import (
 
 def test_the_stand_is_wired_as_described():
     assert MOTOR_BUS.voltage_v == 48.0
-    assert MOTOR_BUS.voltage_limit_v == 52.0
     assert MOTOR_BUS.current_limit_a == 25.0
     assert MOTOR_BUS.sink_current_limit_a == -12.75
     assert MOTOR_BUS.protection_mode == "LOWZ"
@@ -376,13 +375,15 @@ def _testbed_with_channels(bus_channels, supply_channels=None):
     testbed = ZdriveTestbed()
     testbed.get_bus_channels = lambda: bus_channels
     testbed.get_supply_channels = lambda: supply_channels
+    # A stubbed frame never changes, so re-reading it cannot help and would only
+    # spend SETPOINT_SETTLE_DELAY_S per attempt.
+    testbed.SETPOINT_SETTLE_ATTEMPTS = 1
     return testbed
 
 
 def _good_bus_channels(**overrides):
     channels = {
         "setpoint_voltage": MOTOR_BUS.voltage_v,
-        "voltage_limit": MOTOR_BUS.voltage_limit_v,
         "current_limit": MOTOR_BUS.current_limit_a,
         "current_limit_negative": MOTOR_BUS.sink_current_limit_a,
         "protection_mode": MOTOR_BUS.protection_mode,
@@ -464,11 +465,13 @@ def test_the_source_limit_is_not_below_the_bound_that_watches_it():
     assert MOTOR_BUS.current_limit_a >= MAX_BUS_CURRENT_A
 
 
-def test_the_voltage_limit_agrees_with_the_overvoltage_bound():
-    """It does not bind in voltage priority, so its job is to tell the same story
-    as the bound rather than a second one."""
-    assert MOTOR_BUS.voltage_limit_v == MAX_BUS_VOLTAGE_V
-    assert MOTOR_BUS.voltage_limit_v > MOTOR_BUS.voltage_v
+def test_the_stand_declares_no_voltage_ceiling_at_the_instrument():
+    """VOLTage:LIMit is the ceiling for CURRENT priority; setting it in voltage
+    priority is refused with +315 "must be in current priority mode". So the bus
+    voltage ceiling lives in zdrive_rulebook, not on the instrument, and MotorBus
+    must not carry a field that cannot be written."""
+    assert not hasattr(MOTOR_BUS, "voltage_limit_v")
+    assert MAX_BUS_VOLTAGE_V > MOTOR_BUS.voltage_v
 
 
 def test_the_bus_is_configured_off_and_in_voltage_priority_before_anything_else():
@@ -486,8 +489,6 @@ def test_the_bus_is_configured_off_and_in_voltage_priority_before_anything_else(
             calls.append(("set_priority_mode", mode))
         def set_voltage(self, volts):
             calls.append(("set_voltage", volts))
-        def set_voltage_limit(self, volts):
-            calls.append(("set_voltage_limit", volts))
         def set_current_limit(self, amps):
             calls.append(("set_current_limit", amps))
         def set_current_limit_negative(self, amps):
@@ -502,7 +503,7 @@ def test_the_bus_is_configured_off_and_in_voltage_priority_before_anything_else(
     names = [name for name, _ in calls]
     assert names[0] == "enable_output" and calls[0][1] is False, "the bus was not switched off first"
     assert names[1] == "set_priority_mode", "the priority mode must be written before the setpoints"
-    for setting in ("set_voltage", "set_voltage_limit", "set_current_limit",
+    for setting in ("set_voltage", "set_current_limit",
                     "set_current_limit_negative", "set_protection_mode"):
         assert names.index(setting) > names.index("set_priority_mode"), (
             f"{setting} lands before the priority-mode write, which would reset it"
@@ -518,7 +519,6 @@ def test_the_bus_is_configured_with_the_values_the_stand_declares():
         def enable_output(self, enabled): pass
         def set_priority_mode(self, mode): written["priority_mode"] = mode
         def set_voltage(self, volts): written["voltage"] = volts
-        def set_voltage_limit(self, volts): written["voltage_limit"] = volts
         def set_current_limit(self, amps): written["current_limit"] = amps
         def set_current_limit_negative(self, amps): written["sink"] = amps
         def set_protection_mode(self, mode): written["protection_mode"] = mode
@@ -530,7 +530,6 @@ def test_the_bus_is_configured_with_the_values_the_stand_declares():
     assert written == {
         "priority_mode": MOTOR_BUS.priority_mode,
         "voltage": MOTOR_BUS.voltage_v,
-        "voltage_limit": MOTOR_BUS.voltage_limit_v,
         "current_limit": MOTOR_BUS.current_limit_a,
         "sink": MOTOR_BUS.sink_current_limit_a,
         "protection_mode": MOTOR_BUS.protection_mode,
@@ -546,7 +545,6 @@ def test_configuring_the_bus_never_energizes_it():
         def enable_output(self, enabled): enables.append(enabled)
         def set_priority_mode(self, mode): pass
         def set_voltage(self, volts): pass
-        def set_voltage_limit(self, volts): pass
         def set_current_limit(self, amps): pass
         def set_current_limit_negative(self, amps): pass
         def set_protection_mode(self, mode): pass
@@ -555,3 +553,35 @@ def test_configuring_the_bus_never_energizes_it():
     testbed._bus = RecordingBus()
     testbed._configure_bus()
     assert enables == [False]
+
+
+def test_check_rails_re_reads_before_calling_a_setpoint_wrong():
+    """A telemetry frame can be older than the write it is being asked about: the
+    CPX400DP driver holds setpoints in a cached tier and latest_frame() answers
+    with the newest frame already queued, not one published after the write. The
+    first read legitimately carries the previous run's values, which is invisible
+    whenever those happen to match and a spurious failure whenever they do not."""
+    stale = {f"setpoint_voltage_{BRAKE_BUS.output}": 11.29,
+             f"setpoint_current_{BRAKE_BUS.output}": 2.309}
+    fresh = {f"setpoint_voltage_{BRAKE_BUS.output}": BRAKE_BUS.voltage_v,
+             f"setpoint_current_{BRAKE_BUS.output}": BRAKE_BUS.current_limit_a}
+    reads = [stale, stale, fresh]
+
+    testbed = ZdriveTestbed()
+    testbed.get_bus_channels = lambda: _good_bus_channels()
+    testbed.get_supply_channels = lambda: reads.pop(0)
+    testbed.SETPOINT_SETTLE_DELAY_S = 0
+    testbed.check_rails()
+    assert reads == [], "check_rails gave up before the fresh frame arrived"
+
+
+def test_check_rails_still_fails_when_a_setpoint_never_settles():
+    """Retrying must not turn a genuinely wrong setpoint into a pass."""
+    wrong = {f"setpoint_voltage_{BRAKE_BUS.output}": 48.0,
+             f"setpoint_current_{BRAKE_BUS.output}": BRAKE_BUS.current_limit_a}
+    testbed = ZdriveTestbed()
+    testbed.get_bus_channels = lambda: _good_bus_channels()
+    testbed.get_supply_channels = lambda: wrong
+    testbed.SETPOINT_SETTLE_DELAY_S = 0
+    with pytest.raises(RuntimeError, match="zdrive brake voltage"):
+        testbed.check_rails()

@@ -76,16 +76,16 @@ from protocol.wire import (
 
 logger = logging.getLogger(__name__)
 
-CPX400DP_HOST = "169.254.229.133"
-"""This stand's supply.
+CPX400DP_HOST = "169.254.101.202"
+"""This stand's brake supply, serial 603720.
 
 Not a stable address: the instrument reports DHCP, but its segment has no DHCP
 server, so it self-assigns a link-local address that changes if a DHCP server
-appears or on an address collision. `t599542.local` is the same instrument by
+appears or on an address collision. `t603720.local` is the same instrument by
 mDNS name and follows it when the address moves, at the cost of needing an mDNS
 responder on the host. Pass either as ZdriveTestbed(cpx400dp_host=...)."""
 
-CPX400DP_MDNS_HOST = "t599542.local"
+CPX400DP_MDNS_HOST = "t603720.local"
 """The same supply by mDNS name: it advertises itself as `t<serial>.local`, which
 follows it when its address changes. Needs an mDNS responder on the host - macOS
 has one built in, a Windows or CentOS stand may not. Pass either this or
@@ -130,7 +130,6 @@ class MotorBus:
 
     name: str
     voltage_v: float
-    voltage_limit_v: float
     current_limit_a: float
     sink_current_limit_a: float
     protection_mode: str
@@ -148,7 +147,6 @@ class MotorBus:
 MOTOR_BUS = MotorBus(
     name="zdrive motor bus",
     voltage_v=48.0,
-    voltage_limit_v=52.0,
     current_limit_a=25.0,
     sink_current_limit_a=-12.75,
     protection_mode="LOWZ",
@@ -159,12 +157,14 @@ MOTOR_BUS = MotorBus(
 WHICH OF THESE BINDS DEPENDS ON priority_mode, which is why it is declared here
 rather than assumed. In voltage priority - what a bus supply runs in -
 `voltage_v` is the regulated value, `current_limit_a` is its positive ceiling and
-`sink_current_limit_a` its negative one. `voltage_limit_v` is the ceiling in
-CURRENT priority, so on this stand it does not bind: what holds the bus to 48 V
-in voltage priority is the setpoint itself, check_rails() confirming it, and
-zdrive_rulebook's bus_overvoltage_bound. It is set to the same 52 V as that
-bound, so the ceiling and the bound tell the same story, and a stand ever moved
-to current priority already carries the right one.
+`sink_current_limit_a` its negative one.
+
+THERE IS NO VOLTAGE CEILING HERE, because the instrument will not accept one in
+this mode: `VOLTage:LIMit` is the ceiling for CURRENT priority, and setting it in
+voltage priority is refused with `+315,"Settings conflict error; chan 1 must be
+in current priority mode"`. What holds the bus to 48 V is the setpoint itself,
+check_rails() confirming it, and zdrive_rulebook's bus_overvoltage_bound at
+52 V.
 
 25 A is this model's rated output, so the positive limit is set wide on purpose:
 current limiting for this stand is the ODrive's soft/hard phase limits, and a
@@ -387,14 +387,13 @@ class ZdriveTestbed:
         )
 
         self.bus.set_voltage(MOTOR_BUS.voltage_v)
-        self.bus.set_voltage_limit(MOTOR_BUS.voltage_limit_v)
         self.bus.set_current_limit(MOTOR_BUS.current_limit_a)
         self.bus.set_current_limit_negative(MOTOR_BUS.sink_current_limit_a)
         self.bus.set_protection_mode(MOTOR_BUS.protection_mode)
         logger.info(
-            "%s configured: %.1f V (limit %.1f V), sourcing to %.1f A (%.0f W), sinking to "
-            "%.2f A (%.0f W), %s shutdown",
-            MOTOR_BUS.name, MOTOR_BUS.voltage_v, MOTOR_BUS.voltage_limit_v,
+            "%s configured: %.1f V, sourcing to %.1f A (%.0f W), sinking to %.2f A (%.0f W), "
+            "%s shutdown",
+            MOTOR_BUS.name, MOTOR_BUS.voltage_v,
             MOTOR_BUS.current_limit_a, MOTOR_BUS.source_power_w,
             MOTOR_BUS.sink_current_limit_a, MOTOR_BUS.sink_power_w, MOTOR_BUS.protection_mode,
         )
@@ -456,6 +455,19 @@ class ZdriveTestbed:
     check_rails() calls it wrong. The instrument reports voltage setpoints to
     10 mV and current to 1 mA, so this is a rounding allowance, not a band."""
 
+    SETPOINT_SETTLE_ATTEMPTS = 6
+    SETPOINT_SETTLE_DELAY_S = 0.2
+    """How many times, and how far apart, check_rails() re-reads before calling a
+    setpoint wrong.
+
+    A telemetry frame can be older than the write it is being asked about. The
+    CPX400DP driver holds setpoints in a cached tier, re-read at connect and
+    after a write rather than every frame, and latest_frame() answers with the
+    newest frame already queued rather than waiting for one published after the
+    write. So the first read can legitimately still carry the previous run's
+    values - which is invisible whenever those happen to match, and a spurious
+    failure whenever they do not."""
+
     def check_rails(self) -> None:
         """Confirm the motor bus and every rail still hold their configured
         setpoints, raising if not.
@@ -469,12 +481,29 @@ class ZdriveTestbed:
         brake rail's neighbour, and the N6974A's is its own 80 V rating, which is
         far above what this bus may see. Both are correct for a driver serving
         more than one stand, and both leave this check as the thing that knows
-        zdrive runs at 48 V."""
+        zdrive runs at 48 V.
+
+        Re-reads a few times before failing - see SETPOINT_SETTLE_ATTEMPTS."""
+        for attempt in range(self.SETPOINT_SETTLE_ATTEMPTS):
+            wrong = self._setpoint_disagreements()
+            if not wrong:
+                return
+            if attempt + 1 < self.SETPOINT_SETTLE_ATTEMPTS:
+                time.sleep(self.SETPOINT_SETTLE_DELAY_S)
+        raise RuntimeError(
+            "this stand's setpoints do not match its configuration:\n  "
+            + "\n  ".join(wrong)
+            + "\nSomething commanded a setpoint outside this testbed, or a write was refused. "
+            "See MOTOR_BUS/BRAKE_BUS in this module for what they should be."
+        )
+
+    def _setpoint_disagreements(self) -> List[str]:
+        """Every configured setpoint the stand is not currently holding, from one
+        telemetry frame per device."""
         bus = self.get_bus_channels()
         wrong = []
         for quantity, expected, channel in (
             ("bus voltage", MOTOR_BUS.voltage_v, "setpoint_voltage"),
-            ("bus voltage limit", MOTOR_BUS.voltage_limit_v, "voltage_limit"),
             ("bus current limit", MOTOR_BUS.current_limit_a, "current_limit"),
             ("bus sink limit", MOTOR_BUS.sink_current_limit_a, "current_limit_negative"),
         ):
@@ -507,13 +536,7 @@ class ZdriveTestbed:
                 actual = channels[channel]
                 if abs(float(actual) - expected) > self.SETPOINT_TOLERANCE:
                     wrong.append(f"{rail.name} {quantity}: expected {expected}, instrument holds {actual}")
-        if wrong:
-            raise RuntimeError(
-                "this stand's setpoints do not match its configuration:\n  "
-                + "\n  ".join(wrong)
-                + "\nSomething commanded a setpoint outside this testbed, or a write was refused. "
-                "See MOTOR_BUS/BRAKE_BUS in this module for what they should be."
-            )
+        return wrong
 
     def stop(self) -> None:
         """Tear the stand down in a safe order, and finish even if a step fails.

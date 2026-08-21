@@ -746,3 +746,85 @@ async def test_draining_a_clean_link_discards_nothing():
     assert await transport.query("*IDN?") == IDENTITY
     await transport.close()
     server.close()
+
+
+# --- opening the socket -----------------------------------------------------
+
+
+def test_a_stalled_first_connect_is_retried(monkeypatch):
+    """A connection to this instrument can hang until it times out while ICMP and
+    the port itself already answer, and a fresh handshake gets in where waiting
+    on the stalled one does not."""
+    import hardware.cpx400dp.transport as transport_module
+    from hardware.cpx400dp.transport import TtiSocketTransport
+
+    attempts = []
+
+    async def flaky_open_connection(host, port):
+        attempts.append((host, port))
+        if len(attempts) < 3:
+            await asyncio.sleep(3600)  # hangs until the per-attempt timeout
+        return ("reader", "writer")
+
+    monkeypatch.setattr(transport_module.asyncio, "open_connection", flaky_open_connection)
+
+    async def body():
+        transport = TtiSocketTransport(
+            "192.0.2.1", connect_timeout_s=0.01, connect_retry_delay_s=0
+        )
+        await transport.open()
+        assert len(attempts) == 3, "each attempt must open a new connection, not await the old one"
+
+    asyncio.run(body())
+
+
+def test_every_connect_attempt_failing_raises_and_names_the_count(monkeypatch):
+    import hardware.cpx400dp.transport as transport_module
+    from hardware.cpx400dp.transport import CONNECT_ATTEMPTS, TtiSocketTransport
+
+    attempts = []
+
+    async def always_hangs(host, port):
+        attempts.append((host, port))
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(transport_module.asyncio, "open_connection", always_hangs)
+
+    async def body():
+        transport = TtiSocketTransport(
+            "192.0.2.1", connect_timeout_s=0.01, connect_retry_delay_s=0
+        )
+        with pytest.raises(HardwareError, match=f"{CONNECT_ATTEMPTS} attempts"):
+            await transport.open()
+        assert len(attempts) == CONNECT_ATTEMPTS
+
+    asyncio.run(body())
+
+
+def test_a_refused_connection_still_explains_the_single_socket_slot(monkeypatch):
+    """The message a caller finally gets must still name the one-client limit -
+    that is the failure a second driver process on the same stand hits."""
+    import hardware.cpx400dp.transport as transport_module
+    from hardware.cpx400dp.transport import CONNECT_ATTEMPTS, TtiSocketTransport
+
+    async def always_refused(host, port):
+        raise ConnectionRefusedError(61, "Connection refused")
+
+    monkeypatch.setattr(transport_module.asyncio, "open_connection", always_refused)
+
+    async def body():
+        transport = TtiSocketTransport(
+            "192.0.2.1", connect_timeout_s=0.01, connect_retry_delay_s=0
+        )
+        with pytest.raises(HardwareError, match="only one") as caught:
+            await transport.open()
+        assert f"{CONNECT_ATTEMPTS} attempts" in str(caught.value)
+
+    asyncio.run(body())
+
+
+def test_connect_attempts_must_be_at_least_one():
+    from hardware.cpx400dp.transport import TtiSocketTransport
+
+    with pytest.raises(ValueError, match="at least 1"):
+        TtiSocketTransport("192.0.2.1", connect_attempts=0)
