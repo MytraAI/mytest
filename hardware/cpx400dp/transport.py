@@ -48,10 +48,21 @@ the 5025 SCPI-RAW convention are both refused by this firmware."""
 DEFAULT_TIMEOUT_S = 8.0
 """Ceiling for one read. Must exceed the 5 s `with verify` block - see above."""
 
-DEFAULT_CONNECT_TIMEOUT_S = 5.0
-"""Ceiling for opening the socket. Short, because a missing instrument should
-fail setup promptly, and connecting to a present one takes tens of
-milliseconds."""
+DEFAULT_CONNECT_TIMEOUT_S = 2.0
+"""Ceiling for one attempt at opening the socket. Short, because a missing
+instrument should fail setup promptly, connecting to a present one takes tens of
+milliseconds, and CONNECT_ATTEMPTS of these still finish quickly."""
+
+CONNECT_ATTEMPTS = 3
+"""How many times to try opening the socket before giving up.
+
+A connection to this instrument can hang until it times out while ICMP and the
+port itself already answer, and a fresh handshake gets in where waiting on the
+stalled one does not. Seen on a stand whose address had not changed and whose
+port accepted a probe moments later."""
+
+CONNECT_RETRY_DELAY_S = 1.0
+"""How long to wait between attempts at opening the socket."""
 
 DRAIN_TIMEOUT_S = 0.5
 """How long to wait for a late reply after a read has already timed out, so it
@@ -79,11 +90,17 @@ class TtiSocketTransport:
         timeout_s: float = DEFAULT_TIMEOUT_S,
         connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
         drain_timeout_s: float = DRAIN_TIMEOUT_S,
+        connect_attempts: int = CONNECT_ATTEMPTS,
+        connect_retry_delay_s: float = CONNECT_RETRY_DELAY_S,
     ) -> None:
+        if connect_attempts < 1:
+            raise ValueError(f"connect_attempts must be at least 1, got {connect_attempts}")
         self._host = host
         self._port = port
         self._timeout_s = timeout_s
         self._connect_timeout_s = connect_timeout_s
+        self._connect_attempts = connect_attempts
+        self._connect_retry_delay_s = connect_retry_delay_s
         self._drain_timeout_s = drain_timeout_s
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
@@ -98,27 +115,49 @@ class TtiSocketTransport:
         return f"{self._host}:{self._port}"
 
     async def open(self) -> None:
-        """Open the socket, or raise HardwareError explaining what to check.
+        """Open the socket, retrying a stalled handshake, or raise HardwareError
+        explaining what to check.
 
         A refused connection most often means something else already holds the
         instrument's single raw-socket slot, so the error says so - that is the
-        failure a second driver process on the same stand would hit."""
-        try:
-            self._reader, self._writer = await asyncio.wait_for(
-                asyncio.open_connection(self._host, self._port), timeout=self._connect_timeout_s
+        failure a second driver process on the same stand would hit.
+
+        Every attempt is logged, so an instrument that is genuinely absent says
+        so in the log rather than only taking longer to fail."""
+        attempts = self._connect_attempts
+        for attempt in range(1, attempts + 1):
+            try:
+                self._reader, self._writer = await asyncio.wait_for(
+                    asyncio.open_connection(self._host, self._port), timeout=self._connect_timeout_s
+                )
+            # TimeoutError is a subclass of OSError, so this catches the stalled
+            # handshake and a refusal alike; they are told apart below.
+            except OSError as exc:
+                cause = exc
+            else:
+                logger.info(
+                    "opened %s%s", self.address, f" on attempt {attempt}" if attempt > 1 else ""
+                )
+                return
+            logger.warning(
+                "attempt %d of %d to open %s failed: %r",
+                attempt, attempts, self.address, cause,
             )
-        except asyncio.TimeoutError as exc:
-            raise HardwareError(
-                f"no answer from {self.address} within {self._connect_timeout_s:.1f}s - "
+            if attempt < attempts:
+                await asyncio.sleep(self._connect_retry_delay_s)
+
+        if isinstance(cause, TimeoutError):
+            detail = (
+                f"no answer within {self._connect_timeout_s:.1f}s on any of {attempts} attempts - "
                 "check the instrument is powered and the address is current "
                 "(it self-assigns a link-local address when no DHCP server is present)"
-            ) from exc
-        except OSError as exc:
-            raise HardwareError(
-                f"could not open {self.address}: {exc} - the instrument accepts only one "
+            )
+        else:
+            detail = (
+                f"{cause} on every one of {attempts} attempts - the instrument accepts only one "
                 "raw-socket connection at a time, so this usually means another client holds it"
-            ) from exc
-        logger.info("opened %s", self.address)
+            )
+        raise HardwareError(f"could not open {self.address}: {detail}") from cause
 
     async def close(self) -> None:
         """Close the socket, tolerating a link that is already gone.

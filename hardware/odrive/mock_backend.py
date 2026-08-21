@@ -105,6 +105,7 @@ DEFAULTS: Dict[str, Any] = {
     "controller_config_vel_integrator_gain": 0.0,
     "controller_config_vel_integrator_limit": 0,
     "controller_config_vel_limit": 0.0,
+    "controller_config_vel_limit_tolerance": 0.0,
     "controller_config_enable_vel_limit": False,
     "controller_config_enable_torque_mode_vel_limit": False,
     "controller_config_enable_overspeed_error": False,

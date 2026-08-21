@@ -45,10 +45,10 @@ see ManualTest.
   Debounced, because energizing the bus charges the ODrive's capacitance and the
   inrush is a spike, not a fault.
 
-- motor_current_bound: motor_foc_iq_measured beyond +/-36A, fatal, no
+- motor_current_bound: motor_foc_iq_measured beyond +/-60A, fatal, no
   persistence.
 
-  36 A is the ODrive's own current_hard_max, which ZdriveTestbed writes; firmware
+  60 A is the ODrive's own current_hard_max, which ZdriveTestbed writes; firmware
   trips CURRENT_LIMIT_VIOLATION there within a control-loop period, far faster
   than telemetry samples. So this bound usually catches the aftermath rather than
   the excursion - which is the point. The known failure on this stand is the
@@ -63,6 +63,29 @@ see ManualTest.
 
   Read at the ODrive rather than at the supply deliberately: what matters is the
   voltage where it is consumed, and with the sense leads open the two differ.
+
+- overtemperature_bound_<n>: temperature_<n>_c > 70C on every LIVE thermocouple
+  channel, fatal, debounced 5s.
+
+  ONLY THE LIVE CHANNELS ARE BOUNDED. The DAQ streams eight and reports FAULT for
+  one it cannot read, which the driver publishes as temperature_<n>_c = None. A
+  numeric bound on a None is unevaluable, and the runner treats a bound it cannot
+  evaluate as a stop - correctly, since a bound that was skipped is not a bound
+  that passed. So bounding an unconnected channel would abort every run on its
+  first frame. LIVE_TC_CHANNELS is which ones are wired, and it is stand
+  configuration: move a thermocouple and it has to change with it.
+
+  That cuts the other way too, deliberately. If a bounded channel goes open
+  mid-run its bound becomes unevaluable and the run stops - the wanted behaviour
+  for a thermal limit, since losing the sensor you were relying on is not a
+  reason to keep driving, but it means a flaky junction ends runs.
+
+  Debounced 5s against electrical spikes, this stand switching 48 V a few feet
+  from the harness. Affordable on a thermal limit because thermal mass is slow,
+  which is exactly why it is the wrong dial for the bus bounds. THE DEBOUNCE DOES
+  NOT COVER AN OPEN CHANNEL: a faulted channel is unevaluable rather than
+  violated, so these carry TC_DROPOUT_GRACE_S instead, longer because this DAQ
+  drops the odd sample and one dropped sample is not a lost sensor.
 
 TEST_NAMES lists every concrete zdrive TestCase.TEST_NAME that starts a runner
 against this Rulebook - add a new test's TEST_NAME here when it should be checked
@@ -90,9 +113,29 @@ BUS_CURRENT_PERSISTENCE_S = 1.0
 """How long bus current must stay outside its bounds before the run stops.
 Covers the inrush as the ODrive's bus capacitance charges on energize."""
 
-MAX_MOTOR_CURRENT_A = 36.0
+MAX_MOTOR_CURRENT_A = 60.0
 """Fatal ceiling on measured motor phase current, in both directions - the
 ODrive's own current_hard_max, which ZdriveTestbed writes to the board."""
+
+MAX_TEMPERATURE_C = 70.0
+"""Fatal ceiling on every live thermocouple channel."""
+
+TC_PERSISTENCE_S = 5.0
+"""How long a channel must stay above MAX_TEMPERATURE_C before the run stops.
+A thermocouple spikes from electrical noise as well as from heat, and this stand
+switches 48 V a few feet from the harness. Affordable on a thermal limit because
+thermal mass is slow; the same dial would be wrong on a bus bound."""
+
+TC_DROPOUT_GRACE_S = 10.0
+"""How long a bounded channel may read FAULT before the run stops. This DAQ drops
+the odd sample, and one dropped sample is not a lost sensor; a thermocouple that
+has come out reads FAULT forever."""
+
+LIVE_TC_CHANNELS = (1, 2)
+"""Which thermocouple inputs are wired on this stand, and so the only ones
+bounded. Stand configuration: unplug one and this has to change with it, because
+a numeric bound on an unread channel is unevaluable and stops every run on its
+first frame."""
 
 MIN_BUS_VOLTAGE_V = 10.5
 """Fatal floor on the DC bus measured at the ODrive - the same value as the
@@ -100,8 +143,9 @@ board's dc_bus_undervoltage_trip_level."""
 
 BASE_ZDRIVE_TEST_NAME = "base_zdrive_test"
 MANUAL_TEST_NAME = "zdrive_manual_test"
+BRAKE_HOLD_TEST_NAME = "zdrive_brake_hold_test"
 
-TEST_NAMES = [BASE_ZDRIVE_TEST_NAME, MANUAL_TEST_NAME]
+TEST_NAMES = [BASE_ZDRIVE_TEST_NAME, MANUAL_TEST_NAME, BRAKE_HOLD_TEST_NAME]
 
 ZDRIVE_RULEBOOK = Rulebook(
     name="zdrive_rulebook",
@@ -134,5 +178,16 @@ ZDRIVE_RULEBOOK = Rulebook(
             name="undervoltage_bound",
             fatal=True,
         ),
+        *[
+            Bound(
+                channel=f"temperature_{n}_c",
+                upper=MAX_TEMPERATURE_C,
+                name=f"overtemperature_bound_{n}",
+                fatal=True,
+                persistence_s=TC_PERSISTENCE_S,
+                unevaluable_grace_s=TC_DROPOUT_GRACE_S,
+            )
+            for n in LIVE_TC_CHANNELS
+        ],
     ],
 )

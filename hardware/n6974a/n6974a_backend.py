@@ -1120,7 +1120,28 @@ class N6974aBackend(HardwareBackend):
         query-only *actions* are deliberately not probed: several are MEASure
         acquisitions costing 21 ms each, and `*TST?` runs a 5 s self-test, so
         sweeping them would add seconds to every connect to check commands that
-        no telemetry frame or readback depends on."""
+        no telemetry frame or readback depends on.
+
+        ONE ACQUISITION IS TAKEN FIRST, and the sweep does not work without it.
+        A FETCh returns previously acquired data and never initiates its own
+        acquisition, so on an instrument that has not measured since power-on
+        `FETCh:CURRent?` and `FETCh:POWer?` answer with silence - which is
+        exactly what an absent command looks like from here. Probing in channel
+        order would then report both as unimplemented and refuse to connect,
+        because `current` and `power` sort ahead of the `voltage` query that does
+        the acquiring. Priming makes the sweep order irrelevant rather than
+        load-bearing, and costs the same 21 ms every telemetry frame already
+        spends."""
+        primer = _QUERIES["voltage"][0]
+        try:
+            await self._transport.query(primer)
+        except HardwareError as exc:
+            raise HardwareError(
+                f"{primer} did not answer on {self._transport.address}, so no acquisition could be "
+                "taken to prime the FETCh queries. The measurement system or the link is unhealthy "
+                "rather than a channel being absent"
+            ) from exc
+
         missing: List[Tuple[str, str, str]] = []
         for channel in sorted(_QUERIES):
             query = _QUERIES[channel][0]
