@@ -20,6 +20,7 @@ from protocol.wire import (
     DEVICE_CPX400DP,
     DEVICE_N6974A,
     DEVICE_ODRIVE,
+    DEVICE_TC_DAQ,
     TELEMETRY_ENDPOINTS,
 )
 from hardware.cpx400dp.rails import (
@@ -35,6 +36,7 @@ from hardware.n6974a.n6974a_channels import (
     TELEMETRY_CHANNELS as N6974A_TELEMETRY_CHANNELS,
 )
 from hardware.odrive.odrive_channels import TELEMETRY_CHANNELS as ODRIVE_TELEMETRY_CHANNELS
+from hardware.tc_daq.tc_daq_channels import TELEMETRY_CHANNELS as TC_DAQ_TELEMETRY_CHANNELS
 from testbeds.zdrive_testbed.zdrive_testbed import (
     BRAKE_BUS,
     MOTOR_BUS,
@@ -185,6 +187,11 @@ def test_the_motor_limits_are_ordered():
     soft limit at or above the hard one would mean the controller is allowed to
     command its way straight into a fault."""
     assert ODRIVE_MOTOR_SOFT_MAX_A < ODRIVE_MOTOR_HARD_MAX_A
+    # Both inside the inverter ceiling this hardware reports (100 A soft /
+    # 150 A hard), so the motor limits are what the stand asks for rather than
+    # what the board can deliver.
+    assert ODRIVE_MOTOR_SOFT_MAX_A <= 100.0
+    assert ODRIVE_MOTOR_HARD_MAX_A <= 150.0
 
 
 # --- the testbed ------------------------------------------------------------
@@ -194,7 +201,7 @@ def test_declared_devices_are_devices_the_engine_records():
     """A test's declared device set is validated against these keys before it
     starts, so a device named here that the engine doesn't subscribe to would
     fail the run rather than this."""
-    assert ZdriveTestbed.DEVICES == (DEVICE_ODRIVE, DEVICE_CPX400DP, DEVICE_N6974A)
+    assert ZdriveTestbed.DEVICES == (DEVICE_ODRIVE, DEVICE_CPX400DP, DEVICE_N6974A, DEVICE_TC_DAQ)
     for device in ZdriveTestbed.DEVICES:
         assert device in TELEMETRY_ENDPOINTS
 
@@ -214,6 +221,91 @@ def test_accessors_raise_before_start_rather_than_returning_none():
                  "bus", "bus_telemetry"):
         with pytest.raises(RuntimeError, match="before start"):
             getattr(testbed, name)
+
+
+def _testbed_reading(channels):
+    """A ZdriveTestbed whose next ODrive frame is `channels`. Neither position
+    accessor touches anything start() sets up, so no drivers are needed."""
+    testbed = ZdriveTestbed()
+    testbed.get_channels = lambda: channels
+    return testbed
+
+
+def _frame(position):
+    return {
+        "pos_estimate": position,
+        "vel_estimate": 0.0,
+        "axis_is_armed": True,
+        "posvelmapper_status": 9,
+        "commutmapper_status": 0,
+    }
+
+
+def test_a_finite_position_reads_straight_through():
+    testbed = _testbed_reading(_frame(-12.5))
+    assert testbed.get_pos_estimate() == -12.5
+    assert testbed.get_motion().position == -12.5
+
+
+@pytest.mark.parametrize("unusable", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_position_is_rejected_at_the_read(unusable):
+    """A board whose pos_vel_mapper has no valid offset publishes pos_estimate as
+    NaN with every other channel healthy. Unrejected, every comparison against it
+    is False - a move never judges itself arrived and times out at full length,
+    and a NaN taken as the origin propagates into every target derived from it.
+    On this axis a target is a distance off the ground."""
+    testbed = _testbed_reading(_frame(unusable))
+    with pytest.raises(RuntimeError, match="not a position"):
+        testbed.get_pos_estimate()
+
+
+def test_get_motion_is_rejected_too_so_a_move_cannot_loop_on_it():
+    """move_to() reads through get_motion(), so guarding only get_pos_estimate()
+    would leave the move loop comparing against a NaN for its whole timeout."""
+    testbed = _testbed_reading(_frame(float("nan")))
+    with pytest.raises(RuntimeError, match="not a position"):
+        testbed.get_motion()
+
+
+NOMINAL, MISSING_INPUT, RELATIVE_MODE = 0, 8, 9
+"""ComponentStatus values the mapper channels carry."""
+
+
+def _rejection_message(commut, posvel):
+    frame = _frame(float("nan"))
+    frame["commutmapper_status"], frame["posvelmapper_status"] = commut, posvel
+    with pytest.raises(RuntimeError) as caught:
+        _testbed_reading(frame).get_pos_estimate()
+    return str(caught.value)
+
+
+def test_the_rejection_distinguishes_a_dead_encoder_from_an_uncalibrated_one():
+    """Both read NaN with the board otherwise healthy, and they need opposite
+    actions - recalibrating against a dead encoder can even appear to succeed. The
+    mapper statuses are what tell them apart, so the message has to carry them."""
+    dead = _rejection_message(MISSING_INPUT, MISSING_INPUT)
+    assert "MISSING_INPUT" in dead        # decoded from the frame, not hardcoded
+    assert "magnet" in dead               # points at the sensor, not at calibration
+
+    uncalibrated = _rejection_message(NOMINAL, RELATIVE_MODE)
+    assert "RELATIVE_MODE" in uncalibrated
+    assert "offset_valid" in uncalibrated  # points at calibration
+
+
+def test_a_non_numeric_position_is_rejected_like_a_nan():
+    """The guard exists for pathological values, so it must not itself raise
+    TypeError on one and lose the diagnosis."""
+    frame = _frame(float("nan"))
+    frame["pos_estimate"] = None
+    with pytest.raises(RuntimeError, match="not a position"):
+        _testbed_reading(frame).get_pos_estimate()
+
+
+def test_the_position_guard_cannot_block_the_shutdown():
+    """stop() is what engages the brake and drops the 48 V bus. If it read a
+    position, an unusable one would raise mid-sequence and strand a live bus."""
+    assert "pos_estimate" not in inspect.getsource(ZdriveTestbed.stop)
+    assert "get_motion" not in inspect.getsource(ZdriveTestbed.stop)
 
 
 def test_teardown_drops_the_brake_rail_before_the_motor_bus():
@@ -289,21 +381,47 @@ def test_every_bounded_channel_is_one_some_device_actually_publishes():
     """A bound on a channel no device publishes is never evaluated and never
     complains - it sits there reporting a clean pass on every frame. That is
     worse than no bound at all, so the declared surfaces are the check."""
-    published = set(N6974A_TELEMETRY_CHANNELS) | set(ODRIVE_TELEMETRY_CHANNELS)
+    published = (set(N6974A_TELEMETRY_CHANNELS) | set(ODRIVE_TELEMETRY_CHANNELS)
+                 | set(TC_DAQ_TELEMETRY_CHANNELS))
     for bound in ZDRIVE_RULEBOOK.bounds:
         assert bound.channel in published, (
             f"{bound.label} bounds {bound.channel!r}, which no zdrive device publishes"
         )
 
 
-def test_the_rulebook_spans_both_devices():
-    """Which is why a runner has to be started against both streams. If every
-    bound came from one device this would be a needless complication; it does
-    not, and a runner given one stream silently evaluates only half."""
-    bus_channels = {b.channel for b in ZDRIVE_RULEBOOK.bounds} & set(N6974A_TELEMETRY_CHANNELS)
-    odrive_channels = {b.channel for b in ZDRIVE_RULEBOOK.bounds} & set(ODRIVE_TELEMETRY_CHANNELS)
-    assert bus_channels, "no bound reads the supply"
-    assert odrive_channels, "no bound reads the ODrive"
+def test_the_rulebook_spans_all_three_devices():
+    """Which is why a runner has to be started against all three streams. If
+    every bound came from one device this would be a needless complication; it
+    does not, and a runner given fewer silently evaluates only part."""
+    bounded = {b.channel for b in ZDRIVE_RULEBOOK.bounds}
+    assert bounded & set(N6974A_TELEMETRY_CHANNELS), "no bound reads the supply"
+    assert bounded & set(ODRIVE_TELEMETRY_CHANNELS), "no bound reads the ODrive"
+    assert bounded & set(TC_DAQ_TELEMETRY_CHANNELS), "no bound reads the thermocouple DAQ"
+
+
+def test_only_the_wired_thermocouples_are_bounded():
+    """The DAQ streams eight channels and publishes None for one it cannot read.
+    A numeric bound on a None is unevaluable, and the runner stops a run it
+    cannot evaluate - so bounding an unconnected channel aborts every run on its
+    first frame. Only channels 1 and 2 are wired on this stand."""
+    from testcases.zdrive.rulebooks.zdrive_rulebook import LIVE_TC_CHANNELS
+    assert LIVE_TC_CHANNELS == (1, 2)
+    bounded = {b.channel for b in ZDRIVE_RULEBOOK.bounds if b.channel.startswith("temperature_")}
+    assert bounded == {"temperature_1_c", "temperature_2_c"}
+
+
+def test_the_thermal_bounds_are_fatal_at_70c_and_tolerate_a_dropped_sample():
+    """A thermocouple spikes from electrical noise as well as heat, and this DAQ
+    drops the odd sample - so a violation is debounced and a momentary FAULT is
+    given a separate, longer window before it stops the run."""
+    thermal = [b for b in ZDRIVE_RULEBOOK.bounds if b.channel.startswith("temperature_")]
+    assert thermal
+    for bound in thermal:
+        assert bound.upper == 70.0
+        assert bound.lower is None      # cold is not a fault on this stand
+        assert bound.fatal
+        assert bound.persistence_s == 5.0
+        assert bound.unevaluable_grace_s > bound.persistence_s
 
 
 def test_the_bus_bounds_agree_with_what_the_testbed_programs():

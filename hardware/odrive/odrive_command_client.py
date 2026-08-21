@@ -184,6 +184,11 @@ class OdriveCommandClient(CommandClient):
         """axis0.controller.config.vel_limit - turns/s - max velocity (inf to disable)"""
         self.execute("set_controller_config_vel_limit", value=value)
 
+    def set_controller_config_vel_limit_tolerance(self, value) -> None:
+        """axis0.controller.config.vel_limit_tolerance - multiple of vel_limit at
+        which the axis raises an overspeed error"""
+        self.execute("set_controller_config_vel_limit_tolerance", value=value)
+
     def set_controller_config_enable_vel_limit(self, value) -> None:
         """axis0.controller.config.enable_vel_limit - bool"""
         self.execute("set_controller_config_enable_vel_limit", value=value)

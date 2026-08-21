@@ -143,6 +143,18 @@ def test_declared_channel_lists_match_the_implementation_tables():
     assert set(COMMAND_CHANNELS) == set(_SETTERS) | set(_METHODS) | _SPECIAL_COMMANDS
 
 
+def test_the_odrive_mock_publishes_every_declared_telemetry_channel():
+    """A channel added to the real driver but not to the mock makes every
+    use_mock run fail at verify_channels() - a testbed that will not stand up at
+    all, and only on the path taken when no board is attached, which is the one
+    path nobody exercises before they need it."""
+    from hardware.odrive.mock_backend import DEFAULTS
+    from hardware.odrive.odrive_channels import TELEMETRY_CHANNELS
+
+    missing = set(TELEMETRY_CHANNELS) - set(DEFAULTS)
+    assert not missing, f"declared but absent from MockOdriveBackend.DEFAULTS: {sorted(missing)}"
+
+
 # --- layer 2: an unevaluable bound must be loud -------------------------------
 
 

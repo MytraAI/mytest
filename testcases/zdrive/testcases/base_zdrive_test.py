@@ -10,12 +10,12 @@ itself, wherever in its own main_execution() that should happen.
 post_test_teardown() always stops the runner regardless of whether start() was
 ever called.
 
-BOTH TELEMETRY STREAMS ARE NEEDED, and getting that wrong is invisible:
-zdrive_rulebook's bus bounds are on N6974A channels and its motor bounds on the
-ODrive's, neither device publishes the other's, and a bound whose channel is
-absent from a frame returns no result - so a runner started against one stream
-evaluates half the rulebook and reports a clean pass for the other half. Every
-concrete test must pass both, as ManualTest does.
+ALL THREE TELEMETRY STREAMS ARE NEEDED, and getting that wrong is invisible:
+zdrive_rulebook's bus bounds are on N6974A channels, its motor bounds on the
+ODrive's and its thermal bounds on the TC DAQ's, no device publishes another's,
+and a bound whose channel is absent from a frame returns no result - so a runner
+started against fewer streams evaluates part of the rulebook and reports a clean
+pass for the rest. Every concrete test must pass all three, as ManualTest does.
 
 Runnable on its own, not abstract: main_execution() here just logs and returns,
 and never calls runner.start(), so running this base case directly does no live
@@ -41,6 +41,7 @@ from testcases.asimov.live_rulebook_runner import LiveRulebookRunner
 from testcases.asimov.rulebook import Rulebook
 from testcases.base import TestCase
 
+from ..channels import DEFAULT_STATE
 from ..rulebooks.zdrive_rulebook import BASE_ZDRIVE_TEST_NAME, ZDRIVE_RULEBOOK
 
 logger = logging.getLogger(__name__)
@@ -81,10 +82,17 @@ class BaseZdriveTest(TestCase):
         each one exists in the stream from frame 1 rather than appearing when a
         step first computes it.
 
-        Only the bound statuses so far, since no zdrive test publishes state of
-        its own yet. They are derived from RULEBOOKS rather than hand-listed,
+        Seeding is what keeps them in the recorded file at all: the engine fixes
+        a wide file's header from its first frames and drops a channel that
+        appears later, so a value a step computes partway through a sequence
+        would never be written. See ../channels.py.
+
+        Bound-status channels are derived from RULEBOOKS rather than hand-listed,
         since the Rulebook is already the single source of truth for bound
         names."""
+        for name, default in DEFAULT_STATE.items():
+            self.set_state(name, default)
+
         self.set_state("test_status", "PASS")
         for rulebook in self.RULEBOOKS:
             for bound in rulebook.bounds:

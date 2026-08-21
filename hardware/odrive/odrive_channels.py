@@ -112,6 +112,7 @@ TELEMETRY_CHANNELS = [
     "controller_config_vel_integrator_gain",  # velocity-loop I gain (unit not documented)
     "controller_config_vel_integrator_limit",  # Nm - integrator output clamp (inf to disable)
     "controller_config_vel_limit",  # turns/s - max velocity (inf to disable)
+    "controller_config_vel_limit_tolerance",  # multiple of vel_limit at which overspeed errors
     "controller_config_enable_vel_limit",  # bool
     "controller_config_enable_torque_mode_vel_limit",  # bool
     "controller_config_enable_overspeed_error",  # bool
@@ -204,6 +205,7 @@ COMMAND_CHANNELS = [
     "set_controller_config_vel_integrator_gain",
     "set_controller_config_vel_integrator_limit",
     "set_controller_config_vel_limit",
+    "set_controller_config_vel_limit_tolerance",
     "set_controller_config_enable_vel_limit",
     "set_controller_config_enable_torque_mode_vel_limit",
     "set_controller_config_enable_overspeed_error",
