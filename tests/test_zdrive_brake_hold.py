@@ -528,6 +528,29 @@ def test_tuning_writes_the_controller_but_not_the_motor_current_limits():
     assert "set_motor_config_current_hard_max" not in source
 
 
+def test_the_integrator_is_clamped_below_the_soft_current_limit():
+    """The board ships vel_integrator_limit at infinity, which on a gravity-loaded
+    axis leaves the one term that carries the load's weight unbounded. Clamped
+    under the soft limit's torque equivalent so the integrator alone cannot
+    saturate the current limit."""
+    from testbeds.zdrive_testbed.zdrive_testbed import ODRIVE_MOTOR_SOFT_MAX_A
+
+    torque_constant = 0.2506  # Nm/A, read off this stand's board
+    soft_limit_nm = ODRIVE_MOTOR_SOFT_MAX_A * torque_constant
+    assert teststeps.VELOCITY_INTEGRATOR_LIMIT < soft_limit_nm, (
+        "an integrator that can reach the soft current limit on its own is not clamped"
+    )
+    # And above what holding the rated load actually costs the integrator - 6.9 Nm
+    # measured at 1000 lb - or the axis cannot hold position at all.
+    assert teststeps.VELOCITY_INTEGRATOR_LIMIT > 6.9
+
+
+def test_the_integrator_limit_is_written_to_the_board():
+    """Declared but never written is the same as not clamped."""
+    source = _code_of(teststeps._apply_tuning_params)
+    assert "set_controller_config_vel_integrator_limit(" in source
+
+
 def test_the_overspeed_tolerance_is_tighter_than_the_board_default():
     """The board ships 2.0. On a gravity-loaded axis an overspeed is the load
     running away, and there is less stroke left by the time a wider tolerance

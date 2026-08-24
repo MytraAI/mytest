@@ -224,21 +224,11 @@ class BrakeEnduranceTest(_LiftingZdriveTest):
     leaves 5 turns below TOP_OF_STROKE."""
 
     TRIGGER_SPEED_TURNS_S = 25.0
-    """How fast the load must be moving before the brake is commanded.
+    """How fast the load must be falling before the brake is commanded.
 
-    A FLOOR, NOT THE SPEED THE BRAKE SEES - see brake_from_speed(). It must sit
-    below RUNDOWN_VELOCITY_LIMIT, or the axis clamps under it and the brake never
-    fires."""
-
-    RUNDOWN_VELOCITY_LIMIT = 26.0
-    """What the controller is tuned to for the run-down only, above
-    TRIGGER_SPEED_TURNS_S so the trigger is reachable.
-
-    The lift runs at the normal VELOCITY_LIMIT instead, deliberately: holding
-    1000 lb already draws about 52 A of a 55 A soft limit, so there is almost no
-    current left for the extra acceleration a raised ceiling would ask for on the
-    way up. Down is where the headroom is - this axis is close to self-locking, so
-    a descent draws almost nothing."""
+    Reached under gravity with the axis idle, not by the controller - see
+    brake_from_speed() - so what bounds it is the stroke rather than a velocity
+    limit. The load covers roughly a turn and a half getting there from rest."""
 
     HOLD_S = 5.0
     """How long the brake holds the load at the top with the axis idle, before the
@@ -334,16 +324,13 @@ class BrakeEnduranceTest(_LiftingZdriveTest):
             move_to(self, origin + self.TOP_POSITION, arrival_timeout_s=self.MOVE_TIMEOUT_S)
 
             # A static hold first, on the brake alone, so each cycle records slip
-            # as well as a stopping distance.
+            # as well as a stopping distance. It also leaves the stand braked and
+            # idle, which is the state brake_from_speed expects to be handed.
             slip = hold_on_brake(self, self.HOLD_S, origin)
 
-            # The ceiling goes up only now, for the run-down - see
-            # RUNDOWN_VELOCITY_LIMIT for why the lift above does not get it.
-            set_tuning_params(self, velocity_limit=self.RUNDOWN_VELOCITY_LIMIT)
-
-            # In place again: the hold above is the step that measures the brake
-            # letting go, so the load having moved is expected rather than a fault.
-            release_brake_in_place(self)
+            # Straight from that hold into the drop: the axis is already idle, so
+            # releasing the brake is the whole of it and the controller never
+            # enters the loop.
             stopping_distance_mm = brake_from_speed(
                 self,
                 target=origin + self.BOTTOM_POSITION,
@@ -358,18 +345,14 @@ class BrakeEnduranceTest(_LiftingZdriveTest):
                 self.test_id, self.brake_cycles, slip, stopping_distance_mm,
             )
 
-            # Finish the descent and rest at the bottom.
+            # Finish the descent under the controller, at the ordinary velocity
+            # limit - the drop above is the only uncontrolled part of a cycle.
             #
             # AFTER the brake event, deliberately: a bad stop publishes
             # stopping_distance_mm, stopping_distance_bound fires on it, and this
             # step's entry check raises before anything drives the load. So the one
             # cycle that ends with a brake which could not stop the load in 250 mm
             # is also the one that never moves it afterwards.
-            # Tuning restored BEFORE the descent rather than after it, so this
-            # move runs under the normal ceiling instead of the run-down's. Written
-            # while the axis is still idle behind the engaged brake, which is where
-            # brake_from_speed left it.
-            set_tuning_params(self)
             release_brake_in_place(self)
             move_to(self, origin + self.BOTTOM_POSITION)
             engage_brake(self)
