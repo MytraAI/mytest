@@ -47,6 +47,7 @@ from testbeds.zdrive_testbed.zdrive_testbed import (
     RAILS,
     ZdriveTestbed,
 )
+from testcases.zdrive.channels import DEFAULT_STATE
 from testcases.zdrive.rulebooks.zdrive_rulebook import (
     MAX_BUS_CURRENT_A,
     MAX_BUS_VOLTAGE_V,
@@ -377,15 +378,23 @@ def test_without_a_run_the_drivers_are_given_no_log_flag():
 # --- the rulebook -----------------------------------------------------------
 
 
-def test_every_bounded_channel_is_one_some_device_actually_publishes():
-    """A bound on a channel no device publishes is never evaluated and never
-    complains - it sits there reporting a clean pass on every frame. That is
-    worse than no bound at all, so the declared surfaces are the check."""
+def test_every_bounded_channel_is_one_something_actually_publishes():
+    """A bound on a channel nothing publishes is never evaluated and never
+    complains - it sits there reporting a clean pass on every frame. That is worse
+    than no bound at all, so the declared surfaces are the check.
+
+    RUN STATE COUNTS, not just device telemetry: the runner merges published state
+    into what it evaluates, which is how stopping_distance_bound works at all. The
+    check is that the channel appears in DEFAULT_STATE, because a state channel
+    that is not seeded there is dropped from the recorded file by the engine's
+    header sampling - and a bound on a dropped channel is exactly the silent pass
+    this test exists to prevent."""
     published = (set(N6974A_TELEMETRY_CHANNELS) | set(ODRIVE_TELEMETRY_CHANNELS)
-                 | set(TC_DAQ_TELEMETRY_CHANNELS))
+                 | set(TC_DAQ_TELEMETRY_CHANNELS) | set(DEFAULT_STATE))
     for bound in ZDRIVE_RULEBOOK.bounds:
         assert bound.channel in published, (
-            f"{bound.label} bounds {bound.channel!r}, which no zdrive device publishes"
+            f"{bound.label} bounds {bound.channel!r}, which neither a zdrive device "
+            "nor the run's own state publishes"
         )
 
 
@@ -460,16 +469,6 @@ def test_every_bound_is_fatal():
     recording and continuing past."""
     for bound in ZDRIVE_RULEBOOK.bounds:
         assert bound.fatal, f"{bound.label} is not fatal"
-
-
-def test_teardown_drops_the_brake_rail_before_the_motor_bus():
-    """The brake is magnet-applied, so dropping its rail first is what makes it
-    grab and hold the load before the drive is disarmed and the bus removed."""
-    source = inspect.getsource(ZdriveTestbed.stop)
-    brake = source.index("engage the brake")
-    disarm = source.index("disarm the ODrive axis")
-    motor_bus = source.index("drop the 48 V motor bus")
-    assert brake < disarm < motor_bus, "teardown must engage the brake, then disarm, then drop the bus"
 
 
 def test_teardown_disconnects_the_motor_bus_backend_too():

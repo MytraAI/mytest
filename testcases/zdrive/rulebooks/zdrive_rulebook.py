@@ -87,6 +87,30 @@ see ManualTest.
   violated, so these carry TC_DROPOUT_GRACE_S instead, longer because this DAQ
   drops the odd sample and one dropped sample is not a lost sensor.
 
+- stopping_distance_bound: stopping_distance_mm > 250, fatal, no persistence.
+
+  NOT A HARDWARE CHANNEL. BrakeEnduranceTest publishes each brake event's stopping
+  distance as run state, and the runner merges published state into what it
+  evaluates - so a brake that no longer stops the load in 250 mm aborts the run
+  through the same path as any bus or motor bound, and the number that did it lands
+  in the verdict's timeline instead of only in a log line.
+
+  Undebounced deliberately, unlike the thermal bounds: this is not a sampled signal
+  that can spike, it is one number per brake event, written once and then held until
+  the next. One bad stop IS the event, and debouncing would mean waiting for a
+  second one - on a stand where the first one already moved the load further than
+  it should have.
+
+  The channel is seeded 0.0 rather than None (see ../channels.py): a numeric bound
+  on a channel carrying no value is unevaluable, and the runner treats unevaluable
+  as a stop, so None would end every run on its first frame.
+
+  A GROSS-FAULT NET, NOT A PERFORMANCE FIGURE. 250 mm is 26 turns, and a healthy
+  stop from this test's trigger speed is a fraction of a turn - the axis is
+  effectively self-locking, so the screw stops the load about as much as the brake
+  does. A stop that ran to 250 mm would mean the brake and the screw had both let
+  go. Placed to catch that rather than to grade a brake.
+
 TEST_NAMES lists every concrete zdrive TestCase.TEST_NAME that starts a runner
 against this Rulebook - add a new test's TEST_NAME here when it should be checked
 against these same safety bounds too. Lives here rather than on the TestCase to
@@ -137,6 +161,14 @@ bounded. Stand configuration: unplug one and this has to change with it, because
 a numeric bound on an unread channel is unevaluable and stops every run on its
 first frame."""
 
+MAX_STOPPING_DISTANCE_MM = 250.0
+"""How far the load may travel after the brake is commanded, measured from the
+command rather than from when the brake bites - so it includes the coast through
+BRAKE_SETTLE_S.
+
+Millimetres, matching ZdriveTestbed.MM_PER_TURN: 250 mm is 26 turns of this
+drive."""
+
 MIN_BUS_VOLTAGE_V = 10.5
 """Fatal floor on the DC bus measured at the ODrive - the same value as the
 board's dc_bus_undervoltage_trip_level."""
@@ -144,8 +176,14 @@ board's dc_bus_undervoltage_trip_level."""
 BASE_ZDRIVE_TEST_NAME = "base_zdrive_test"
 MANUAL_TEST_NAME = "zdrive_manual_test"
 BRAKE_HOLD_TEST_NAME = "zdrive_brake_hold_test"
+BRAKE_ENDURANCE_TEST_NAME = "zdrive_brake_endurance_test"
 
-TEST_NAMES = [BASE_ZDRIVE_TEST_NAME, MANUAL_TEST_NAME, BRAKE_HOLD_TEST_NAME]
+TEST_NAMES = [
+    BASE_ZDRIVE_TEST_NAME,
+    MANUAL_TEST_NAME,
+    BRAKE_HOLD_TEST_NAME,
+    BRAKE_ENDURANCE_TEST_NAME,
+]
 
 ZDRIVE_RULEBOOK = Rulebook(
     name="zdrive_rulebook",
@@ -176,6 +214,12 @@ ZDRIVE_RULEBOOK = Rulebook(
             channel="board_vbus_voltage",
             lower=MIN_BUS_VOLTAGE_V,
             name="undervoltage_bound",
+            fatal=True,
+        ),
+        Bound(
+            channel="stopping_distance_mm",
+            upper=MAX_STOPPING_DISTANCE_MM,
+            name="stopping_distance_bound",
             fatal=True,
         ),
         *[

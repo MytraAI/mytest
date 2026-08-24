@@ -129,7 +129,7 @@ testbed connects their backends. Only socket binding happens here - each
 backend's own connect() runs when connect_backend() is called below, and carries
 its own timeout."""
 
-N6974A_HOST = "169.254.235.75"
+N6974A_HOST = "169.254.160.111"
 """This stand's motor-bus supply, serial MY63000121.
 
 Not a stable address, and observed to move within a single session: the
@@ -251,6 +251,23 @@ Magnet-applied and fail-safe: the brake is engaged with this rail unpowered, and
 powering it RELEASES the brake. 120 W is inside the envelope, so this rail does
 get real current
 limiting."""
+
+MM_PER_TURN = 9.6
+"""How far the load travels per motor turn.
+
+Stand geometry, so it lives with the stand rather than in whichever test needed
+it first: every test that reports a distance or a speed in the units an operator
+thinks in converts through this. The 528 mm of stroke is 55 turns; 192 mm is the
+20 turns a brake hold lifts to.
+
+Millimetres rather than metres, unlike ydrive's METERS_PER_TURN, because this
+axis is short and what it measures is small: a brake slip here lands under a
+micron, which in metres is a column of leading zeros. THE CONTROL PATH STAYS IN
+TURNS - this converts for reporting, and nothing commands a position through it.
+
+A converted figure is not automatically a measured one: the load encoder's
+resolution sets the floor, and a slip of a few counts is the smallest travel this
+stand can distinguish from zero."""
 
 RAILS = (BRAKE_BUS,)
 """Every CPX400DP output this stand uses. start() iterates this to configure

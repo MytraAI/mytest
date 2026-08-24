@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import re
 import textwrap
 
 import pytest
@@ -207,7 +208,9 @@ def test_the_brake_only_hold_stays_a_fixed_dwell():
     measurement, and stays HOLD_S so brake_slip_turns is comparable between
     runs."""
     source = _code_of(BrakeHoldTest.main_execution)
-    assert "hold_on_brake(self, self.HOLD_S)" in source
+    assert re.search(r"hold_on_brake\(self, self\.HOLD_S[,)]", source), (
+        "the brake-only dwell must be HOLD_S, whatever else the call passes"
+    )
 
 
 def test_the_details_are_asked_before_anything_is_energized_or_released():
@@ -216,7 +219,7 @@ def test_the_details_are_asked_before_anything_is_energized_or_released():
     would be held by nothing while they did."""
     source = _code_of(BrakeHoldTest.main_execution)
     assert source.index("prompt_for_SN_ER_load") < source.index("prepare_for_operation")
-    assert source.index("prompt_for_SN_ER_load") < source.index("release_brake_for_positioning")
+    assert source.index("prompt_for_SN_ER_load") < source.index("establish_origin_at_bottom")
 
 
 # --- waiting for a person ---------------------------------------------------
@@ -450,15 +453,24 @@ def test_every_published_state_channel_is_seeded():
 
 def test_the_sequence_prompts_the_operator_only_after_releasing_for_positioning():
     """The operator cannot move the load until it is released, and must not be
-    asked to before it is."""
-    source = inspect.getsource(BrakeHoldTest.main_execution)
+    asked to before it is.
+
+    Asserted against establish_origin_at_bottom rather than against a test's
+    main_execution: the release, the prompt and the rezero are one action there, so
+    that is where their order can actually go wrong."""
+    source = _code_of(teststeps.establish_origin_at_bottom)
     assert source.index("release_brake_for_positioning") < source.index("await_operator")
 
 
 def test_the_sequence_zeroes_after_the_operator_and_before_moving():
-    source = inspect.getsource(BrakeHoldTest.main_execution)
-    assert source.index("await_operator") < source.index("get_pos_estimate")
-    assert source.index("get_pos_estimate") < source.index("move_to")
+    """Two scopes, because the rezero moved into establish_origin_at_bottom: the
+    origin has to be read after the person has finished moving the load, and the
+    first commanded move has to come after the origin it is relative to."""
+    step_source = _code_of(teststeps.establish_origin_at_bottom)
+    assert step_source.index("await_operator") < step_source.index("get_pos_estimate")
+
+    source = _code_of(BrakeHoldTest.main_execution)
+    assert source.index("establish_origin_at_bottom") < source.index("move_to")
 
 
 def test_the_sequence_takes_the_load_back_in_place_before_every_move():

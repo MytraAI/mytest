@@ -47,4 +47,18 @@ DEFAULT_STATE: Dict[str, Any] = {
     # until a hold has happened, because 0.0 would read as a perfect hold that
     # never took place - and unlike a numeric Bound's channel, nothing bounds
     # this, so None costs nothing here.
+    "brake_cycles": 0,
+    "brake_speed_turns_s": 0.0,
+    "stopping_distance_mm": 0.0,
+    # The last brake-from-speed event: how fast the load was moving when the brake
+    # was commanded, and how far it then travelled. In turns/s because that is the
+    # unit the trigger is set in, so the number asked for and the number recorded
+    # are directly comparable; in millimetres because that is the unit the bound is
+    # written in and what an operator measures with.
+    #
+    # Seeded 0.0, not None, unlike brake_slip_turns above: zdrive_rulebook bounds
+    # stopping_distance_mm, a numeric bound on a channel carrying no value is
+    # unevaluable, and unevaluable stops a run - so None here would abort every run
+    # on its first frame, before anything moved. The cost is that rows before the
+    # first brake event read as a stop in no distance rather than as no stop yet.
 }

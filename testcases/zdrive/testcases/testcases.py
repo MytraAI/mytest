@@ -11,23 +11,33 @@ BrakeHoldTest: asks the operator which DUT, ticket and load this run is, then
 lifts the load, pauses under the controller for a person to check the rig, holds
 it on the brake alone, and brings it back down - recording how far it slipped
 while the brake was the only thing holding it.
+BrakeEnduranceTest: stops a MOVING load with the brake over and over - lift to the
+top, hold on the brake, run back down and engage the brake at speed, return to the
+bottom, rest - recording the speed it engaged at and how far the load then
+travelled.
 """
 from __future__ import annotations
 
 import logging
 from typing import Optional
 
-from ..rulebooks.zdrive_rulebook import BRAKE_HOLD_TEST_NAME, MANUAL_TEST_NAME
+from ..rulebooks.zdrive_rulebook import (
+    BRAKE_ENDURANCE_TEST_NAME,
+    BRAKE_HOLD_TEST_NAME,
+    MANUAL_TEST_NAME,
+)
 from ..teststeps.teststeps import (
     BOTTOM_OF_STROKE,
     RunDetail,
     await_operator,
+    brake_from_speed,
+    engage_brake,
+    establish_origin_at_bottom,
     hold_on_brake,
     lower_to_bottom_for_teardown,
     move_to,
     prepare_for_operation,
     prompt_for_SN_ER_load,
-    release_brake_for_positioning,
     release_brake_in_place,
     set_tuning_params,
 )
@@ -53,7 +63,67 @@ class ManualTest(BaseZdriveTest):
         self.wait_for(float("inf"))
 
 
-class BrakeHoldTest(BaseZdriveTest):
+class _LiftingZdriveTest(BaseZdriveTest):
+    """Shared plumbing for the zdrive tests that lift the load off its stop.
+
+    NOT A RUNNABLE TEST - no TEST_NAME and no main_execution of its own. What it
+    holds is the part that is identical between them and must not drift: where the
+    bottom is, which DUTs they accept, and the teardown that puts the load back on
+    the ground.
+
+    ManualTest deliberately does not inherit this. Its teardown commands no motion,
+    because an operator may have left the axis anywhere and this teardown assumes
+    the load is above a known origin."""
+
+    BOTTOM_POSITION = BOTTOM_OF_STROKE
+    """Where a run starts and ends. The load rests on its hard stop here, which is
+    what makes the opening hand-positioning safe."""
+
+    DUT_SERIAL_NUMBERS = ("ZDRIVE2IN",)
+    """Every DUT these tests can run on, and the only answers their serial prompt
+    accepts: a stored run is matched to a DUT by this, and a typo attributes it to
+    nothing."""
+
+    RUN_DETAIL_FIELDS = (
+        RunDetail("DUT SN", "dut_serial_number", DUT_SERIAL_NUMBERS),
+        RunDetail("ER Ticket", "er_ticket"),
+        RunDetail("Load (lb)", "load_lb"),
+    )
+    """What the operator is asked for before a run starts. The serial is picked from
+    a list; the ticket and the load are free text."""
+
+    def __init__(self, test_id=None, use_mock: bool = False, require_engine: bool = True):
+        super().__init__(test_id, use_mock, require_engine=require_engine)
+        self.run_details: dict = {}
+        """What the operator said this run is, once they have been asked. Empty until
+        then, so a run that ends before the prompt still has a verdict."""
+        self._origin: Optional[float] = None
+        """Where the operator left the load, or None before they have. Held on the
+        test case rather than only in main_execution because teardown needs it to
+        know where the bottom is - see post_test_teardown()."""
+
+    def post_test_teardown(self) -> None:
+        """Try to put the load on the ground before shutting the stand down.
+
+        HOWEVER THE RUN ENDED, INCLUDING ON A FATAL BOUND. Every other ending leaves
+        the load wherever it got to, held by the brake - and on this stand the brake
+        is the component under test, so a run that dies at the top leaves a suspended
+        load depending on the one thing being measured, with nobody watching.
+        Attempted for ten seconds and then abandoned; the base teardown below engages
+        the brake and drops the bus either way.
+
+        Skipped entirely before the origin is known, because nothing has lifted the
+        load yet: the run has not got past the operator's positioning, so the load is
+        still on its stop and there is nowhere to lower it to."""
+        if self._origin is not None:
+            self.teardown_step(
+                "lower the load to the bottom of the stroke",
+                lambda: lower_to_bottom_for_teardown(self, self._origin + self.BOTTOM_POSITION),
+            )
+        super().post_test_teardown()
+
+
+class BrakeHoldTest(_LiftingZdriveTest):
     """Drives the load to the top of the stroke, holds it there on the brake alone for a dwell, then returns it to the bottom - recording how far it slipped while only the brake was holding it."""
 
     TEST_NAME = BRAKE_HOLD_TEST_NAME
@@ -65,37 +135,14 @@ class BrakeHoldTest(BaseZdriveTest):
     Not the top of the stroke. TOP_OF_STROKE is how far the stand can go; this is
     how far this test chooses to lift, and it sits well inside it."""
 
-    BOTTOM_POSITION = BOTTOM_OF_STROKE
-    """Where the run starts and ends. The load rests on its hard stop here, which
-    is what makes the opening hand-positioning safe."""
-
     HOLD_S = 5.0
     """How long the brake holds the load at the top with the axis idle. The whole
     measurement: nothing but the brake opposes the load's weight for this long,
     and `brake_slip_turns` is what moved."""
 
-    DUT_SERIAL_NUMBERS = ("ZDRIVE2IN",)
-    """Every DUT this test can run on, and the only answers its serial prompt accepts:
-    a stored run is matched to a DUT by this, and a typo attributes it to nothing."""
-
-    RUN_DETAIL_FIELDS = (
-        RunDetail("DUT SN", "dut_serial_number", DUT_SERIAL_NUMBERS),
-        RunDetail("ER Ticket", "er_ticket"),
-        RunDetail("Load (lb)", "load_lb"),
-    )
-    """What the operator is asked for before the run starts. The serial is picked from a
-    list; the ticket and the load are free text."""
-
     def __init__(self, test_id: Optional[str] = None, use_mock: bool = False, require_engine: bool = True):
         super().__init__(test_id, use_mock, require_engine=require_engine)
         self.brake_holds = 0
-        self.run_details: dict = {}
-        """What the operator said this run is, once they have been asked. Empty
-        until then, so a run that ends before the prompt still has a verdict."""
-        self._origin: Optional[float] = None
-        """Where the operator left the load, or None before they have. Held on the
-        test case rather than only in main_execution because teardown needs it to
-        know where the bottom is - see post_test_teardown()."""
 
     def result_metadata(self) -> dict:
         """What this run was, for the verdict."""
@@ -127,26 +174,9 @@ class BrakeHoldTest(BaseZdriveTest):
             self.testbed.tc_daq_telemetry,
         )
 
-        # Hand the load to a person so they can set the origin. This is the one
-        # moment the load is held by neither the brake nor the controller, and it
-        # is safe only because the load bottoms out here - see
-        # release_brake_for_positioning(). The gear is light, around 20 lb.
-        release_brake_for_positioning(self)
-        await_operator(
-            self,
-            "move the drive to the BOTTOM of the stroke, where the load rests on its stop "
-            "(this becomes position 0), then acknowledge",
-        )
-
-        # Rezero in software: the origin is wherever the operator left the load,
-        # and every target below is relative to it. The device is not zeroed -
-        # there is no command for that in the declared channel set - so the
-        # offset is published, which is what keeps a stored run's absolute
-        # positions interpretable.
-        origin = self.testbed.get_pos_estimate()
-        self._origin = origin
-        self.set_state("position_origin", origin)
-        logger.info("test %s: position origin set at %.3f turns", self.test_id, origin)
+        # The load is held by nothing while the operator works, which is safe only
+        # at the bottom of the stroke - see establish_origin_at_bottom().
+        origin = self._origin = establish_origin_at_bottom(self)
 
         # Take the load back under control before anything moves. In place,
         # because the operator has moved the axis away from whatever the setpoint
@@ -165,7 +195,7 @@ class BrakeHoldTest(BaseZdriveTest):
             "rig, then acknowledge to hand it to the brake alone",
         )
 
-        slip = hold_on_brake(self, self.HOLD_S)
+        slip = hold_on_brake(self, self.HOLD_S, origin)
         self.brake_holds += 1
         self.set_state("brake_holds", self.brake_holds)
         logger.info(
@@ -178,22 +208,165 @@ class BrakeHoldTest(BaseZdriveTest):
         release_brake_in_place(self)
         move_to(self, origin + self.BOTTOM_POSITION)
 
-    def post_test_teardown(self) -> None:
-        """Try to put the load on the ground before shutting the stand down.
 
-        HOWEVER THE RUN ENDED, INCLUDING ON A FATAL BOUND. Every other ending
-        leaves the load wherever it got to, held by the brake - and on this stand
-        the brake is the component under test, so a run that dies at the top
-        leaves a suspended load depending on the one thing being measured, with
-        nobody watching. Attempted for ten seconds and then abandoned; the base
-        teardown below engages the brake and drops the bus either way.
 
-        Skipped entirely before the origin is known, because nothing has lifted
-        the load yet: the run has not got past the operator's positioning, so the
-        load is still on its stop and there is nowhere to lower it to."""
-        if self._origin is not None:
-            self.teardown_step(
-                "lower the load to the bottom of the stroke",
-                lambda: lower_to_bottom_for_teardown(self, self._origin + self.BOTTOM_POSITION),
+class BrakeEnduranceTest(_LiftingZdriveTest):
+    """Stops a moving load with the brake, over and over: lift to the top, hold it there on the brake, run back down and engage the brake at speed, return to the bottom and rest - recording the speed it engaged at and how far the load then travelled."""
+
+    TEST_NAME = BRAKE_ENDURANCE_TEST_NAME
+
+    TOP_POSITION = -50.0
+    """Where each run-down begins, in turns from the bottom. Negative: up is
+    negative on this drive.
+
+    Deeper into the stroke than BrakeHoldTest's -20, because this test needs room
+    for the load to reach the trigger speed and then be stopped, and it still
+    leaves 5 turns below TOP_OF_STROKE."""
+
+    TRIGGER_SPEED_TURNS_S = 25.0
+    """How fast the load must be moving before the brake is commanded.
+
+    A FLOOR, NOT THE SPEED THE BRAKE SEES - see brake_from_speed(). It must sit
+    below RUNDOWN_VELOCITY_LIMIT, or the axis clamps under it and the brake never
+    fires."""
+
+    RUNDOWN_VELOCITY_LIMIT = 26.0
+    """What the controller is tuned to for the run-down only, above
+    TRIGGER_SPEED_TURNS_S so the trigger is reachable.
+
+    The lift runs at the normal VELOCITY_LIMIT instead, deliberately: holding
+    1000 lb already draws about 52 A of a 55 A soft limit, so there is almost no
+    current left for the extra acceleration a raised ceiling would ask for on the
+    way up. Down is where the headroom is - this axis is close to self-locking, so
+    a descent draws almost nothing."""
+
+    HOLD_S = 5.0
+    """How long the brake holds the load at the top with the axis idle, before the
+    run-down. A static hold, the same measurement BrakeHoldTest takes, taken here
+    once per cycle so brake wear shows up in slip as well as in stopping
+    distance."""
+
+    DWELL_S = 60.0
+    """How long each cycle rests at the bottom of the stroke, on the brake with the
+    axis idle and the load on its hard stop. Nothing dissipates across it: the brake
+    is magnet-applied so holding costs no coil power, and an idled axis draws no
+    current.
+
+    A minute does not return the brake to ambient - it is a settling dwell rather
+    than a thermal recovery one, so consecutive events see a brake that is still
+    carrying heat from the last stop. That is what makes the cycle rate high enough
+    to accumulate events: the traverse dominates, at roughly thirty events an hour
+    against five for a ten-minute rest."""
+
+    MOVE_TIMEOUT_S = 10.0
+    """How long the lift to the top may take, before a stalled axis is reported
+    rather than waited on.
+
+    Bounded well under the dwell so a stall surfaces inside a cycle rather than
+    looking like one. THE LIFT IS CURRENT-LIMITED AT FULL LOAD, not velocity
+    limited - holding 1000 lb already draws most of the soft limit - so what sets
+    this is how fast the axis can accelerate the load, and raising the velocity
+    ceiling does not move it."""
+
+    def __init__(
+        self,
+        test_id: Optional[str] = None,
+        use_mock: bool = False,
+        require_engine: bool = True,
+        trigger_speed_turns_s: Optional[float] = None,
+    ):
+        """trigger_speed_turns_s overrides TRIGGER_SPEED_TURNS_S, so a slower
+        shakedown needs no edit to the class."""
+        super().__init__(test_id, use_mock, require_engine=require_engine)
+        self.brake_cycles = 0
+        self._trigger_speed = (
+            trigger_speed_turns_s if trigger_speed_turns_s is not None
+            else self.TRIGGER_SPEED_TURNS_S
+        )
+
+    def result_metadata(self) -> dict:
+        """What this run was, for the verdict.
+
+        The same answers the operator typed, in the one record a reporting database
+        ingests - the state channels carry them per frame, which is right for reading
+        a run back and wrong for finding every run against a ticket."""
+        return {
+            **self.run_details,
+            "brake_cycles": self.brake_cycles,
+            "trigger_speed_turns_s": self._trigger_speed,
+            "top_position_turns": self.TOP_POSITION,
+            "hold_s": self.HOLD_S,
+        }
+
+    def main_execution(self) -> None:
+        # Asked first, while nothing is energized and the brake is still holding:
+        # it needs a person and does not need the stand, and a run nobody can
+        # attribute to a DUT is not worth the hours it takes.
+        self.run_details = prompt_for_SN_ER_load(self, self.RUN_DETAIL_FIELDS)
+
+        prepare_for_operation(self)
+        set_tuning_params(self)
+
+        # All three streams: the bus bounds are the supply's channels, the motor
+        # bounds the ODrive's and the thermal bounds the DAQ's, and no device
+        # publishes another's. stopping_distance_mm is published state rather than
+        # a device channel, and the runner merges state into what it evaluates.
+        self.runner.start(
+            self.testbed.telemetry,
+            self.testbed.bus_telemetry,
+            self.testbed.tc_daq_telemetry,
+        )
+
+        # The load is held by nothing while the operator works, which is safe only
+        # at the bottom of the stroke - see establish_origin_at_bottom().
+        origin = self._origin = establish_origin_at_bottom(self)
+
+        while True:
+            # Take the load back in place: the operator moved the axis away from
+            # whatever the setpoint was on the first pass, and on later passes the
+            # brake has been holding it and may have crept.
+            release_brake_in_place(self)
+            move_to(self, origin + self.TOP_POSITION, arrival_timeout_s=self.MOVE_TIMEOUT_S)
+
+            # A static hold first, on the brake alone, so each cycle records slip
+            # as well as a stopping distance.
+            slip = hold_on_brake(self, self.HOLD_S, origin)
+
+            # The ceiling goes up only now, for the run-down - see
+            # RUNDOWN_VELOCITY_LIMIT for why the lift above does not get it.
+            set_tuning_params(self, velocity_limit=self.RUNDOWN_VELOCITY_LIMIT)
+
+            # In place again: the hold above is the step that measures the brake
+            # letting go, so the load having moved is expected rather than a fault.
+            release_brake_in_place(self)
+            stopping_distance_mm = brake_from_speed(
+                self,
+                target=origin + self.BOTTOM_POSITION,
+                trigger_speed=self._trigger_speed,
             )
-        super().post_test_teardown()
+
+            self.brake_cycles += 1
+            self.set_state("brake_cycles", self.brake_cycles)
+            logger.info(
+                "test %s: brake cycle %d complete - slipped %+.3f turns at the top, "
+                "stopped in %.1f mm",
+                self.test_id, self.brake_cycles, slip, stopping_distance_mm,
+            )
+
+            # Finish the descent and rest at the bottom.
+            #
+            # AFTER the brake event, deliberately: a bad stop publishes
+            # stopping_distance_mm, stopping_distance_bound fires on it, and this
+            # step's entry check raises before anything drives the load. So the one
+            # cycle that ends with a brake which could not stop the load in 250 mm
+            # is also the one that never moves it afterwards.
+            # Tuning restored BEFORE the descent rather than after it, so this
+            # move runs under the normal ceiling instead of the run-down's. Written
+            # while the axis is still idle behind the engaged brake, which is where
+            # brake_from_speed left it.
+            set_tuning_params(self)
+            release_brake_in_place(self)
+            move_to(self, origin + self.BOTTOM_POSITION)
+            engage_brake(self)
+            self.wait_for(self.DWELL_S)
+
