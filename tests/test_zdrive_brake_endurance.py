@@ -319,7 +319,7 @@ def test_the_cycle_rests_at_the_bottom_on_the_brake():
     place on this axis where a rest costs nothing and risks nothing."""
     source = _code_of(BrakeEnduranceTest.main_execution)
     assert source.index("engage_brake(self)") < source.index("wait_for(self.DWELL_S)")
-    assert BrakeEnduranceTest.DWELL_S == 60.0
+    assert BrakeEnduranceTest.DWELL_S == 300.0
 
 
 def test_every_channel_the_step_publishes_is_seeded():

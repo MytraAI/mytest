@@ -246,17 +246,22 @@ class BrakeEnduranceTest(_LiftingZdriveTest):
     once per cycle so brake wear shows up in slip as well as in stopping
     distance."""
 
-    DWELL_S = 60.0
+    DWELL_S = 300.0
     """How long each cycle rests at the bottom of the stroke, on the brake with the
     axis idle and the load on its hard stop. Nothing dissipates across it: the brake
     is magnet-applied so holding costs no coil power, and an idled axis draws no
     current.
 
-    A minute does not return the brake to ambient - it is a settling dwell rather
-    than a thermal recovery one, so consecutive events see a brake that is still
-    carrying heat from the last stop. That is what makes the cycle rate high enough
-    to accumulate events: the traverse dominates, at roughly thirty events an hour
-    against five for a ten-minute rest."""
+    Five minutes makes the dwell the whole cycle - about 320 s of which the traverse
+    is 19 - so roughly eleven events an hour and 270 a day. Long enough that what
+    differs between events is closer to wear than to how hot the last stop left the
+    brake, without ydrive's ten minutes.
+
+    WHETHER IT REACHES AMBIENT IS UNMEASURED, and the first cycle of a run is the
+    one to watch for it: measured at 1000 lb with a shorter rest, cycle 1 stopped
+    36% longer than the cycles after it, which had settled to within 3% of each
+    other. A dwell that truly returned the brake to ambient would make every cycle
+    look like that first one."""
 
     MOVE_TIMEOUT_S = 10.0
     """How long the lift to the top may take, before a stalled axis is reported
