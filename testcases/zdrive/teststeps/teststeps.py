@@ -109,6 +109,15 @@ run gives up on it stopping. Generous against BRAKE_SETTLE_S plus a decelerating
 load, and short enough that a brake which never bit is reported rather than
 waited on."""
 
+DEFAULT_BRAKE_BACKSTOP_TURNS = 20.0
+"""How close to the target the load may get before the brake is dropped whatever
+speed it is doing.
+
+A stroke limit, not a timing one. With the axis idle there is no controller to
+abort with, so this is the only thing between a load that never reaches its
+trigger speed and the hard stop at the bottom. Measured stops from 60 turns/s run
+to about 11 turns, so this leaves most of a stop's worth of margin again."""
+
 DEFAULT_POST_BRAKE_REST_S = 5.0
 """How long the brake keeps what it stopped before the stopping distance is taken,
 so creep counts against that distance. Nothing drives across it, so any movement
@@ -146,6 +155,26 @@ VELOCITY_INTEGRATOR = 0.4
 SPINOUT_MECHANICAL_THRESHOLD = -50.0  # W
 SPINOUT_ELECTRICAL_THRESHOLD = 50.0  # W
 """The tuning this stand runs under, as the board is configured today."""
+
+VELOCITY_INTEGRATOR_LIMIT = 10.0  # Nm
+"""Ceiling on the torque the velocity loop's integrator alone may command.
+
+THE BOARD SHIPS THIS AT INFINITY, which on a gravity-loaded axis means the one
+term that has to carry the load's weight is also the one term with no bound. The
+integrator is not optional here: at rest the velocity error is zero, so the
+proportional terms contribute nothing and holding the load is entirely the
+integrator's job.
+
+Sized from what holding actually costs rather than from the current limit.
+Measured at 1000 lb stationary, the axis draws 32 A - 8.1 Nm - of which the
+integrator carries 6.9 Nm. This is about 45% above that, so a heavier hold or a
+worse spot in the stroke still has room.
+
+Deliberately below the soft current limit's torque equivalent, which at 55 A and
+this motor's 0.2506 Nm/A is 13.8 Nm: the integrator alone can reach roughly 40 A,
+so it can no longer saturate the current limit by itself. What it does NOT bound
+is the proportional path - a runaway the velocity error is fighting reaches the
+limit through vel_gain, with the integrator near zero."""
 
 VELOCITY_LIMIT_TOLERANCE = 1.5
 """Multiple of the velocity limit at which the axis raises an overspeed error, so
@@ -274,6 +303,7 @@ def set_tuning_params(
     velocity_integrator: float = VELOCITY_INTEGRATOR,
     spinout_mechanical_threshold: float = SPINOUT_MECHANICAL_THRESHOLD,
     spinout_electrical_threshold: float = SPINOUT_ELECTRICAL_THRESHOLD,
+    velocity_integrator_limit: float = VELOCITY_INTEGRATOR_LIMIT,
     velocity_limit_tolerance: float = VELOCITY_LIMIT_TOLERANCE,
 ) -> None:
     _apply_tuning_params(
@@ -285,6 +315,7 @@ def set_tuning_params(
         velocity_integrator,
         spinout_mechanical_threshold,
         spinout_electrical_threshold,
+        velocity_integrator_limit,
         velocity_limit_tolerance,
     )
 
@@ -298,6 +329,7 @@ def _apply_tuning_params(
     velocity_integrator: float = VELOCITY_INTEGRATOR,
     spinout_mechanical_threshold: float = SPINOUT_MECHANICAL_THRESHOLD,
     spinout_electrical_threshold: float = SPINOUT_ELECTRICAL_THRESHOLD,
+    velocity_integrator_limit: float = VELOCITY_INTEGRATOR_LIMIT,
     velocity_limit_tolerance: float = VELOCITY_LIMIT_TOLERANCE,
 ) -> None:
     """Write the controller configuration this stand runs under.
@@ -316,6 +348,7 @@ def _apply_tuning_params(
     testbed.command.set_controller_config_pos_gain(position_gain)
     testbed.command.set_controller_config_vel_gain(velocity_gain)
     testbed.command.set_controller_config_vel_integrator_gain(velocity_integrator)
+    testbed.command.set_controller_config_vel_integrator_limit(velocity_integrator_limit)
     testbed.command.set_controller_config_spinout_mechanical_power_threshold(
         spinout_mechanical_threshold
     )
@@ -579,91 +612,89 @@ def brake_from_speed(
     test_case: BaseZdriveTest,
     target: float,
     trigger_speed: float,
+    backstop_turns: float = DEFAULT_BRAKE_BACKSTOP_TURNS,
     stop_timeout_s: float = DEFAULT_STOP_TIMEOUT_S,
     rest_s: float = DEFAULT_POST_BRAKE_REST_S,
     velocity_tolerance: float = DEFAULT_VELOCITY_TOLERANCE,
-    position_tolerance: float = DEFAULT_POSITION_TOLERANCE,
     arm_timeout_s: float = DEFAULT_ARM_TIMEOUT_S,
 ) -> float:
-    """Drive toward `target` and let the brake stop the load once it reaches
+    """Let the load fall, and stop it with the brake once it reaches
     `trigger_speed` turns/s. Returns the stopping distance in millimetres.
 
-    THE ORDER IS THE INVERSE OF hold_on_brake()'s handover: the motor is idled
-    first and the brake closes on a coasting axis, because doing it the other way
-    drives the motor into a closing brake. The axis is never commanded to stop -
-    what stops the load is the brake, and that is the measurement.
+    THE CONTROLLER IS NOT IN THIS LOOP. The axis stays idle throughout, so the
+    load is accelerating under its own weight and nothing but the brake will stop
+    it. That is the measurement, and it is also what keeps the axis out of a fight
+    it cannot win: asked to hold a descent this axis runs away, and the velocity
+    error then commands more current than the limit allows until the firmware
+    disarms - which is a harder stop from a higher speed than this step's own
+    trigger would have taken.
 
-    THE IDLE IS CONFIRMED BEFORE THE RAIL DROPS, as in engage_brake(): requesting
-    a state only writes `requested_state` and the ODrive can decline it, and a
-    braked axis that is still armed holds position against a locked output. Here
-    that matters more than anywhere else in a run, because the setpoint is the far
-    end of the stroke - so the position error a still-armed axis would push against
-    the brake is close to the whole travel.
+    ENTERED BRAKED AND IDLE, as hold_on_brake() leaves the stand. The idle is
+    confirmed before the rail is released, because releasing the brake while the
+    axis is armed hands the load to a controller whose setpoint is wherever the
+    last move left it.
 
-    THE DESCENT IS DRIVEN, NOT A FALL. This axis is very nearly self-locking:
-    measured at 1000 lb, steady descent draws almost no phase current and returns
-    nothing to the bus, because gravity and screw friction very nearly cancel. So
-    the controller sets the speed on the way down and the velocity limit really
-    is a ceiling - which is what makes a trigger speed catchable here at all. It
-    also means `trigger_speed` must sit BELOW the velocity limit in force, or the
-    axis clamps under the trigger and the run-up never fires the brake.
+    THE BRAKE CLOSES ON THE WAY OUT NO MATTER WHAT. Once the rail is released the
+    load is held by nothing, so the rail is dropped in a `finally` - a fatal
+    bound, a stop request or a lost recorder during the fall must not leave a
+    falling load behind.
 
-    A FLOOR, NOT THE SPEED THE BRAKE SEES. Telemetry arrives about every 79 ms
-    and the axis gains roughly 7 turns/s per frame on the ramp, so the frame that
-    crosses the trigger can read well above it. The speed actually recorded is
-    the one from that frame, not the trigger - which is why it is published rather
-    than assumed.
+    BOUNDED BY POSITION AS WELL AS BY SPEED. `backstop_turns` from `target` the
+    brake is dropped regardless of how fast the load is going, because with the
+    axis idle there is no controller authority to abort with and the stroke is
+    finite. Reaching it means the load never got to `trigger_speed`, which is
+    logged rather than raised: the brake still stopped it, and the speed it
+    engaged at is recorded either way.
 
     STOPPING DISTANCE IS EVERYTHING AFTER THE BRAKE IS COMMANDED: the coast
     before it bites, the deceleration, and any creep across `rest_s`. It is
-    baselined on the first frame after the rail is dropped, NOT on the trigger
-    frame - so confirming the idle above costs the measurement nothing, and the
-    travel it excludes is coasting the brake was not yet asked to stop. That frame
-    still precedes physical engagement, which is up to BRAKE_SETTLE_S later and
-    unobservable from here.
-
-    `brake_speed_turns_s` comes off that same frame rather than off the trigger, so
-    the speed recorded is the one the brake actually saw. On a near-self-locking
-    axis that is below the trigger, because friction is already slowing the load
-    while the axis idles. What was asked for is in the run's metadata.
-
-    Bounded by the stroke rather than a clock: it ends at the trigger speed or on
-    arrival, and arriving short raises with the peak speed reached, since the peak
-    is what says whether the speed is achievable at all. Also raises if the load
-    never comes to rest. Publishes `brake_speed_turns_s` and
-    `stopping_distance_mm`; zdrive_rulebook bounds the latter."""
+    baselined on the first frame after the rail is dropped, which still precedes
+    physical engagement - that is up to BRAKE_SETTLE_S later and unobservable
+    from here. `brake_speed_turns_s` comes off that same frame, so the speed
+    recorded is the one the brake saw."""
     testbed: ZdriveTestbed = test_case.testbed
 
-    testbed.command.set_position(target)
-    test_case.set_state("position_target", target)
+    # Never release the brake onto an armed axis: its setpoint is the last move's
+    # target, and it would lunge for it.
+    _await_axis_armed(test_case, armed=False, timeout_s=arm_timeout_s)
 
     started_at = testbed.get_motion().position
-    peak_speed = 0.0
-    while True:
-        test_case.check_should_continue()
-        motion = testbed.get_motion()
-        _require_still_driving(test_case, motion, f"accelerating to {trigger_speed:.2f} turns/s")
-        peak_speed = max(peak_speed, abs(motion.velocity))
-        if abs(motion.velocity) >= trigger_speed:
-            break
-        if abs(motion.position - target) <= position_tolerance:
-            travelled = abs(motion.position - started_at)
-            raise RuntimeError(
-                f"test {test_case.test_id}: the load arrived at {target:.1f} turns without ever "
-                f"reaching {trigger_speed:.2f} turns/s - it peaked at {peak_speed:.2f} turns/s "
-                f"over {travelled:.1f} turns ({travelled * MM_PER_TURN:.0f} mm). The load will "
-                "not give that speed with this tuning: lower the trigger below the peak, or "
-                "raise the velocity limit above it - and check that the limit passed to "
-                "set_tuning_params is above the trigger at all"
-            )
+    test_case.set_state("position_target", target)
+    testbed.power_brake_bus(True)
+    test_case.set_state("brake_engaged", False)
 
-    # Idle, confirm it idled, and only then let the brake close on a coasting
-    # axis - see this step's docstring for why the confirmation is not optional
-    # here in particular.
-    testbed.command.set_axis_state("IDLE")
-    _await_axis_armed(test_case, armed=False, timeout_s=arm_timeout_s)
-    testbed.power_brake_bus(False)
-    test_case.set_state("brake_engaged", True)
+    peak_speed = 0.0
+    reached_trigger = False
+    fell_to = started_at
+    try:
+        while True:
+            test_case.check_should_continue()
+            motion = testbed.get_motion()
+            peak_speed = max(peak_speed, abs(motion.velocity))
+            fell_to = motion.position
+            if abs(motion.velocity) >= trigger_speed:
+                reached_trigger = True
+                break
+            if abs(motion.position - target) <= backstop_turns:
+                break
+    finally:
+        # The load is falling and only this stops it - see this step's docstring.
+        testbed.power_brake_bus(False)
+        test_case.set_state("brake_engaged", True)
+
+    if not reached_trigger:
+        # Reported from the loop's last frame rather than by reading another one:
+        # every get_motion() blocks for a fresh frame, and a frame spent here is
+        # travel charged to the brake that it had not been asked for yet.
+        travelled = abs(fell_to - started_at)
+        logger.warning(
+            "test %s: the load reached the %.1f-turn backstop without ever doing "
+            "%.2f turns/s - it peaked at %.2f turns/s over %.1f turns (%.0f mm). The brake "
+            "was dropped on position instead, so this cycle's engagement speed is not the "
+            "one that was asked for",
+            test_case.test_id, backstop_turns, trigger_speed, peak_speed,
+            travelled, travelled * MM_PER_TURN,
+        )
 
     # The baseline for everything below, taken as one frame so the speed recorded
     # and the position it was reached at describe the same instant.

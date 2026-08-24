@@ -63,11 +63,21 @@ class BaseZdriveTest(TestCase):
         self.testbed: Optional[ZdriveTestbed] = None
 
     def pre_test_setup(self) -> None:
+        # SEEDED BEFORE THE DRIVERS EXIST, and the order is load-bearing. The
+        # engine fixes each wide file's header from that device's first
+        # HEADER_SAMPLE_FRAMES frames, so the window is a frame count and closes
+        # sooner on a faster device - about 2 s on the CPX400DP at ~24 Hz, which
+        # is less than ZdriveTestbed.start() takes to bind sockets and connect
+        # four backends. Seeding after start() therefore lands inside the window
+        # for the slow devices and outside it for the fast one, and that device's
+        # file silently loses every state channel. Nothing here needs the testbed:
+        # set_state only needs the publisher.
+        self._seed_channels()
+
         self.testbed = ZdriveTestbed(
             use_mock_odrive=self._use_mock, output_dir=self._output_dir, test_id=self.test_id
         )
         self.testbed.start()
-        self._seed_channels()
 
         # Constructed here so it's ready the moment MainExecution starts, but
         # NOT started - see this module's docstring.
@@ -86,6 +96,11 @@ class BaseZdriveTest(TestCase):
         a wide file's header from its first frames and drops a channel that
         appears later, so a value a step computes partway through a sequence
         would never be written. See ../channels.py.
+
+        MUST RUN BEFORE THE DRIVERS DO. The header window is counted in frames
+        per device, so the fastest publisher closes it first - see
+        pre_test_setup(), which calls this before starting the testbed for that
+        reason.
 
         Bound-status channels are derived from RULEBOOKS rather than hand-listed,
         since the Rulebook is already the single source of truth for bound
