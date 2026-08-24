@@ -62,6 +62,7 @@ from typing import Dict, NamedTuple, Optional, Sequence, Tuple
 from hardware.odrive import odrive_errors
 from testbeds.zdrive_testbed.zdrive_testbed import (
     BRAKE_SETTLE_S,
+    MM_PER_TURN,
     Motion,
     ZdriveTestbed,
 )
@@ -82,7 +83,7 @@ origin: every target is relative to wherever the operator leaves the load."""
 DEFAULT_POSITION_TOLERANCE = 0.5  # turns
 DEFAULT_VELOCITY_TOLERANCE = 0.05  # turns/s
 DEFAULT_ARRIVAL_TIMEOUT_S = 30.0
-"""How long a move may take. 55 turns at the 10 turns/s velocity limit is 5.5 s,
+"""How long a move may take. 55 turns at the 18 turns/s velocity limit is 3.1 s,
 so this is generous enough for a slow load and short enough that a stalled axis
 reports rather than hanging the run."""
 
@@ -95,12 +96,23 @@ TEARDOWN_DESCENT_TIMEOUT_S = 10.0
 """How long the teardown descent is attempted before everything is switched off
 regardless of where the load got to.
 
-An attempt, not a guarantee. The full stroke takes 5.5 s at the velocity limit,
+An attempt, not a guarantee. The full stroke takes 3.1 s at the velocity limit,
 so a healthy descent finishes well inside this; a descent that does not is one
 where something is already wrong, and waiting longer on a stand nobody is
 watching buys less than shutting it down does. However it ends, the brake is
 engaged and the bus dropped - so a load that did not make it to the bottom is
 left held by the brake, which is where it would have been anyway."""
+
+DEFAULT_STOP_TIMEOUT_S = 10.0
+"""How long the load may still be moving after the brake was commanded before the
+run gives up on it stopping. Generous against BRAKE_SETTLE_S plus a decelerating
+load, and short enough that a brake which never bit is reported rather than
+waited on."""
+
+DEFAULT_POST_BRAKE_REST_S = 5.0
+"""How long the brake keeps what it stopped before the stopping distance is taken,
+so creep counts against that distance. Nothing drives across it, so any movement
+is the brake giving way rather than the axis being commanded."""
 
 DEFAULT_ARM_TIMEOUT_S = 3.0
 """How long a brake transition waits for the axis to report the state it asked
@@ -126,18 +138,18 @@ OPERATOR_POLL_INTERVAL_S = 0.1
 because a person is what is being waited on. Every tick still runs the abort
 checks."""
 
-VELOCITY_LIMIT = 10.0  # turns/s
+VELOCITY_LIMIT = 18.0  # turns/s
 FILTER_BW = 20.0  # 1/s
 POSITION_GAIN = 32.0
 VELOCITY_GAIN = 0.8
-VELOCITY_INTEGRATOR = 0.08
-SPINOUT_MECHANICAL_THRESHOLD = -20.0  # W
-SPINOUT_ELECTRICAL_THRESHOLD = 20.0  # W
+VELOCITY_INTEGRATOR = 0.4
+SPINOUT_MECHANICAL_THRESHOLD = -50.0  # W
+SPINOUT_ELECTRICAL_THRESHOLD = 50.0  # W
 """The tuning this stand runs under, as the board is configured today."""
 
 VELOCITY_LIMIT_TOLERANCE = 1.5
 """Multiple of the velocity limit at which the axis raises an overspeed error, so
-the trip sits at 15 turns/s against a 10 turns/s limit. Tighter than the board's
+the trip sits at 27 turns/s against an 18 turns/s limit. Tighter than the board's
 default of 2.0: on a gravity-loaded axis an overspeed is the load running away,
 and there is less of the stroke left by the time a wider tolerance notices."""
 
@@ -500,6 +512,34 @@ def release_brake_for_positioning(test_case: BaseZdriveTest) -> None:
     _await_axis_armed(test_case, armed=False, timeout_s=DEFAULT_ARM_TIMEOUT_S)
 
 
+def establish_origin_at_bottom(test_case: BaseZdriveTest) -> float:
+    """Hand the load to a person, have them put it on its stop, and make where they
+    left it position 0. Returns that origin, in turns.
+
+    THE LOAD IS HELD BY NOTHING while the operator works - see
+    release_brake_for_positioning(), which is safe only at the bottom of the stroke
+    because the load has nowhere left to descend to. That is the whole reason this
+    step exists at the bottom rather than wherever a test would prefer to start.
+
+    Rezeroing is in software: the device is not zeroed, because there is no command
+    for that in the declared channel set, so the offset is published as
+    `position_origin` instead. Without it a stored run's absolute positions cannot
+    be interpreted, since they are relative to wherever a person happened to stop.
+
+    Not a @step: await_operator() is one, and a step that contains another reports
+    twice for one action."""
+    release_brake_for_positioning(test_case)
+    await_operator(
+        test_case,
+        "move the drive to the BOTTOM of the stroke, where the load rests on its stop "
+        "(this becomes position 0), then acknowledge",
+    )
+    origin = test_case.testbed.get_pos_estimate()
+    test_case.set_state("position_origin", origin)
+    logger.info("test %s: position origin set at %.3f turns", test_case.test_id, origin)
+    return origin
+
+
 @step
 def move_to(
     test_case: BaseZdriveTest,
@@ -535,7 +575,128 @@ def move_to(
 
 
 @step
-def hold_on_brake(test_case: BaseZdriveTest, hold_s: float) -> float:
+def brake_from_speed(
+    test_case: BaseZdriveTest,
+    target: float,
+    trigger_speed: float,
+    stop_timeout_s: float = DEFAULT_STOP_TIMEOUT_S,
+    rest_s: float = DEFAULT_POST_BRAKE_REST_S,
+    velocity_tolerance: float = DEFAULT_VELOCITY_TOLERANCE,
+    position_tolerance: float = DEFAULT_POSITION_TOLERANCE,
+    arm_timeout_s: float = DEFAULT_ARM_TIMEOUT_S,
+) -> float:
+    """Drive toward `target` and let the brake stop the load once it reaches
+    `trigger_speed` turns/s. Returns the stopping distance in millimetres.
+
+    THE ORDER IS THE INVERSE OF hold_on_brake()'s handover: the motor is idled
+    first and the brake closes on a coasting axis, because doing it the other way
+    drives the motor into a closing brake. The axis is never commanded to stop -
+    what stops the load is the brake, and that is the measurement.
+
+    THE IDLE IS CONFIRMED BEFORE THE RAIL DROPS, as in engage_brake(): requesting
+    a state only writes `requested_state` and the ODrive can decline it, and a
+    braked axis that is still armed holds position against a locked output. Here
+    that matters more than anywhere else in a run, because the setpoint is the far
+    end of the stroke - so the position error a still-armed axis would push against
+    the brake is close to the whole travel.
+
+    THE DESCENT IS DRIVEN, NOT A FALL. This axis is very nearly self-locking:
+    measured at 1000 lb, steady descent draws almost no phase current and returns
+    nothing to the bus, because gravity and screw friction very nearly cancel. So
+    the controller sets the speed on the way down and the velocity limit really
+    is a ceiling - which is what makes a trigger speed catchable here at all. It
+    also means `trigger_speed` must sit BELOW the velocity limit in force, or the
+    axis clamps under the trigger and the run-up never fires the brake.
+
+    A FLOOR, NOT THE SPEED THE BRAKE SEES. Telemetry arrives about every 79 ms
+    and the axis gains roughly 7 turns/s per frame on the ramp, so the frame that
+    crosses the trigger can read well above it. The speed actually recorded is
+    the one from that frame, not the trigger - which is why it is published rather
+    than assumed.
+
+    STOPPING DISTANCE IS EVERYTHING AFTER THE BRAKE IS COMMANDED: the coast
+    before it bites, the deceleration, and any creep across `rest_s`. It is
+    baselined on the first frame after the rail is dropped, NOT on the trigger
+    frame - so confirming the idle above costs the measurement nothing, and the
+    travel it excludes is coasting the brake was not yet asked to stop. That frame
+    still precedes physical engagement, which is up to BRAKE_SETTLE_S later and
+    unobservable from here.
+
+    `brake_speed_turns_s` comes off that same frame rather than off the trigger, so
+    the speed recorded is the one the brake actually saw. On a near-self-locking
+    axis that is below the trigger, because friction is already slowing the load
+    while the axis idles. What was asked for is in the run's metadata.
+
+    Bounded by the stroke rather than a clock: it ends at the trigger speed or on
+    arrival, and arriving short raises with the peak speed reached, since the peak
+    is what says whether the speed is achievable at all. Also raises if the load
+    never comes to rest. Publishes `brake_speed_turns_s` and
+    `stopping_distance_mm`; zdrive_rulebook bounds the latter."""
+    testbed: ZdriveTestbed = test_case.testbed
+
+    testbed.command.set_position(target)
+    test_case.set_state("position_target", target)
+
+    started_at = testbed.get_motion().position
+    peak_speed = 0.0
+    while True:
+        test_case.check_should_continue()
+        motion = testbed.get_motion()
+        _require_still_driving(test_case, motion, f"accelerating to {trigger_speed:.2f} turns/s")
+        peak_speed = max(peak_speed, abs(motion.velocity))
+        if abs(motion.velocity) >= trigger_speed:
+            break
+        if abs(motion.position - target) <= position_tolerance:
+            travelled = abs(motion.position - started_at)
+            raise RuntimeError(
+                f"test {test_case.test_id}: the load arrived at {target:.1f} turns without ever "
+                f"reaching {trigger_speed:.2f} turns/s - it peaked at {peak_speed:.2f} turns/s "
+                f"over {travelled:.1f} turns ({travelled * MM_PER_TURN:.0f} mm). The load will "
+                "not give that speed with this tuning: lower the trigger below the peak, or "
+                "raise the velocity limit above it - and check that the limit passed to "
+                "set_tuning_params is above the trigger at all"
+            )
+
+    # Idle, confirm it idled, and only then let the brake close on a coasting
+    # axis - see this step's docstring for why the confirmation is not optional
+    # here in particular.
+    testbed.command.set_axis_state("IDLE")
+    _await_axis_armed(test_case, armed=False, timeout_s=arm_timeout_s)
+    testbed.power_brake_bus(False)
+    test_case.set_state("brake_engaged", True)
+
+    # The baseline for everything below, taken as one frame so the speed recorded
+    # and the position it was reached at describe the same instant.
+    braked_from = testbed.get_motion()
+
+    stop_deadline: Stopwatch = Stopwatch(duration_s=stop_timeout_s)
+    while True:
+        test_case.check_should_continue()
+        motion = testbed.get_motion()
+        if abs(motion.velocity) <= velocity_tolerance:
+            break
+        if stop_deadline.expired:
+            raise TimeoutError(
+                f"test {test_case.test_id}: the load was still moving "
+                f"{abs(motion.velocity):.2f} turns/s {stop_timeout_s}s after the brake was "
+                f"commanded, having travelled "
+                f"{abs(motion.position - braked_from.position) * MM_PER_TURN:.0f} mm"
+            )
+
+    # The brake keeps what it stopped, and only then is the distance taken - see
+    # DEFAULT_POST_BRAKE_REST_S. Nothing here touches the rail or the axis: they
+    # were left where they should be above.
+    test_case.wait_for(rest_s)
+    rested_at = testbed.get_motion().position
+
+    stopping_distance_mm = abs(rested_at - braked_from.position) * MM_PER_TURN
+    test_case.set_state("brake_speed_turns_s", abs(braked_from.velocity))
+    test_case.set_state("stopping_distance_mm", stopping_distance_mm)
+    return stopping_distance_mm
+
+
+@step
+def hold_on_brake(test_case: BaseZdriveTest, hold_s: float, origin: float = 0.0) -> float:
     """Hold the load on the brake alone for `hold_s`, and report how far it moved.
 
     The measurement this stand exists to take. The axis is idled, so for the whole
@@ -546,6 +707,13 @@ def hold_on_brake(test_case: BaseZdriveTest, hold_s: float) -> float:
     negative, so a load that descends slips POSITIVE. Published as
     `brake_slip_turns` so it lands in the recorded run rather than only in a log
     line.
+
+    THE LOG LINE IS RELATIVE TO `origin`, the value establish_origin_at_bottom()
+    returned. Positions on this stand are only meaningful against that origin,
+    since the device is never zeroed and the raw estimate carries whatever offset
+    the board woke up with - so a line reporting the raw number reads as a
+    different height than the one the test asked for. The slip itself is a
+    difference and is unaffected either way.
 
     Not unwound in a `finally`: if the wait raises, the load should stay where the
     brake has it rather than being handed to a controller nobody is watching."""
@@ -559,7 +727,7 @@ def hold_on_brake(test_case: BaseZdriveTest, hold_s: float) -> float:
     test_case.set_state("brake_slip_turns", slip)
     logger.info(
         "test %s: brake held %.1fs at %.3f turns, slipped %+.3f turns to %.3f",
-        test_case.test_id, hold_s, held_from, slip, held_to,
+        test_case.test_id, hold_s, held_from - origin, slip, held_to - origin,
     )
     return slip
 
