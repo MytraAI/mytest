@@ -57,4 +57,20 @@ DEFAULT_STATE: Dict[str, Any] = {
     # unevaluable, and unevaluable stops a run - so None here aborted every run on
     # its first frame, before anything moved. The cost is that rows before the
     # first brake event read as a stop in no distance rather than as no stop yet.
+    "total_distance_m": 0.0,
+    "distance_since_brake_m": 0.0,
+    # How far the load has travelled in all, and how far since the last brake
+    # event.
+    #
+    # HOW total_distance_m IS ARRIVED AT DEPENDS ON WHICH TEST PUBLISHED IT, so a
+    # bound or a report reading it needs test_name too. EnduranceCycleTest computes
+    # it from its setpoints and assumes every cycle reaches them;
+    # CycleBrakeEnduranceTest measures it turnaround to turnaround from pos_estimate,
+    # because it accepts overshoot and so does not stop at its setpoints.
+    # distance_since_brake_m has one publisher and is derived from the other two.
+    #
+    # Seeded for the same reason the operator's answers are: the engine fixes a
+    # file's header from the union of its first frames and drops channels that
+    # appear later, and neither of these is published until the stand is open and
+    # the load has moved.
 }

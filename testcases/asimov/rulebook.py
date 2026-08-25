@@ -234,7 +234,11 @@ class BoundTransition:
 
 class RulebookEvaluator:
     """Tracks per-bound violated/cleared state across repeated
-    evaluate() calls against one ongoing stream of channel snapshots.
+    evaluate() calls against the channel snapshots of one run.
+
+    ONE EVALUATOR COVERS EVERY STREAM a live runner watches, so a bound is
+    reached by frames that do not carry its channel as well as by frames that
+    do - see evaluate().
 
     Shared by both live in-test evaluation (MainExecution creates one
     instance for itself) and post-hoc evaluation (the telemetry engine
@@ -282,12 +286,19 @@ class RulebookEvaluator:
                             )
                         continue
                     raise
-                if self._unevaluable_since.pop(key, None) is not None:
-                    logger.info("bound %s is evaluable again (%s)", bound.label, bound.channel)
-
                 if raw is None:
+                    # Didn't apply to this frame - the channel is absent, or a gate
+                    # held another value. NOT evidence that an unevaluable bound has
+                    # recovered, so the grace timer is left alone. One evaluator is
+                    # shared by every stream a runner watches, and a stream that does
+                    # not carry the channel reaches here on every one of its frames,
+                    # so clearing the timer here would reset one stream's grace at the
+                    # frame rate of another and it could never expire.
                     self._pending_since.pop(key, None)
                     continue
+
+                if self._unevaluable_since.pop(key, None) is not None:
+                    logger.info("bound %s is evaluable again (%s)", bound.label, bound.channel)
 
                 was_violated = self._prior_violated.get(key, False)
 

@@ -271,3 +271,148 @@ def test_a_recovered_channel_starts_its_grace_again():
     evaluator.evaluate({"temperature": None}, 400.0)
     with pytest.raises(UnevaluableBoundError):
         evaluator.evaluate({"temperature": None}, 401.5)
+
+
+# --- state channels must exist before the first device frame ----------------
+#
+# The same quiet failure one layer up. The engine fixes a device file's header
+# from the union of its first frames and drops channels that appear later, so a
+# state channel published after the drivers are already streaming may never make
+# the header - and a run then records everything except the numbers the test was
+# run to produce, with nothing reporting a problem.
+
+
+class _RecordingPublisher:
+    """A state publisher that only remembers the order it was called in."""
+
+    def __init__(self, log):
+        self._log = log
+
+    def set_state(self, name, value):
+        self._log.append(("state", name))
+
+
+class _RecordingTestbed:
+    """A testbed that records when its drivers would have started."""
+
+    def __init__(self, log):
+        self._log = log
+
+    def start(self):
+        self._log.append(("testbed", "start"))
+
+
+def _seed_order(monkeypatch):
+    """Drive BaseYdriveTest.pre_test_setup() against fakes and report what was
+    published before the drivers started, and what after.
+
+    TestCase.__init__ is skipped deliberately: what is under test is the order of
+    two calls, and the rest of the lifecycle needs a run, an engine and a supply."""
+    from testcases.ydrive.testcases import base_ydrive_test
+
+    log = []
+    monkeypatch.setattr(base_ydrive_test, "YdriveTestbed", lambda **kwargs: _RecordingTestbed(log))
+    monkeypatch.setattr(base_ydrive_test, "LiveRulebookRunner", lambda **kwargs: None)
+
+    case = object.__new__(base_ydrive_test.BaseYdriveTest)
+    case.test_id = "test-seed-order"
+    case._use_mock = True
+    case._output_dir = None
+    case._publisher = _RecordingPublisher(log)
+
+    case.pre_test_setup()
+
+    started = log.index(("testbed", "start"))
+    return (
+        {name for kind, name in log[:started] if kind == "state"},
+        [name for kind, name in log[started:] if kind == "state"],
+    )
+
+
+def test_every_state_channel_is_published_before_any_driver_starts(monkeypatch):
+    """Seeding has to precede testbed.start(), not merely happen in pre_test_setup.
+
+    Both orders look identical in a passing run on a slow stand: the seed lands
+    inside the header window and everything is recorded. On a stand whose drivers
+    come up quickly the frames win the race, and the only symptom is a missing
+    column in a CSV nobody reads until analysis."""
+    from testcases.ydrive.channels import DEFAULT_STATE
+
+    seeded_first, late = _seed_order(monkeypatch)
+
+    assert not late, f"published after the drivers were already streaming: {late}"
+    missing = sorted(set(DEFAULT_STATE) - seeded_first)
+    assert not missing, f"state channels that could miss the header: {missing}"
+
+
+def test_the_bound_status_channels_are_seeded_too(monkeypatch):
+    """Derived from RULEBOOKS rather than hand-listed, and just as droppable: a run
+    missing a bound's status column reads as a run with no supervision of it."""
+    from testcases.ydrive.testcases import base_ydrive_test
+
+    seeded_first, _ = _seed_order(monkeypatch)
+
+    assert "test_status" in seeded_first
+    for rulebook in base_ydrive_test.BaseYdriveTest.RULEBOOKS:
+        for bound in rulebook.bounds:
+            assert f"{bound.label}_status" in seeded_first
+
+
+def test_one_streams_frames_do_not_reset_anothers_unevaluable_grace():
+    """A dead sensor has to stay dead across every stream, not just its own.
+
+    One RulebookEvaluator is shared by every telemetry stream a runner watches,
+    and a stream that does not carry a bound's channel reaches the "didn't apply"
+    path on every one of its frames. Clearing the grace timer there lets the
+    ODrive's ~12.6 Hz reset the thermocouple DAQ's grace before it can ever
+    expire, so a channel reading FAULT for a whole run is tolerated for all of
+    it, with its status channel still reporting the PASS it was seeded with.
+
+    Every ydrive test watches two streams and every zdrive test three, so this
+    path is the normal one rather than an edge case."""
+    from testcases.asimov.rulebook import Bound, Rulebook, RulebookEvaluator
+
+    rulebook = Rulebook(
+        name="two_stream",
+        test_names=["t"],
+        bounds=[Bound(channel="temperature_5_c", upper=80.0, name="thermal",
+                      fatal=True, unevaluable_grace_s=10.0)],
+    )
+    dead_daq = {"temperature_5_c": None}
+    other_stream = {"board_vbus_voltage": 48.0}
+
+    evaluator = RulebookEvaluator()
+    evaluator.register(rulebook)
+
+    t = 0.0
+    with pytest.raises(UnevaluableBoundError, match="temperature_5_c"):
+        for _ in range(2000):
+            for frame in (dead_daq, other_stream):
+                t += 0.079
+                evaluator.evaluate(frame, t)
+
+    assert t < 20.0, (
+        f"the grace ran to {t:.1f}s against a 10s budget - the other stream is "
+        "still resetting the timer"
+    )
+
+
+def test_a_stream_that_lacks_the_channel_reports_nothing_either_way():
+    """The other half of the rule: a stream carrying no temperatures must neither
+    reset the grace nor make the bound look evaluated. Its status stays whatever
+    it was seeded with, which is what keeps 'no transitions' honest."""
+    from testcases.asimov.rulebook import Bound, Rulebook, RulebookEvaluator
+
+    rulebook = Rulebook(
+        name="two_stream",
+        test_names=["t"],
+        bounds=[Bound(channel="temperature_5_c", upper=80.0, name="thermal", fatal=True)],
+    )
+    evaluator = RulebookEvaluator()
+    evaluator.register(rulebook)
+
+    transitions = []
+    for i in range(200):
+        transitions += evaluator.evaluate({"board_vbus_voltage": 48.0}, i * 0.079)
+
+    assert not transitions, f"a stream with no temperatures moved a thermal bound: {transitions}"

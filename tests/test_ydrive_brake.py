@@ -329,7 +329,7 @@ def test_the_manual_test_energizes_nothing():
     from testcases.ydrive.testcases.testcases import ManualTest
 
     testbed = FakeSupplyTestbed()
-    testbed.telemetry = testbed.tc_daq_telemetry = object()
+    testbed.telemetry = testbed.supply_telemetry = testbed.tc_daq_telemetry = object()
     case = FakeTeardownCase(testbed)
     case.runner = FakeRunner(testbed.calls)
     # Every stream the rulebook needs - the thermal bounds are on the DAQ's
@@ -340,7 +340,7 @@ def test_the_manual_test_energizes_nothing():
     with pytest.raises(Waited):
         ManualTest.main_execution(case)
 
-    assert testbed.calls == ["runner:start:2"], f"the stand was touched: {testbed.calls}"
+    assert testbed.calls == ["runner:start:3"], f"the stand was touched: {testbed.calls}"
 
 
 def test_the_arm_timeout_stays_below_the_telemetry_staleness_deadline():
