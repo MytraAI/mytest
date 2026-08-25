@@ -22,7 +22,7 @@ main_execution actually does:
   trusted instantaneously rather than debounced.
 - power_envelope_bound: in_power_limit_2 is False, RECORDED not fatal -
   the supply's own report that the motor bus has gone unregulated
-  against its 420 W envelope. See POWER_ENVELOPE_EXPECTED. Its channel
+  against its 420 W envelope. See IN_POWER_LIMIT_EXPECTED. Its channel
   is the supply's, so a test that does not hand runner.start() the
   supply's stream evaluates it against nothing.
 - overtemperature_bound_<n>: temperature_<n>_c > 80C on every LIVE
@@ -126,7 +126,7 @@ Cleared the moment the current drops back, so this is a continuous stretch and
 not a total. The same run's longest continuous stretch above MAX_BUS_CURRENT_A
 was 0.19 s, against 0.32% of frames above it at all."""
 
-POWER_ENVELOPE_EXPECTED = False
+IN_POWER_LIMIT_EXPECTED = False
 """What in_power_limit_2 should read: the motor bus inside the supply's power
 envelope.
 
@@ -216,7 +216,7 @@ YDRIVE_RULEBOOK = Rulebook(
         ),
         Bound(
             channel="in_power_limit_2",
-            expected=POWER_ENVELOPE_EXPECTED,
+            expected=IN_POWER_LIMIT_EXPECTED,
             name="power_envelope_bound",
         ),
         Bound(

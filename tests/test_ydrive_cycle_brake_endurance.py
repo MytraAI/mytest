@@ -28,12 +28,12 @@ from testcases.ydrive.testcases.testcases import (
 )
 from testcases.ydrive.teststeps.teststeps import (
     MAX_LOAD_VELOCITY_LIMIT,
-    OVER_ENERGY_VELOCITY_LIMIT,
+    BRAKE_TRIGGER_VELOCITY_LIMIT,
     move_to,
 )
 
 
-class FakeAxis:
+class FakeStand:
     """An axis that walks a scripted list of (position, velocity) frames.
 
     Scripted rather than simulated because what is under test is which frame a
@@ -117,7 +117,7 @@ def test_move_to_reports_the_accepted_frame_when_nothing_overshoots():
     a caller that only wanted to know where the move ended is unaffected. Under a
     3 turns/s gate that frame is still short of the target, so returning the target
     would report travel that never happened."""
-    axis = FakeAxis([(60.0, 18.0), (105.0, 12.0), (109.6, 2.5)])
+    axis = FakeStand([(60.0, 18.0), (105.0, 12.0), (109.6, 2.5)])
 
     assert move_to(FakeTestCase(axis), 110.0, **CYCLE_TOLERANCES) == pytest.approx(109.6)
 
@@ -126,7 +126,7 @@ def test_move_to_will_not_accept_a_frame_still_at_cruise():
     """The position gate passes from 10 turns out, so the velocity gate is the one
     that decides. A frame inside the position tolerance but still at speed is a load
     passing through the target, not one that has arrived."""
-    axis = FakeAxis([(105.0, 18.0), (108.0, 18.0), (109.7, 1.0)])
+    axis = FakeStand([(105.0, 18.0), (108.0, 18.0), (109.7, 1.0)])
 
     assert move_to(FakeTestCase(axis), 110.0, **CYCLE_TOLERANCES) == pytest.approx(109.7)
 
@@ -136,7 +136,7 @@ def test_move_to_will_not_accept_a_frame_still_at_cruise():
 
 def test_distance_is_the_gap_between_consecutive_resting_positions():
     case = Accumulator(start_at=110.6)
-    case._travelled_to(-0.4)
+    case._count_travel_to(-0.4)
 
     assert case.total_distance_m == pytest.approx(111.0 * METERS_PER_TURN)
 
@@ -146,7 +146,7 @@ def test_travel_is_counted_from_the_origin_the_load_starts_at():
     release_brake_in_place() left the load - so the one move up to the start line is
     travel rather than a gap in the record."""
     case = Accumulator(start_at=4.0)
-    case._travelled_to(114.0)
+    case._count_travel_to(114.0)
 
     assert case.total_distance_m == pytest.approx(110.0 * METERS_PER_TURN)
 
@@ -155,8 +155,8 @@ def test_overshoot_counts_as_travel_the_setpoints_cannot_see():
     """A cycle that overshoots both ends travels further than 2 x the stroke. The
     setpoint arithmetic EnduranceCycleTest uses would report the stroke."""
     case = Accumulator(start_at=110.0)
-    case._travelled_to(-1.5)
-    case._travelled_to(111.5)
+    case._count_travel_to(-1.5)
+    case._count_travel_to(111.5)
 
     derived = 2 * CycleBrakeEnduranceTest.START_POSITION * METERS_PER_TURN
     assert case.total_distance_m == pytest.approx(224.5 * METERS_PER_TURN)
@@ -165,7 +165,7 @@ def test_overshoot_counts_as_travel_the_setpoints_cannot_see():
 
 def test_both_distance_channels_are_published():
     case = Accumulator()
-    case._travelled_to(110.0)
+    case._count_travel_to(110.0)
 
     assert case.state["total_distance_m"] == pytest.approx(110.0 * METERS_PER_TURN)
     assert case.state["distance_since_brake_m"] == pytest.approx(110.0 * METERS_PER_TURN)
@@ -175,9 +175,9 @@ def test_the_interval_channel_is_derived_rather_than_counted():
     """A maintained counter would be a second copy of total_distance_m with its own
     chance to drift out of step with it."""
     case = Accumulator(brake_interval_m=1000.0)
-    case._travelled_to(20000.0)
+    case._count_travel_to(20000.0)
     case.brake_cycles = 1
-    case._travelled_to(case._last_position)  # republish, no added travel
+    case._count_travel_to(case._last_position)  # republish, no added travel
 
     expected = 20000.0 * METERS_PER_TURN - case._brake_interval_m
     assert case.state["distance_since_brake_m"] == pytest.approx(expected, abs=0.1)
@@ -191,13 +191,13 @@ def test_an_interval_that_overran_gives_the_metres_back_to_the_next_one():
     make the average interval drift a cycle high every time."""
     case = Accumulator(brake_interval_m=1000.0)
     overran = 12100.0 * METERS_PER_TURN  # one cycle past the first multiple
-    case._travelled_to(12100.0)
+    case._count_travel_to(12100.0)
 
     assert case.total_distance_m == pytest.approx(overran, abs=0.1)
     assert case.state["distance_since_brake_m"] == pytest.approx(overran, abs=0.1)
 
     case.brake_cycles = 1  # the event happens
-    case._travelled_to(case._last_position)
+    case._count_travel_to(case._last_position)
 
     assert (case.brake_cycles + 1) * case._brake_interval_m == 2000.0
     assert case.state["distance_since_brake_m"] == pytest.approx(
@@ -215,7 +215,7 @@ def test_the_run_up_ceiling_has_to_be_raised_and_is_enough_when_it_is():
     trigger = CycleBrakeEnduranceTest(require_engine=False).trigger_speed_turns_s
 
     assert trigger > CycleBrakeEnduranceTest.CYCLE_VELOCITY_LIMIT
-    assert trigger < CycleBrakeEnduranceTest.VELOCITY_LIMIT
+    assert trigger < CycleBrakeEnduranceTest.BRAKE_RUN_VELOCITY_LIMIT
 
 
 # --- wiring -----------------------------------------------------------------
@@ -247,14 +247,14 @@ def test_it_does_not_share_a_test_name_with_the_test_it_was_built_from():
 
 def test_the_setpoint_is_parked_where_the_axis_is_not_where_it_was_going():
     """Commanding the old target would finish the stroke instead of stopping."""
-    axis = FakeAxis([(42.0, 12.0), (42.5, 0.0)])
+    axis = FakeStand([(42.0, 12.0), (42.5, 0.0)])
     settle_load_under_controller(axis)
 
     assert axis.calls == ["move:42.0"]
 
 
 def test_a_load_already_at_rest_is_left_alone():
-    axis = FakeAxis([(42.0, 0.0)])
+    axis = FakeStand([(42.0, 0.0)])
     settle_load_under_controller(axis)
 
     assert axis.calls == [], "nothing to stop, so nothing commanded"
@@ -264,7 +264,7 @@ def test_a_load_that_will_not_stop_is_handed_to_the_brake_rather_than_raising():
     """An attempt, not a guarantee: stop() engages the brake next, which is where
     the load would have ended up without this at all. Raising here would mask
     whatever ended the run, and stop() must reach the 48 V bus either way."""
-    axis = FakeAxis([(42.0, 12.0)] * 200)
+    axis = FakeStand([(42.0, 12.0)] * 200)
 
     settle_load_under_controller(axis, settle_s=0.05)
 
@@ -276,7 +276,7 @@ def test_a_disarmed_axis_is_not_waited_on():
 
     The frame count is the assertion: waiting out settle_s would consume the whole
     scripted list, so returning early is the only way to leave frames behind."""
-    axis = FakeAxis([(42.0, 12.0)] * 200, armed=False)
+    axis = FakeStand([(42.0, 12.0)] * 200, armed=False)
 
     settle_load_under_controller(axis, settle_s=60.0)
 
@@ -292,7 +292,7 @@ def test_move_to_reports_the_peak_when_arrival_is_accepted_on_the_pullback():
     accepted on the way back, near the target. Returning that accepted position
     drops the whole out-and-back excursion from the distance: a cycling block
     covering 156.2 m of track counted 105.2 m, 67% of it."""
-    axis = FakeAxis([
+    axis = FakeStand([
         (60.0, 18.0),     # cruising out
         (127.3, 5.0),     # past the target by 17.3 turns - outside the position gate
         (127.3, 0.0),     # the peak: still 17.3 out, so still not arrived
@@ -308,7 +308,7 @@ def test_move_to_reports_the_peak_when_arrival_is_accepted_on_the_pullback():
 def test_a_downward_move_reports_its_lowest_point():
     """Direction is taken from the first frame of the move, not assumed, so the
     same rule holds on the leg back down."""
-    axis = FakeAxis([(110.0, -18.0), (-7.4, -5.0), (-7.4, 0.0), (2.0, 8.0), (8.0, 2.0)])
+    axis = FakeStand([(110.0, -18.0), (-7.4, -5.0), (-7.4, 0.0), (2.0, 8.0), (8.0, 2.0)])
 
     assert move_to(FakeTestCase(axis), 0.0, **CYCLE_TOLERANCES) == pytest.approx(-7.4)
 
@@ -345,7 +345,7 @@ def test_a_brake_event_is_counted_at_engagement_not_on_the_way_out():
     counted = []
     # The brake fires, and then the load never comes to rest - the worst stop there
     # is, and the one whose count a return-value counter would lose.
-    axis = FakeAxis([(0.0, 25.0), (5.0, 25.0)] + [(9.0, 25.0)] * 4)
+    axis = FakeStand([(0.0, 25.0), (5.0, 25.0)] + [(9.0, 25.0)] * 4)
 
     with pytest.raises(TimeoutError, match="still moving"):
         brake_from_speed(
@@ -361,7 +361,7 @@ def test_a_run_up_that_never_reaches_the_trigger_counts_no_event():
     from testcases.ydrive.teststeps.teststeps import brake_from_speed
 
     counted = []
-    axis = FakeAxis([(0.0, 1.0), (109.9, 1.0), (110.0, 1.0)])
+    axis = FakeStand([(0.0, 1.0), (109.9, 1.0), (110.0, 1.0)])
 
     with pytest.raises(RuntimeError, match="without ever reaching"):
         brake_from_speed(

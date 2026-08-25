@@ -38,7 +38,7 @@ from ..rulebooks.ydrive_rulebook import (
 from .base_ydrive_test import BaseYdriveTest
 from ..teststeps.teststeps import (
     MAX_LOAD_VELOCITY_LIMIT,
-    OVER_ENERGY_VELOCITY_LIMIT,
+    BRAKE_TRIGGER_VELOCITY_LIMIT,
     RunDetail,
     prompt_for_SN_ER_load,
     brake_from_speed,
@@ -100,22 +100,8 @@ class EnduranceCycleTest(BaseYdriveTest):
 
 
 class _BrakingYdriveTest(BaseYdriveTest):
-    """Shared plumbing for the ydrive tests that stop a moving load with the brake.
-
-    NOT A RUNNABLE TEST - no TEST_NAME and no main_execution of its own. What it
-    holds is the numbers that must not drift between them and the bookkeeping that
-    is the same either way: where the stroke's ends are, how fast the brake has to
-    be moving, which DUTs they accept and what the operator is asked, and the count
-    of brake events for the verdict.
-
-    IT HOLDS NO SEQUENCE. Bringing the stand up and taking the origin are stand
-    actions, so they are functions in ../teststeps taking a test case, and each
-    subclass's main_execution calls them in the order it wants. That order, and the
-    velocity schedule it runs under, is the entire difference between the two - so
-    burying it here would hide the one thing a reader is looking for.
-
-    ManualTest and EnduranceCycleTest do not inherit this. Neither brakes a moving
-    load, so none of these numbers mean anything to them."""
+    """Numbers and bookkeeping shared by the ydrive tests that stop a moving load with the brake.
+    Not runnable, and holds no sequence: each subclass's main_execution states its own."""
 
     START_POSITION = 110.0
     """Where each braking run begins, in turns from the origin. The axis is driven
@@ -130,7 +116,7 @@ class _BrakingYdriveTest(BaseYdriveTest):
     """A floor, not the speed the brake sees - unloaded, the axis crosses it within one
     frame and engages at the velocity limit. Set below the loaded stand's peak."""
 
-    VELOCITY_LIMIT = OVER_ENERGY_VELOCITY_LIMIT
+    BRAKE_RUN_VELOCITY_LIMIT = BRAKE_TRIGGER_VELOCITY_LIMIT
     """The ceiling a run-up to the trigger speed needs, 15% above the trigger because a
     loaded axis nears its ceiling asymptotically.
 
@@ -180,27 +166,15 @@ class _BrakingYdriveTest(BaseYdriveTest):
         return self._trigger_speed_m_s / METERS_PER_TURN
 
     def _count_brake_event(self) -> None:
-        """Record that the brake has just stopped a moving load.
-
-        Called from brake_from_speed()'s `on_engaged`, at the instant the rail drops
-        - not after it returns. Everything after engagement can raise: the load may
-        never come to rest, and @step re-checks for a fatal bound on the way out,
-        which the stopping distance the step publishes is itself able to trip. So the
-        event most worth counting - a brake that could not stop the load - is the one
-        a return-value counter would drop.
-
-        A run-up that never reached the trigger speed never gets here, which is the
-        distinction: this counts events the brake performed, not attempts."""
+        """Record that the brake has just stopped a moving load. Called at engagement rather than on
+        return, because everything after engagement can raise and the event still happened."""
         self.brake_cycles += 1
         self.set_state("brake_cycles", self.brake_cycles)
         logger.info("test %s: brake cycle %d", self.test_id, self.brake_cycles)
 
     def result_metadata(self) -> dict:
-        """What this run was, for the verdict.
-
-        The same answers the operator typed, in the one record a reporting database
-        ingests - the state channels carry them per frame, which is right for reading
-        a run back and wrong for finding every run against a ticket."""
+        """What this run was, for the verdict - the operator's answers in the one record a reporting
+        database ingests, where the state channels carry them per frame instead."""
         return {
             **self.run_details,
             "brake_cycles": self.brake_cycles,
@@ -213,7 +187,7 @@ class BrakeEnduranceTest(_BrakingYdriveTest):
 
     TEST_NAME = BRAKE_ENDURANCE_TEST_NAME
 
-    DWELL_S = 300.0
+    START_LINE_DWELL_S = 300.0
     """How long each cycle rests at the start line, on the brake with the axis idle -
     nothing dissipates. Five minutes is ~12 events an hour, each from a brake that has
     had half as long to give its heat back."""
@@ -230,7 +204,7 @@ class BrakeEnduranceTest(_BrakingYdriveTest):
         # trigger and the run-up never fires the brake. For the whole run: every
         # move this test makes is part of a braking cycle, so nothing here wants
         # the lower one.
-        set_tuning_params(self, velocity_limit=self.VELOCITY_LIMIT)
+        set_tuning_params(self, velocity_limit=self.BRAKE_RUN_VELOCITY_LIMIT)
         # Evaluation starts once the stand is in the state the bounds describe.
         # All three streams - see runner.start() for why a bound whose channel
         # reaches none of them reports a clean pass forever.
@@ -251,7 +225,7 @@ class BrakeEnduranceTest(_BrakingYdriveTest):
                 self,
                 target=origin + self.BRAKE_TARGET_POSITION,
                 trigger_speed=self.trigger_speed_turns_s,
-                rest_s=self.POST_BRAKE_DWELL_S,
+                post_brake_dwell_s=self.POST_BRAKE_DWELL_S,
                 on_engaged=self._count_brake_event,
             )
 
@@ -265,22 +239,12 @@ class BrakeEnduranceTest(_BrakingYdriveTest):
             # MAX_STOPPING_DISTANCE_M is also the one that never moves it afterwards.
             release_brake_in_place(self)
             move_to(self, origin + self.START_POSITION, arrival_timeout_s=self.MOVE_TIMEOUT_S)
-            dwell_braked(self, self.DWELL_S)
+            dwell_braked(self, self.START_LINE_DWELL_S)
 
 
 class CycleBrakeEnduranceTest(_BrakingYdriveTest):
-    """Cycles the full stroke with the brake released, and every BRAKE_INTERVAL_M of measured travel stops the moving load with the brake instead of the controller - recording the distance travelled, the speed the brake engaged at and how far the load then went.
-
-    THE BRAKE'S COIL IS ENERGIZED FOR ALL OF THE CYCLING. The brake is
-    magnet-applied, so released is the powered state, and nothing between brake
-    events is supposed to be a brake event - which leaves the coil live for all but
-    a few seconds of every interval. BrakeEnduranceTest energizes it for seconds at
-    a time between five-minute rests, so this is a duty cycle no run on this stand
-    has put the coil through.
-
-    The motor's duty is the same shape: it drives continuously here where
-    BrakeEnduranceTest drives for seconds a cycle, at a current MOTOR_CURRENT_SOFT_MAX
-    says the loaded stand sits at for most of a stroke, against a fatal 80 C bound."""
+    """Cycles the full stroke with the brake released, and every BRAKE_INTERVAL_M of measured
+    travel lets the brake stop the moving load instead of the controller."""
 
     TEST_NAME = CYCLE_BRAKE_ENDURANCE_TEST_NAME
 
@@ -299,7 +263,7 @@ class CycleBrakeEnduranceTest(_BrakingYdriveTest):
     events - against a brake event of about 12 s.
 
     Metres of track, so it counts the overshoot past each end as well as the stroke
-    - see _travelled_to()."""
+    - see _count_travel_to()."""
 
     MIN_BRAKE_INTERVAL_M = 50.0
     """The shortest interval that still puts a brake event at the top of the stroke.
@@ -329,7 +293,7 @@ class CycleBrakeEnduranceTest(_BrakingYdriveTest):
     reverses out there under its own momentum and is accepted on the way back, the
     first frame inside both this and CYCLE_VELOCITY_TOLERANCE. That excursion is
     still counted, because move_to() reports the furthest point rather than the
-    accepted one - see _travelled_to()."""
+    accepted one - see _count_travel_to()."""
 
     CYCLE_VELOCITY_TOLERANCE = 3.0  # turns/s = 0.25 m/s
     """How slowly the load has to be going to count as arrived.
@@ -361,12 +325,8 @@ class CycleBrakeEnduranceTest(_BrakingYdriveTest):
         trigger_speed_m_s: Optional[float] = None,
         brake_interval_m: Optional[float] = None,
     ):
-        """brake_interval_m overrides BRAKE_INTERVAL_M, so a shakedown can reach a brake
-        event in metres rather than in a quarter of an hour.
-
-        Refused below MIN_BRAKE_INTERVAL_M: an interval that short skips the cycling
-        loop entirely and runs the brake event from wherever the last one left the
-        load, which is not the top of the stroke - see MIN_BRAKE_INTERVAL_M."""
+        """brake_interval_m overrides BRAKE_INTERVAL_M so a shakedown needs no class edit, and is
+        refused below MIN_BRAKE_INTERVAL_M."""
         super().__init__(test_id, use_mock, require_engine=require_engine, trigger_speed_m_s=trigger_speed_m_s)
         self.total_distance_m = 0.0
         self._brake_interval_m = (
@@ -384,32 +344,17 @@ class CycleBrakeEnduranceTest(_BrakingYdriveTest):
         the origin before anything moves, so the initial value is never counted."""
 
     def result_metadata(self) -> dict:
-        """What this run was, for the verdict - the base's answers plus the distance,
-        which is this test's binding quantity and the one number a reader wants
-        without querying the timeline."""
+        """The base's answers plus the distance, which is this test's binding quantity and the one
+        number a reader wants without querying the timeline."""
         return {
             **super().result_metadata(),
             "total_distance_m": self.total_distance_m,
             "brake_interval_m": self._brake_interval_m,
         }
 
-    def _travelled_to(self, position: float) -> None:
-        """Count the load having reached `position`, and publish the totals.
-
-        PATH LENGTH, NOT STROKE LENGTH. `position` is the furthest point a move
-        reached, not the point arrival was accepted at - see move_to(). Between two
-        consecutive furthest points the load moves in one direction, so the gap
-        between them is the track it covered, including the excursion past each end
-        that a stand overshooting by more than CYCLE_POSITION_TOLERANCE puts there.
-        Measured at 1800 lb the excursion is 17.3 turns at each end, about 24% of the
-        path. Reporting the accepted position instead loses that AND the slack of the
-        arrival gate itself - the accepted frame sits up to CYCLE_POSITION_TOLERANCE
-        inside the target, another 9% - so it counted 105.2 m of a 156.2 m block, 67%
-        of the load's real life. A setpoint-derived counter would have read 77%.
-
-        A furthest point is also the best place on a stroke to read a position: the
-        load is reversing there, so the ~79 ms telemetry frame period costs
-        millimetres against the ~120 mm it costs at cruise."""
+    def _count_travel_to(self, position: float) -> None:
+        """Count the load having reached `position` - a move's furthest point, not where arrival was
+        accepted - and publish the totals. Successive gaps are the track covered, overshoot in."""
         self.total_distance_m += abs(position - self._last_position) * METERS_PER_TURN
         self._last_position = position
         self.set_state("total_distance_m", self.total_distance_m)
@@ -422,9 +367,8 @@ class CycleBrakeEnduranceTest(_BrakingYdriveTest):
         )
 
     def _cycle_leg(self, target: float) -> float:
-        """One end-to-end leg of a normal stroke, under the cycling tolerances, and
-        the furthest point it reached. The brake is not touched and the axis stays
-        armed."""
+        """One end-to-end leg of a normal stroke under the cycling tolerances, and the furthest point
+        it reached. The brake is not touched and the axis stays armed."""
         return move_to(
             self,
             target,
@@ -454,45 +398,45 @@ class CycleBrakeEnduranceTest(_BrakingYdriveTest):
         origin = establish_origin_by_hand(self)
         release_brake_in_place(self)
 
-        top = origin + self.START_POSITION
-        bottom = origin + self.BRAKE_TARGET_POSITION
+        start_line = origin + self.START_POSITION
+        brake_target = origin + self.BRAKE_TARGET_POSITION
 
         # The load is at the origin - the operator left it there and
         # release_brake_in_place() took it back without moving it - so the one move
         # up to the start line is travel like any other rather than a gap in the
-        # record. Through _cycle_leg like every other leg of this stroke: holding
-        # the first arrival to a tighter gate than the thousands after it would
-        # make it the one leg that waits out a pullback.
+        # record. Through _cycle_leg like every other leg of this stroke: holding the
+        # first arrival to a tighter gate than the thousands after it would make it
+        # the one leg that waits out a pullback.
         self._last_position = origin
-        self._travelled_to(self._cycle_leg(top))
+        self._count_travel_to(self._cycle_leg(start_line))
 
         while True:
             # Brake event N is owed at N intervals of travel, compared against the
             # total rather than counted down from the last event - see
-            # BRAKE_INTERVAL_M. Checked between whole cycles, and the body ends at
-            # the top, which is where a brake event has to begin.
-            owed_at_m = (self.brake_cycles + 1) * self._brake_interval_m
-            while self.total_distance_m < owed_at_m:
-                self._travelled_to(self._cycle_leg(bottom))
-                self._travelled_to(self._cycle_leg(top))
+            # BRAKE_INTERVAL_M. Checked between whole cycles, and the body ends at the
+            # start line, which is where a brake event has to begin.
+            brake_owed_at_m = (self.brake_cycles + 1) * self._brake_interval_m
+            while self.total_distance_m < brake_owed_at_m:
+                self._count_travel_to(self._cycle_leg(brake_target))
+                self._count_travel_to(self._cycle_leg(start_line))
                 logger.info(
                     "test %s: %.1f m travelled, brake event %d owed at %.0f m",
-                    self.test_id, self.total_distance_m, self.brake_cycles + 1, owed_at_m,
+                    self.test_id, self.total_distance_m, self.brake_cycles + 1, brake_owed_at_m,
                 )
 
             # The ceiling goes up only now, for the run-down, and comes back off
             # before anything else moves.
-            set_tuning_params(self, velocity_limit=self.VELOCITY_LIMIT)
+            set_tuning_params(self, velocity_limit=self.BRAKE_RUN_VELOCITY_LIMIT)
             rested_at = brake_from_speed(
                 self,
-                target=bottom,
+                target=brake_target,
                 trigger_speed=self.trigger_speed_turns_s,
-                rest_s=self.POST_BRAKE_DWELL_S,
+                post_brake_dwell_s=self.POST_BRAKE_DWELL_S,
                 on_engaged=self._count_brake_event,
             )
             # After the count, so the interval this publishes is the new one rather
             # than the one that just ended - _count_brake_event ran at engagement.
-            self._travelled_to(rested_at)
+            self._count_travel_to(rested_at)
 
             # Tuning restored BEFORE the load is handed back, so the cycling that
             # follows runs under the duty ceiling instead of the run-down's. Written

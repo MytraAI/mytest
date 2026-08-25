@@ -97,17 +97,8 @@ class BaseYdriveTest(TestCase):
         )
 
     def _seed_channels(self) -> None:
-        """Publish a default for every state channel this test can
-        produce, so each one exists in the stream from frame 1 instead
-        of appearing incrementally as steps happen to compute things
-        (see ../channels.py).
-
-        Called before the testbed starts, so "frame 1" is literal: the
-        first frame any driver publishes already carries all of them.
-
-        Bound-status channels are derived from RULEBOOKS rather than
-        hand-listed, since the Rulebook is already the single source
-        of truth for bound names."""
+        """Publish a default for every state channel this test can produce, before the testbed
+        starts, so frame 1 carries all of them. Bound-status channels come from RULEBOOKS."""
         for name, default in DEFAULT_STATE.items():
             self.set_state(name, default)
 

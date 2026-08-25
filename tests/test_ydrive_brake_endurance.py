@@ -15,7 +15,7 @@ from testcases.ydrive.rulebooks.ydrive_rulebook import (
     YDRIVE_RULEBOOK,
 )
 from testcases.ydrive.teststeps.teststeps import (
-    OVER_ENERGY_VELOCITY_LIMIT,
+    BRAKE_TRIGGER_VELOCITY_LIMIT,
     await_operator,
     brake_from_speed,
     release_brake_in_place,
@@ -196,7 +196,7 @@ def test_the_setpoint_is_parked_where_the_axis_is_before_arming():
 def test_the_velocity_ceiling_is_above_the_trigger_speed():
     """Below it, the controller clamps and the brake never fires - the run would
     wait out its trigger timeout on a healthy stand."""
-    assert OVER_ENERGY_VELOCITY_LIMIT > TRIGGER_TURNS_S
+    assert BRAKE_TRIGGER_VELOCITY_LIMIT > TRIGGER_TURNS_S
 
 
 def test_a_bad_stop_aborts_through_the_rulebook_rather_than_an_exception():
@@ -237,14 +237,14 @@ def test_the_move_timeout_covers_the_stroke_at_any_limit_this_test_would_use():
     from testcases.ydrive.teststeps.teststeps import DEFAULT_ARRIVAL_TIMEOUT_S
 
     test = BrakeEnduranceTest(require_engine=False)
-    at_raised_limit = test.START_POSITION / test.VELOCITY_LIMIT
+    at_raised_limit = test.START_POSITION / test.BRAKE_RUN_VELOCITY_LIMIT
     at_cruise_for_half_a_metre_per_second = test.START_POSITION / 5.95
 
     assert at_cruise_for_half_a_metre_per_second > DEFAULT_ARRIVAL_TIMEOUT_S, (
         "this test is checking nothing if the default already covered it"
     )
     assert test.MOVE_TIMEOUT_S > at_cruise_for_half_a_metre_per_second
-    assert test.MOVE_TIMEOUT_S < test.DWELL_S, (
+    assert test.MOVE_TIMEOUT_S < test.START_LINE_DWELL_S, (
         "a stalled move should report well inside a dwell, not be waited out for longer"
     )
     assert at_raised_limit < test.MOVE_TIMEOUT_S
@@ -306,9 +306,9 @@ def test_the_dwell_sets_the_cycle_rate():
     test = BrakeEnduranceTest(require_engine=False)
     # The traverse the axis actually takes, not MOVE_TIMEOUT_S - that is a ceiling
     # for a stalled move, not how long a healthy one lasts.
-    traverse_s = test.START_POSITION / test.VELOCITY_LIMIT
-    cycle_s = test.DWELL_S + traverse_s + test.POST_BRAKE_DWELL_S
-    assert test.DWELL_S > 0.8 * cycle_s, "the dwell should dominate the cycle"
+    traverse_s = test.START_POSITION / test.BRAKE_RUN_VELOCITY_LIMIT
+    cycle_s = test.START_LINE_DWELL_S + traverse_s + test.POST_BRAKE_DWELL_S
+    assert test.START_LINE_DWELL_S > 0.8 * cycle_s, "the dwell should dominate the cycle"
     events_per_hour = 3600 / cycle_s
     assert 10 < events_per_hour < 13, (
         f"{events_per_hour:.0f} events an hour is not a five-minute dwell"

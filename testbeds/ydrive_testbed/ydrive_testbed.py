@@ -68,17 +68,8 @@ logger = logging.getLogger(__name__)
 
 
 class Motion(NamedTuple):
-    """Where the axis is, how fast it is going, and whether it is still driving -
-    from one telemetry frame.
-
-    One read rather than three because every question worth asking about a moving
-    axis is about all of them at once, and separate reads would answer from
-    different frames a sample period apart, at three times the cost.
-
-    `armed` is in here because a loop watching a move has to notice the axis
-    stopping driving. The ODrive disarms itself on a fault, so a move can end with
-    the load coasting and no exception anywhere - which reads exactly like a slow
-    move until its timeout."""
+    """Position, velocity and whether the axis is still driving, from one telemetry frame.
+    One read, because every question about a moving axis is about all three at once."""
 
     position: float
     velocity: float
@@ -178,25 +169,8 @@ alone is up to 0.18 m."""
 
 
 def settle_load_under_controller(testbed, settle_s: float = TEARDOWN_SETTLE_S) -> None:
-    """Bring a still-moving load to rest under the controller, so the shutdown that
-    follows is not asked to stop it with the brake.
-
-    WHY stop() CALLS THIS FIRST. The brake is magnet-applied, so dropping its rail
-    makes it grab. On a load already sitting still that is exactly right. On one
-    doing metres per second it is a harder stop than any test measures - the
-    measured ones idle the motor first and let the brake close on a coasting axis -
-    and it is recorded nowhere, so it is wear on the component under test that no
-    run carries. A run that ends mid-stroke is the common case for a cycling test,
-    and the fastest motion on this stand is a brake test's run-up.
-
-    AN ATTEMPT, NOT A GUARANTEE. The setpoint is parked where the axis is and the
-    velocity watched for `settle_s`; however that ends, this returns and stop()
-    carries on to engage the brake and drop the bus. A load that did not stop is
-    left held by the brake, which is where it would have been without this at all.
-
-    Takes the testbed rather than being a method on it so it can be driven by a
-    fake - stop() itself needs subprocesses and instruments. Paced by get_motion(),
-    which blocks on the next telemetry frame, so there is no sleep here."""
+    """Bring a still-moving load to rest under the controller, so stop() is not asked to stop
+    it with the brake. An attempt only: bounded by `settle_s`, then stop() carries on."""
     motion = testbed.get_motion()
     if abs(motion.velocity) <= TEARDOWN_VELOCITY_TOLERANCE:
         logger.info("the load is already at rest at %.2f turns - nothing to stop", motion.position)
@@ -234,15 +208,8 @@ def settle_load_under_controller(testbed, settle_s: float = TEARDOWN_SETTLE_S) -
 
 
 class YdriveTestbed:
-    """Starts/stops the ODrive and CPX400DP driver processes for ydrive, and owns connected clients for both.
-
-    Use as a context manager:
-
-        with YdriveTestbed() as testbed:
-            testbed.power_motor_bus(True)
-            testbed.command.set_control_mode("POSITION_CONTROL")
-            ...  # both drivers are up; arming and the brake are a test's to sequence
-    """
+    """Starts/stops the ODrive, CPX400DP and thermocouple DAQ drivers for ydrive, and owns
+    connected clients for them. Use as a context manager."""
 
     DEVICES: Tuple[str, ...] = (DEVICE_ODRIVE, DEVICE_CPX400DP, DEVICE_TC_DAQ)
     """The devices whose driver processes this testbed owns. Declared here
@@ -260,27 +227,8 @@ class YdriveTestbed:
         output_dir: Optional[Path] = None,
         test_id: Optional[str] = None,
     ) -> None:
-        """
-        cpx400dp_host: this stand's supply. Defaults to CPX400DP_HOST, the
-            address this stand's unit last self-assigned; pass a new address, or
-            CPX400DP_MDNS_HOST, when it has moved.
-
-        tc_daq_port: the serial port the thermocouple DAQ is on. Left None, the
-            driver finds it by its CP210x bridge's USB vendor, which works
-            unchanged on every OS - a port is named `COM<n>` on Windows and
-            `/dev/cu.usbserial-<n>` on macOS, and the number moves with
-            enumeration order on both. Pass one only when this machine has
-            another CP210x device, which is the case the driver refuses to guess
-            in.
-
-        output_dir/test_id: given both, each driver writes its detailed log to
-            `<output_dir>/runs/<test_id>/<device>/logs.txt`, beside the telemetry
-            it produced - which is where a decoded ODrive fault goes (see
-            hardware/odrive/odrive_errors.py). A test case passes
-            `self._output_dir` and `self.test_id` from PreTestSetup. Omitted, the
-            drivers log to their consoles, which for a subprocess is nowhere
-            anybody reads.
-        """
+        """cpx400dp_host defaults to this stand's last self-assigned address; tc_daq_port is found
+        by USB vendor when None; output_dir/test_id put each driver's log beside its telemetry."""
         self._use_mock = use_mock
         self._serial_number = serial_number
         self._cpx400dp_host = cpx400dp_host
@@ -306,11 +254,8 @@ class YdriveTestbed:
         return ["--log-file", str(driver_log_path(self._output_dir, self._test_id, device))]
 
     def start(self) -> None:
-        """Bring all three drivers up, verify their channel surfaces, and
-        configure both rails' setpoints - with the outputs left OFF.
-
-        Energizing is the test's decision, taken in PreTestSetup, not something
-        that happens because a testbed was constructed."""
+        """Bring all three drivers up, verify their channel surfaces, and configure both rails'
+        setpoints - with the outputs left OFF. Energizing is a test's decision, not a testbed's."""
         odrive_args = [sys.executable, "-m", "hardware.odrive.main", *self._log_args(DEVICE_ODRIVE)]
         if self._use_mock:
             odrive_args.append("--mock")
@@ -374,14 +319,8 @@ class YdriveTestbed:
         self._configure_rails()
 
     def _require_drivers_alive(self) -> None:
-        """Raise if any driver process has already exited.
-
-        Without this, a driver that died during startup - a supply at an address
-        nothing answers, an ODrive that is not attached - surfaces as
-        `CommandTimeout: command 'connect' timed out after 10000ms - command
-        server not responding`, ten seconds later, naming neither the device nor
-        the reason. The exit code and the log path are what a person actually
-        needs, and both are known here."""
+        """Raise if any driver process has already exited, naming the device, its exit code and its
+        log path - otherwise it surfaces as a bare CommandTimeout ten seconds later."""
         dead = [
             (args, process)
             for args, process in zip(self._device_for_process, self._processes)
@@ -398,17 +337,8 @@ class YdriveTestbed:
         raise RuntimeError(f"a hardware driver did not stay up: {detail}")
 
     def _configure_rails(self) -> None:
-        """Switch both outputs off, then set every rail's voltage and current
-        setpoints.
-
-        A run starts from a de-energized stand whatever it finds. The supply's
-        driver adopts, rather than resets, the output state it is started into,
-        so a rail can still be live from a previous run - and writing a setpoint
-        to a live output would step that rail under whatever is connected to it.
-        Switching off first makes every setpoint below land on a dead rail.
-
-        Powering anything back up is then a test's own decision, taken in
-        PreTestSetup or by prepare_for_operation()."""
+        """Switch both outputs off, then set every rail's voltage and current setpoints. Off first:
+        the driver adopts the state it starts into, and a setpoint would step a live rail."""
         for rail in RAILS:
             self.supply.enable_output(rail.output, False)
         logger.info("both outputs off - configuring setpoints on de-energized rails")
@@ -450,17 +380,8 @@ class YdriveTestbed:
     they do not."""
 
     def check_rails(self) -> None:
-        """Confirm both rails still hold their configured setpoints, raising if
-        not.
-
-        Called at the end of start(), because the supply accepts and then
-        silently discards a value it dislikes - a write is not evidence of a
-        setpoint. Also worth calling from a test wherever a rail's integrity
-        matters: the driver's ceiling is per-backend, so it cannot stop 48 V
-        being commanded onto the 24 V brake rail, and a test holds the same
-        supply client this testbed does.
-
-        Re-reads a few times before failing - see SETPOINT_SETTLE_ATTEMPTS."""
+        """Confirm both rails still hold their configured setpoints, raising if not - the supply
+        accepts and then silently discards a value it dislikes. See SETPOINT_SETTLE_ATTEMPTS."""
         for attempt in range(self.SETPOINT_SETTLE_ATTEMPTS):
             wrong = self._setpoint_disagreements()
             if not wrong:
@@ -490,22 +411,8 @@ class YdriveTestbed:
         return wrong
 
     def stop(self) -> None:
-        """Tear the stand down in a safe order, and finish even if a step fails.
-
-        The order matters. A MOVING LOAD IS BROUGHT TO REST FIRST, because
-        everything after this assumes one that is already stopped: the brake is
-        magnet-applied, so dropping its rail makes it grab, and a brake asked to
-        grab a load doing metres per second while the controller is still driving
-        into it is both a harder stop than any test measures and one no test
-        records. Then the rail drops, so the brake is holding the load before
-        anything else changes; only then is the axis disarmed and the motor bus
-        removed. Dropping the bus before the brake holds would leave the load
-        unheld while the drive shuts down, and a de-energized stand is one whose
-        brake is holding.
-
-        Each step runs independently, logging a failure rather than raising, so
-        one wedged client cannot leave a 48 V bus energized - which is also what
-        makes the settle an attempt rather than a requirement."""
+        """Settle a moving load, drop the brake rail so the brake grabs, disarm, then drop the bus.
+        Each step logs rather than raises, so one wedged client cannot leave 48 V energized."""
         self._safe("bring a moving load to rest", lambda: settle_load_under_controller(self))
         # The brake settle below is a plain sleep rather than TestCase.wait_for():
         # teardown has no test case to poll, and nothing it could usefully abort for.
@@ -531,18 +438,8 @@ class YdriveTestbed:
         self._processes = []
 
     def _confirm_rails_off(self) -> None:
-        """Read both outputs back after switching them off, and say so at ERROR
-        if either is still on.
-
-        Every step of stop() logs its failure and continues, which is what keeps
-        one wedged client from stranding the rest of the sequence - but it also
-        means a rail that never actually switched off leaves the stand
-        energized with nothing stating it plainly. This is the one place that
-        reads the outcome rather than the command.
-
-        The queued frames are dropped first: the newest one already published
-        can still predate the switch-off by a frame, and reporting a stand as
-        energized when it isn't is the one thing this must not do."""
+        """Read both outputs back after switching them off, and say so at ERROR if either is still
+        on - the one step of stop() that reads the outcome rather than the command."""
         self.supply_telemetry.discard_backlog()
         channels = self._supply_channels()
         still_on = [rail.name for rail in RAILS if channels.get(f"output_enabled_{rail.output}")]
@@ -569,38 +466,20 @@ class YdriveTestbed:
     # --- power ------------------------------------------------------------
 
     def power_motor_bus(self, enabled: bool) -> None:
-        """Switch the 48 V motor bus (output 2) on or off.
-
-        The output ramps rather than stepping, so a check immediately after
-        enabling reads low; and switching off does not mean zero volts, since the
-        output capacitance takes a moment to discharge."""
+        """Switch the 48 V motor bus (output 2) on or off. The output ramps rather than stepping,
+        so a check immediately after enabling reads low."""
         self.supply.enable_output(MOTOR_BUS.output, enabled)
         logger.info("%s %s", MOTOR_BUS.name, "energized" if enabled else "de-energized")
 
     def power_brake_bus(self, enabled: bool) -> None:
-        """Switch the 24 V brake rail (output 1) on or off.
-
-        Powering RELEASES the brake; removing power lets it grab. This only moves
-        the rail. It does NOT wait for the brake to act on it, and does NOT touch
-        the axis state - so calling it directly can leave the controller driving
-        against an engaged brake, or the brake letting go of a load nothing is
-        holding. The sequenced versions that cannot do either are
-        engage_brake()/release_brake() in
-        testcases/ydrive/teststeps/teststeps.py, which is what a test should
-        use."""
+        """Switch the 24 V brake rail (output 1) on or off - powering RELEASES the brake. Moves the
+        rail alone; engage_brake()/release_brake() are the sequenced versions a test should use."""
         self.supply.enable_output(BRAKE_BUS.output, enabled)
         logger.info("%s %s", BRAKE_BUS.name, "released (rail energized)" if enabled else "engaged (rail de-energized)")
 
     def _supply_channels(self) -> Dict[str, object]:
-        """Block for the next supply telemetry frame and return its channels.
-
-        Private: a caller outside this class asks a named question - check_rails(),
-        rail_is_powered() - rather than reaching into a channels dict, so the
-        channel names this stand depends on live in one place.
-
-        The measured voltage and current are re-read at 5 Hz and held between
-        reads, since the instrument's meters refresh at 4 Hz, so consecutive
-        frames can carry the same reading."""
+        """Block for the next supply telemetry frame and return its channels. Private: callers ask a
+        named question instead, so this stand's channel names live in one place."""
         return self.supply_telemetry.latest_frame().channels
 
 
@@ -618,10 +497,8 @@ class YdriveTestbed:
 
     @property
     def tc_daq_telemetry(self) -> TelemetryClient:
-        """The thermocouple DAQ's stream.
-
-        The only interface this device has - it accepts no commands, so there is
-        no command client to pair with it."""
+        """The thermocouple DAQ's stream, and the only interface it has - it accepts no commands, so
+        there is no command client to pair with it."""
         if self._tc_daq_telemetry is None:
             raise RuntimeError("YdriveTestbed.tc_daq_telemetry accessed before start()")
         return self._tc_daq_telemetry
@@ -644,20 +521,14 @@ class YdriveTestbed:
             raise RuntimeError("YdriveTestbed.sync_telemetry accessed before start()")
         return self._sync_telemetry
 
-    def _channels(self) -> Dict[str, object]:
-        """The newest ODrive frame's full channels dict, blocking if none has
-        arrived yet.
-
-        Private, and the only place a raw frame is handled: everything outside
-        this class asks a named question instead, so a channel name appears here
-        rather than spread through the steps that happen to need it. Whatever
-        needs more than one channel from a single instant gets an accessor that
-        returns them together - see Motion."""
+    def _odrive_channels(self) -> Dict[str, object]:
+        """The newest ODrive frame's channels, blocking if none has arrived. Private, and the only
+        place a raw frame is handled - see Motion for a read that needs one instant."""
         return self.sync_telemetry.latest_frame().channels
 
     def get_motion(self) -> Motion:
         """Position and velocity, from one frame."""
-        channels = self._channels()
+        channels = self._odrive_channels()
         return Motion(
             position=channels["pos_estimate"],
             velocity=channels["vel_estimate"],
@@ -667,13 +538,12 @@ class YdriveTestbed:
     def get_faults(self) -> Dict[str, str]:
         """Every watched ODrive channel currently reading as a fault, decoded -
         empty when the board is clean. One frame, so it describes one instant."""
-        return odrive_errors.faults_in_frame(self._channels())
+        return odrive_errors.faults_in_frame(self._odrive_channels())
 
     def describe_errors(self) -> Dict[str, str]:
-        """Every watched channel decoded, faulted or not - the diagnostic for
-        "why did the axis refuse", where a channel reading NOMINAL is as much of
-        the answer as one reading a fault. One frame."""
-        channels = self._channels()
+        """Every watched channel decoded, faulted or not, from one frame - the diagnostic for why an
+        axis refused, where NOMINAL is as much of the answer as a fault."""
+        channels = self._odrive_channels()
         return {
             name: odrive_errors.describe(name, channels[name])
             for name in odrive_errors.WATCHED_CHANNELS
@@ -681,18 +551,15 @@ class YdriveTestbed:
         }
 
     def get_pos_estimate(self) -> float:
-        return self._channels()["pos_estimate"]
+        return self._odrive_channels()["pos_estimate"]
 
     def get_axis_armed_status(self) -> bool:
-        """Whether the axis is actively controlling the motor (`axis_is_armed`).
-
-        Requesting an axis state only writes `requested_state`; the ODrive acts on
-        it asynchronously and can decline. This is the reading that says whether
-        it took."""
-        return bool(self._channels()["axis_is_armed"])
+        """Whether the axis is actively controlling the motor. Requesting a state only writes
+        requested_state and the ODrive can decline it; this is the reading that says it took."""
+        return bool(self._odrive_channels()["axis_is_armed"])
 
     def get_vel_estimate(self) -> float:
-        return self._channels()["vel_estimate"]
+        return self._odrive_channels()["vel_estimate"]
 
     def __enter__(self) -> "YdriveTestbed":
         self.start()
