@@ -52,6 +52,7 @@ from hardware.odrive.odrive_command_client import OdriveCommandClient
 from hardware.tc_daq.tc_daq_channels import TELEMETRY_CHANNELS as TC_DAQ_TELEMETRY_CHANNELS
 from hardware.tc_daq.transport import SILENCE_TIMEOUT_S as TC_DAQ_SILENCE_TIMEOUT_S
 from protocol.paths import driver_log_path
+from testcases.utils import Stopwatch
 from protocol.wire import (
     DEFAULT_CPX400DP_COMMAND_ENDPOINT,
     DEFAULT_CPX400DP_TELEMETRY_ENDPOINT,
@@ -123,7 +124,8 @@ The 16 A limit is above what the supply can deliver at 48 V - its 420 W envelope
 caps this output at 8.75 A - so it does not act as a current limit. An overdraw
 makes the output go unregulated and the bus voltage sag; `in_power_limit_2` is
 the channel that reports it, not `current_2`. For the same reason
-`ydrive_rulebook`'s fatal `board_ibus` > 30 A bound cannot fire on this rail."""
+a sustained draw cannot reach `ydrive_rulebook`'s fatal `board_ibus` bound on
+this rail - see MAX_BUS_CURRENT_A, which says so itself."""
 
 BRAKE_BUS = Rail(name="ydrive brake", output=1, voltage_v=24.0, current_limit_a=5.0)
 """The ydrive brake, on output 1.
@@ -145,6 +147,18 @@ RAILS = (BRAKE_BUS, MOTOR_BUS)
 """Both rails, ordered by output number. start() iterates this to configure
 setpoints. It is not the teardown order - see stop()."""
 
+TEARDOWN_SETTLE_S = 3.0
+"""How long stop() waits for a moving load to come to rest under the controller
+before dropping the brake rail on it.
+
+Short on purpose. This is time spent after a run has already ended, and the
+fallback - the brake - is where the load ends up anyway. Three seconds covers a
+stop from this stand's full speed with room over."""
+
+TEARDOWN_VELOCITY_TOLERANCE = 0.05  # turns/s
+"""What counts as at rest for the teardown settle. Small enough to mean stopped
+rather than slowed."""
+
 BRAKE_SETTLE_S = 0.1
 """Seconds to wait after switching the brake rail, before moving or dwelling.
 
@@ -161,6 +175,62 @@ not let go.
 It also sets how far a moving load coasts before the brake bites, which is part
 of any stopping distance measured from the brake command: at 1.8 m/s this wait
 alone is up to 0.18 m."""
+
+
+def settle_load_under_controller(testbed, settle_s: float = TEARDOWN_SETTLE_S) -> None:
+    """Bring a still-moving load to rest under the controller, so the shutdown that
+    follows is not asked to stop it with the brake.
+
+    WHY stop() CALLS THIS FIRST. The brake is magnet-applied, so dropping its rail
+    makes it grab. On a load already sitting still that is exactly right. On one
+    doing metres per second it is a harder stop than any test measures - the
+    measured ones idle the motor first and let the brake close on a coasting axis -
+    and it is recorded nowhere, so it is wear on the component under test that no
+    run carries. A run that ends mid-stroke is the common case for a cycling test,
+    and the fastest motion on this stand is a brake test's run-up.
+
+    AN ATTEMPT, NOT A GUARANTEE. The setpoint is parked where the axis is and the
+    velocity watched for `settle_s`; however that ends, this returns and stop()
+    carries on to engage the brake and drop the bus. A load that did not stop is
+    left held by the brake, which is where it would have been without this at all.
+
+    Takes the testbed rather than being a method on it so it can be driven by a
+    fake - stop() itself needs subprocesses and instruments. Paced by get_motion(),
+    which blocks on the next telemetry frame, so there is no sleep here."""
+    motion = testbed.get_motion()
+    if abs(motion.velocity) <= TEARDOWN_VELOCITY_TOLERANCE:
+        logger.info("the load is already at rest at %.2f turns - nothing to stop", motion.position)
+        return
+
+    logger.warning(
+        "the stand is shutting down with the load moving %.2f turns/s at %.2f turns - stopping "
+        "it under the controller so the brake is not asked to",
+        motion.velocity, motion.position,
+    )
+    # Park the setpoint where the axis is rather than where it was going, so the
+    # controller decelerates in place instead of finishing the stroke.
+    testbed.command.set_position(motion.position)
+
+    deadline = Stopwatch(duration_s=settle_s)
+    while not deadline.expired:
+        motion = testbed.get_motion()
+        if abs(motion.velocity) <= TEARDOWN_VELOCITY_TOLERANCE:
+            logger.info("the load is at rest at %.2f turns; the stand can be shut down", motion.position)
+            return
+        if not motion.armed:
+            # Nothing is driving it, so there is nothing to wait for: the axis
+            # disarmed, or was never armed, and the load is coasting. The brake is
+            # the only thing left that can stop it, and stop() engages it next.
+            logger.error(
+                "the axis is not driving, so the load is coasting at %.2f turns/s - handing it "
+                "to the brake now rather than waiting",
+                motion.velocity,
+            )
+            return
+    logger.error(
+        "the load was still moving %.2f turns/s after %.0fs - handing it to the brake at %.2f turns",
+        motion.velocity, settle_s, motion.position,
+    )
 
 
 class YdriveTestbed:
@@ -422,16 +492,23 @@ class YdriveTestbed:
     def stop(self) -> None:
         """Tear the stand down in a safe order, and finish even if a step fails.
 
-        The order matters. The brake is magnet-applied, so dropping its rail
-        first makes the brake grab and hold the load before anything else
-        changes; only then is the axis disarmed and the motor bus removed. The
-        reverse order would leave the load unheld while the drive shuts down, and
-        a de-energized stand is one whose brake is holding.
+        The order matters. A MOVING LOAD IS BROUGHT TO REST FIRST, because
+        everything after this assumes one that is already stopped: the brake is
+        magnet-applied, so dropping its rail makes it grab, and a brake asked to
+        grab a load doing metres per second while the controller is still driving
+        into it is both a harder stop than any test measures and one no test
+        records. Then the rail drops, so the brake is holding the load before
+        anything else changes; only then is the axis disarmed and the motor bus
+        removed. Dropping the bus before the brake holds would leave the load
+        unheld while the drive shuts down, and a de-energized stand is one whose
+        brake is holding.
 
         Each step runs independently, logging a failure rather than raising, so
-        one wedged client cannot leave a 48 V bus energized."""
-        # A plain sleep rather than TestCase.wait_for(): teardown has no test
-        # case to poll, and nothing it could usefully abort for.
+        one wedged client cannot leave a 48 V bus energized - which is also what
+        makes the settle an attempt rather than a requirement."""
+        self._safe("bring a moving load to rest", lambda: settle_load_under_controller(self))
+        # The brake settle below is a plain sleep rather than TestCase.wait_for():
+        # teardown has no test case to poll, and nothing it could usefully abort for.
         self._safe("engage the brake (drop the 24 V rail)", self._engage_brake_for_teardown)
         self._safe("disarm the ODrive axis", lambda: self.command.set_axis_state("IDLE"))
         self._safe("drop the 48 V motor bus", lambda: self.power_motor_bus(False))

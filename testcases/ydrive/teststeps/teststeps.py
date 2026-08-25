@@ -10,13 +10,19 @@ fatal bound, a stop request and a lost recorder while they wait.
 
 brake_from_speed: runs up to a trigger speed, then idles the motor and
 drops the brake rail so the brake stops a moving load. Records the speed
-and the stopping distance.
+and the stopping distance, and returns where the load came to rest.
 
 release_brake_in_place: hands a stopped load back to the controller
 without moving it.
 
-move_to: commands one target position and blocks until arrived and
-settled.
+establish_origin_by_hand: hands the load to a person, and makes where
+they leave it position 0.
+
+move_to: commands one target position, blocks until arrived and
+settled, and returns the furthest position reached along the way - which
+past an overshoot is not the position arrival was accepted at, and is
+what a caller measuring distance travelled accumulates. See its docstring
+for when that equals the path the load took and when it falls short.
 
 engage_brake / release_brake: the brake and the axis state moved together,
 each confirming the axis reached the state it was asked for - so the motor
@@ -39,7 +45,7 @@ import json
 
 import logging
 import time
-from typing import Dict, NamedTuple, Optional, Sequence, Tuple
+from typing import Callable, Dict, NamedTuple, Optional, Sequence, Tuple
 
 from hardware.odrive import odrive_errors
 from testbeds.ydrive_testbed.ydrive_testbed import (
@@ -87,7 +93,7 @@ OPERATOR_POLL_INTERVAL_S = 0.1
 a person is what is being waited on. Every tick still runs the abort checks."""
 
 OVER_ENERGY_VELOCITY_LIMIT = 24.0  # turns/s = 2.02 m/s at the stand's 0.084 m/turn
-"""Velocity ceiling for a test needing a speed the normal tuning forbids, 13% above
+"""Velocity ceiling for a test needing a speed the normal tuning forbids, 15% above
 the trigger: a loaded axis nears its ceiling asymptotically."""
 
 MAX_LOAD_VELOCITY_LIMIT = 18.3  # turns/s
@@ -335,7 +341,8 @@ def brake_from_speed(
     rest_s: float = DEFAULT_POST_BRAKE_REST_S,
     velocity_tolerance: float = DEFAULT_VELOCITY_TOLERANCE,
     position_tolerance: float = DEFAULT_POSITION_TOLERANCE,
-) -> None:
+    on_engaged: Optional[Callable[[], None]] = None,
+) -> float:
     """Accelerate toward `target` and let the brake stop the load once it reaches
     `trigger_speed` turns/s.
 
@@ -352,7 +359,18 @@ def brake_from_speed(
     Bounded by the stroke, not a clock: it ends at the trigger speed or on arrival,
     and arriving short raises with the peak speed reached, since the peak says
     whether the speed is achievable at all. Also raises if the load never comes to
-    rest. Publishes `brake_speed_m_s` and `stopping_distance_m`, in metres."""
+    rest. Publishes `brake_speed_m_s` and `stopping_distance_m`, in metres.
+
+    Returns the position the load came to rest at, so a caller measuring distance
+    travelled learns where the brake put it without a second read - the same
+    contract move_to() has, for the same reason.
+
+    `on_engaged` is called the instant the rail drops, before anything that can
+    fail. A caller counting brake events has to hear about them there rather than
+    from a return value: everything after this point can raise - the load may never
+    stop, and @step re-checks for a fatal bound on the way out, which the stopping
+    distance published below is itself able to trip - and an event the brake
+    performed is one the DUT has been through whether the run survived it or not."""
     testbed: YdriveTestbed = test_case.testbed
 
     testbed.command.set_position(target)
@@ -387,6 +405,8 @@ def brake_from_speed(
     testbed.command.set_axis_state("IDLE")
     testbed.power_brake_bus(False)
     test_case.set_state("brake_engaged", True)
+    if on_engaged is not None:
+        on_engaged()
 
     stop_deadline: Stopwatch = Stopwatch(duration_s=stop_timeout_s)
     while True:
@@ -410,6 +430,7 @@ def brake_from_speed(
 
     test_case.set_state("brake_speed_m_s", speed * METERS_PER_TURN)
     test_case.set_state("stopping_distance_m", abs(rested_at - position) * METERS_PER_TURN)
+    return rested_at
 
 
 def release_brake_in_place(test_case: BaseYdriveTest) -> None:
@@ -440,6 +461,37 @@ def dwell_braked(test_case: BaseYdriveTest, dwell_s: float) -> None:
     release_brake(test_case)
 
 
+def establish_origin_by_hand(test_case: BaseYdriveTest) -> float:
+    """Hand the load to a person, have them put it at the end of the stroke the brake
+    should stop it toward, and make where they left it position 0. Returns that
+    origin, in turns.
+
+    THE LOAD IS HELD BY NOTHING while the operator works: the brake is released and
+    then the axis idled, so it is free to push by hand. Safe on this stand because
+    the axis is not gravity-loaded - on one that was, this is the state where the
+    load falls. It is still held by nothing when this returns, so the caller takes
+    it back with release_brake_in_place() before commanding anything.
+
+    Rezeroing is in software: the device is not zeroed, because there is no command
+    for that in the declared channel set, so the offset is published as
+    `position_origin` instead. Without it a stored run's absolute positions cannot
+    be interpreted, since they are relative to wherever a person happened to stop.
+
+    Not a @step: await_operator() is one, and a step that contains another reports
+    twice for one action."""
+    release_brake(test_case)
+    test_case.testbed.command.set_axis_state("IDLE")
+    await_operator(
+        test_case,
+        "move the load by hand to the end of the stroke it should brake TOWARD "
+        "(this becomes position 0), then acknowledge",
+    )
+    origin = test_case.testbed.get_pos_estimate()
+    test_case.set_state("position_origin", origin)
+    logger.info("test %s: position origin set at %.3f turns", test_case.test_id, origin)
+    return origin
+
+
 @step
 def move_to(
     test_case: BaseYdriveTest,
@@ -447,28 +499,58 @@ def move_to(
     position_tolerance: float = DEFAULT_POSITION_TOLERANCE,
     velocity_tolerance: float = DEFAULT_VELOCITY_TOLERANCE,
     arrival_timeout_s: float = DEFAULT_ARRIVAL_TIMEOUT_S,
-) -> None:
+) -> float:
+    """Command one target position, block until arrived and settled, and return the
+    FURTHEST position reached along the way, in the direction of travel.
+
+    THE FURTHEST POSITION, NOT THE ONE ARRIVAL WAS ACCEPTED AT, and on an
+    overshooting stand they are not the same. An overshoot peak wider than
+    `position_tolerance` cannot satisfy arrival, so the load is accepted on the way
+    back and the accepted frame sits near the target with the excursion past it
+    already behind. Returning the peak instead is what lets a caller measure
+    distance: between two consecutive peaks the load moves monotonically, so the
+    gap between them is the path it took rather than the stroke it was asked for.
+
+    IT EQUALS THE PATH ONLY WHEN THE LOAD REVERSES OUTSIDE `position_tolerance`.
+    That is this stand's regime - it overshoots by more than the tolerance, so the
+    peak cannot satisfy arrival and is always seen. A load whose overshoot fits
+    inside the tolerance is accepted on the way in instead, before it reverses, and
+    the excursion after that frame is neither reported nor tracked: the result is an
+    under-count, never an over-count, and nothing signals the change. A lighter load
+    or a different DUT is where that happens.
+
+    A peak is a good place to read a position: the load is reversing there, so the
+    telemetry stream's ~79 ms frame period costs millimetres - at cruise the same
+    frame period is worth over 100 mm."""
     testbed: YdriveTestbed = test_case.testbed
     testbed.command.set_position(target)
     test_case.set_state("position_target", target)
     deadline: Stopwatch = Stopwatch(duration_s=arrival_timeout_s)
+    # Tracked from the first frame of the move rather than from a read before it,
+    # so learning which way the load is going costs no extra telemetry frame.
+    furthest: Optional[float] = None
+    outward: float = 0.0
     # Closed-loop: block on live readings until we've actually arrived AND
-    # settled (not just passing through the target while still moving).
-    # Each testbed.get_pos_estimate()/get_vel_estimate() call blocks on the
-    # next telemetry frame, so this loop is naturally paced by the
-    # telemetry stream rather than a hot spin.
+    # settled (not just passing through the target while still moving). Each
+    # get_motion() call blocks on the next telemetry frame, so this loop is
+    # naturally paced by the stream rather than a hot spin.
     while True:
         test_case.check_should_continue()
         # One frame for all of it, so "arrived AND settled" is judged at a single
         # moment rather than from instants a frame apart - see Motion.
         motion = testbed.get_motion()
         _require_still_driving(test_case, motion, f"moving to {target}")
+        if furthest is None:
+            furthest = motion.position
+            outward = 1.0 if target >= motion.position else -1.0
+        elif (motion.position - furthest) * outward > 0:
+            furthest = motion.position
         within_tolerance: bool = (
             abs(motion.position - target) <= position_tolerance
             and abs(motion.velocity) <= velocity_tolerance
         )
         if within_tolerance:
-            return
+            return furthest
         if deadline.expired:
             raise TimeoutError(
                 f"test {test_case.test_id}: position didn't settle at {target} within {arrival_timeout_s}s"
@@ -570,8 +652,9 @@ def cycle_position(
         # stop request or a lost recorder, and on any of those the load should
         # stay where engage_brake() just put it: held by the brake, with the axis
         # idle. Releasing on the way out would hand the load back to a controller
-        # at the one moment the reason for stopping is unknown, and nothing
-        # downstream needs it - teardown commands no motion.
+        # at the one moment the reason for stopping is unknown, and the teardown
+        # that follows only ever brings a MOVING load to rest - a load the brake is
+        # already holding it leaves alone.
         release_brake(test_case)
 
     move_to(test_case, high_position, position_tolerance, velocity_tolerance, arrival_timeout_s)

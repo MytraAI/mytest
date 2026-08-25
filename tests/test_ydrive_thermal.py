@@ -78,7 +78,7 @@ def test_a_brief_spike_above_the_ceiling_does_not_stop_the_run():
     waited out, so this stays deterministic and fast."""
     evaluator = RulebookEvaluator()
     evaluator.register(YDRIVE_RULEBOOK)
-    hot = {**PUBLISHED_STATE, "temperature_4_c": 91.0}
+    hot = {**PUBLISHED_STATE, TEMPERATURE_BOUNDS[0].channel: 91.0}
 
     assert evaluator.evaluate(hot, 100.0) == [], "a violation on the first hot frame"
     assert evaluator.evaluate(hot, 100.0 + TC_PERSISTENCE_S - 0.1) == [], "fired early"
@@ -87,12 +87,12 @@ def test_a_brief_spike_above_the_ceiling_does_not_stop_the_run():
 def test_staying_above_the_ceiling_for_the_debounce_stops_the_run():
     evaluator = RulebookEvaluator()
     evaluator.register(YDRIVE_RULEBOOK)
-    hot = {**PUBLISHED_STATE, "temperature_4_c": 91.0}
+    hot = {**PUBLISHED_STATE, TEMPERATURE_BOUNDS[0].channel: 91.0}
 
     evaluator.evaluate(hot, 100.0)
     transitions = evaluator.evaluate(hot, 100.0 + TC_PERSISTENCE_S)
 
-    assert [t.bound_label for t in transitions] == ["overtemperature_bound_4"]
+    assert [t.bound_label for t in transitions] == [TEMPERATURE_BOUNDS[0].label]
     assert transitions[0].violated is True and transitions[0].fatal is True
 
 
@@ -101,8 +101,8 @@ def test_one_cool_sample_resets_the_debounce_rather_than_accumulating():
     and also why a channel that spikes constantly hides a real rise."""
     evaluator = RulebookEvaluator()
     evaluator.register(YDRIVE_RULEBOOK)
-    hot = {**PUBLISHED_STATE, "temperature_4_c": 91.0}
-    cool = {**PUBLISHED_STATE, "temperature_4_c": 24.0}
+    hot = {**PUBLISHED_STATE, TEMPERATURE_BOUNDS[0].channel: 91.0}
+    cool = {**PUBLISHED_STATE, TEMPERATURE_BOUNDS[0].channel: 24.0}
 
     evaluator.evaluate(hot, 100.0)
     evaluator.evaluate(cool, 100.0 + TC_PERSISTENCE_S - 0.1)
@@ -116,10 +116,10 @@ def test_a_momentary_open_channel_does_not_stop_the_run():
     thermocouple that drops a sample is not a thermocouple that is gone."""
     evaluator = RulebookEvaluator()
     evaluator.register(YDRIVE_RULEBOOK)
-    absent = {**PUBLISHED_STATE, "temperature_4_c": None}
+    absent = {**PUBLISHED_STATE, TEMPERATURE_BOUNDS[0].channel: None}
 
     assert evaluator.evaluate(absent, 100.0) == []
-    assert evaluator.evaluate({**PUBLISHED_STATE, "temperature_4_c": 24.0}, 100.2) == []
+    assert evaluator.evaluate({**PUBLISHED_STATE, TEMPERATURE_BOUNDS[0].channel: 24.0}, 100.2) == []
 
 
 def test_the_thermocouples_get_a_wider_dropout_window_than_the_framework_default():
@@ -141,7 +141,7 @@ def test_a_channel_that_stays_open_stops_the_run():
     bound = TEMPERATURE_BOUNDS[0]
     evaluator = RulebookEvaluator()
     evaluator.register(YDRIVE_RULEBOOK)
-    absent = {**PUBLISHED_STATE, "temperature_4_c": None}
+    absent = {**PUBLISHED_STATE, TEMPERATURE_BOUNDS[0].channel: None}
 
     evaluator.evaluate(absent, 100.0)
     with pytest.raises(UnevaluableBoundError):
@@ -155,21 +155,26 @@ def test_the_ceiling_fires_above_80_and_not_below():
     assert bound.evaluate({bound.channel: 79.5}) is False
 
 
-def test_the_bus_current_ceiling_cannot_engage_on_this_rail():
-    """Recorded rather than asserted-away: the bound is fatal at 20 A, and the
-    supply feeding this bus cannot source that at 48 V - its 420 W envelope caps
-    the output at 8.75 A. The rail sags instead, which undervoltage_bound catches.
-    A limit that could engage here would have to sit under the deliverable
-    current. Left in place because it stays correct if the bus is ever fed by
-    something bigger."""
+def test_the_bus_current_ceiling_is_sized_from_the_stand_not_the_supply():
+    """The ceiling comes off a measured run - 80% of a 14.97 A peak - and the
+    debounce off the same run's longest stroke cycle, 27.8 s, times 1.5. Recorded
+    here so a later edit to either has to restate what it was measured against."""
     bound = next(b for b in YDRIVE_RULEBOOK.bounds if b.channel == "board_ibus")
 
-    assert bound.upper == MAX_BUS_CURRENT_A == 20.0
-    assert bound.persistence_s == BUS_CURRENT_PERSISTENCE_S == 10.0
+    assert bound.upper == MAX_BUS_CURRENT_A == 12.0
+    assert bound.persistence_s == BUS_CURRENT_PERSISTENCE_S == 42.0
     assert bound.fatal is True
-    assert deliverable_current_a(MOTOR_BUS.voltage_v) < bound.upper, (
-        "this bound is now reachable - update the rulebook docstring, which says it is not"
-    )
+    assert MAX_BUS_CURRENT_A == pytest.approx(0.8 * 14.97, abs=0.05)
+    assert BUS_CURRENT_PERSISTENCE_S == pytest.approx(1.5 * 27.8, abs=0.5)
+
+
+def test_a_sustained_overcurrent_still_needs_more_than_the_supply_can_hold():
+    """Whether this bound can ever engage is open, and the arithmetic is why: the
+    supply's 420 W envelope caps a steady draw at 8.75 A on a 48 V rail, so an
+    overdraw held long enough to satisfy the debounce sags the rail instead and
+    undervoltage_bound catches it. Asserted rather than left in prose so the day
+    the bus is fed by something bigger, this fails and the docstring gets fixed."""
+    assert deliverable_current_a(MOTOR_BUS.voltage_v) < MAX_BUS_CURRENT_A
 
 
 # --- the stand publishes them -----------------------------------------------

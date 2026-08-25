@@ -1,6 +1,7 @@
-"""Base test case for ydrive: starts the ODrive testbed, seeds this run's
-state channels, and constructs (but does not start) a LiveRulebookRunner
-against RULEBOOKS. No test sequence logic of its own - unlike example_dut,
+"""Base test case for ydrive: seeds this run's state channels, starts the
+ODrive testbed, and constructs (but does not start) a LiveRulebookRunner
+against RULEBOOKS. In that order, so no driver can publish a frame before
+the state channels it should carry exist - see pre_test_setup(). No test sequence logic of its own - unlike example_dut,
 there's no separate DUT abstraction here, since the ODrive IS the test's
 entire hardware interface, so DEVICES is just the testbed's.
 
@@ -59,10 +60,18 @@ class BaseYdriveTest(TestCase):
         self.testbed: Optional[YdriveTestbed] = None
 
     def pre_test_setup(self) -> None:
+        # SEEDED BEFORE ANY DRIVER PROCESS EXISTS, so that no device frame can be
+        # recorded before the state channels it should carry are published. The
+        # engine fixes each device file's header from the union of its first frames
+        # and drops channels that appear later, so seeding after start() races the
+        # drivers' first frames for the header - and the frames win on a stand whose
+        # devices come up quickly. Nothing here needs the testbed: the state
+        # publisher is already running, started by run() before this phase.
+        self._seed_channels()
+
         self.testbed = YdriveTestbed(
             use_mock=self._use_mock, output_dir=self._output_dir, test_id=self.test_id
         )
-        self.testbed.start()
 
         # Setup energizes nothing. The stand comes up with both rails off - see
         # YdriveTestbed._configure_rails() - and a test that needs the bus brings
@@ -75,7 +84,7 @@ class BaseYdriveTest(TestCase):
         # releasing is main_execution's job, after CLOSED_LOOP_CONTROL. Teardown
         # reverses it: YdriveTestbed.stop() re-engages the brake before disarming
         # and dropping the bus.
-        self._seed_channels()
+        self.testbed.start()
 
         # Constructed here so it's ready the moment MainExecution starts, but
         # NOT started - see this module's docstring. A concrete subclass's
@@ -92,6 +101,9 @@ class BaseYdriveTest(TestCase):
         produce, so each one exists in the stream from frame 1 instead
         of appearing incrementally as steps happen to compute things
         (see ../channels.py).
+
+        Called before the testbed starts, so "frame 1" is literal: the
+        first frame any driver publishes already carries all of them.
 
         Bound-status channels are derived from RULEBOOKS rather than
         hand-listed, since the Rulebook is already the single source

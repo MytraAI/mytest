@@ -20,7 +20,12 @@ from .base import TestCase
 from .example_dut.testcases.base_example_dut_test import BaseExampleDutTest
 from .example_dut.testcases.halt_tests import CycleDutPositionTest
 from .ydrive.testcases.base_ydrive_test import BaseYdriveTest
-from .ydrive.testcases.testcases import BrakeEnduranceTest, EnduranceCycleTest, ManualTest
+from .ydrive.testcases.testcases import (
+    BrakeEnduranceTest,
+    CycleBrakeEnduranceTest,
+    EnduranceCycleTest,
+    ManualTest,
+)
 from .zdrive.testcases.base_zdrive_test import BaseZdriveTest
 from .zdrive.testcases.testcases import (
     BrakeEnduranceTest as ZdriveBrakeEnduranceTest,
@@ -35,6 +40,7 @@ REGISTERED_TESTS: Dict[str, Callable[[Optional[str], bool], TestCase]] = {
     "ydrive.manual": lambda test_id, use_mock: ManualTest(test_id=test_id, use_mock=use_mock),
     "ydrive.endurance_cycle": lambda test_id, use_mock: EnduranceCycleTest(test_id=test_id, use_mock=use_mock),
     "ydrive.brake_endurance": lambda test_id, use_mock: BrakeEnduranceTest(test_id=test_id, use_mock=use_mock),
+    "ydrive.cycle_brake_endurance": lambda test_id, use_mock: CycleBrakeEnduranceTest(test_id=test_id, use_mock=use_mock),
     "zdrive.base": lambda test_id, use_mock: BaseZdriveTest(test_id=test_id, use_mock=use_mock),
     "zdrive.manual": lambda test_id, use_mock: ZdriveManualTest(test_id=test_id, use_mock=use_mock),
     "zdrive.brake_hold": lambda test_id, use_mock: BrakeHoldTest(test_id=test_id, use_mock=use_mock),
