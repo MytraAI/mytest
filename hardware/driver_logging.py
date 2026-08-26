@@ -23,7 +23,10 @@ failure, which is what keeps DEBUG affordable over a run lasting hours.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import logging
+import sys
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -34,6 +37,11 @@ never lands in a driver's log.
 
 `__main__` is here because a driver run as `python -m hardware.<device>.main`
 logs under that name."""
+
+_faulthandler_file = None
+"""The open file faulthandler writes a native crash dump to. Module-level purely to
+keep it from being garbage-collected: faulthandler holds the descriptor, not the
+object, and a closed file makes the dump land nowhere."""
 
 CONSOLE_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 FILE_FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-8s %(name)s: %(message)s"
@@ -96,5 +104,88 @@ def configure(log_file: Optional[str] = None, device: str = "unknown") -> Option
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(logging.Formatter(FILE_FORMAT, datefmt=FILE_DATE_FORMAT))
     root.addHandler(handler)
+    capture_crashes(path)
     logging.getLogger(__name__).info("driver log for %s: %s", device, path)
     return path
+
+
+def capture_crashes(path: Optional[Path] = None) -> None:
+    """Route what kills a driver into the driver's own log.
+
+    THE REASON A DRIVER DIED IS THE ONE THING ITS LOG MUST CONTAIN, and by default it
+    is the one thing that does not reach it. Python prints an unhandled exception
+    through sys.excepthook, which writes a traceback straight to stderr and never
+    touches logging - so nothing here sees it. A driver is started by a testbed with
+    stderr inherited from whoever launched the test, so that traceback lands in a
+    terminal scrollback: not in the run directory, not beside the telemetry it stops
+    explaining, and gone when the window closes.
+
+    That is not hypothetical. A 6 h 25 m zdrive endurance run on 2026-08-25 ended when
+    the ODrive's USB transport failed and libodrive raised out of read_endpoints. The
+    traceback naming it existed - on a terminal - while the run directory recorded only
+    a telemetry stream that stopped mid-frame with no error of any kind, and the
+    diagnosis had to be reconstructed from timestamps in four other files.
+
+    Three hooks, because a driver can die three ways:
+
+      - sys.excepthook: the main thread raising out of the top level.
+      - threading.excepthook: any other thread. Vendor libraries run their own - the
+        odrive package has an event loop thread and a native USB worker - and an
+        exception on one of those never passes through the main thread at all.
+      - faulthandler: a native fault. A C library reached through ctypes can take the
+        interpreter down with no Python exception to catch, and this is the only thing
+        that leaves a stack behind when it does. It also distinguishes a crash from a
+        hang, which nothing in the recorded artifacts could.
+
+    asyncio needs no hook: its default handler already reports through logging, so a
+    task dying unretrieved lands in this file with everything else."""
+    logger = logging.getLogger(__name__)
+
+    def log_main_thread(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            # A person stopping a driver by hand is not a crash, and a traceback for
+            # one buries the record of what it was doing when they did.
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        logger.critical("unhandled exception - this driver is going down",
+                        exc_info=(exc_type, exc, tb))
+
+    def log_other_thread(args):
+        if issubclass(args.exc_type, SystemExit):
+            return
+        logger.critical("unhandled exception in thread %s - a driver can die on a thread "
+                        "it did not start", args.thread.name if args.thread else "?",
+                        exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+    sys.excepthook = log_main_thread
+    threading.excepthook = log_other_thread
+
+    global _faulthandler_file
+    if path is None:
+        faulthandler.enable()
+        return
+    try:
+        _faulthandler_file = open(path, "a", encoding="utf-8", buffering=1)
+    except OSError as exc:
+        logger.warning("could not open %s for crash dumps (%s) - a native fault will "
+                       "print to stderr only", path, exc)
+        faulthandler.enable()
+        return
+    faulthandler.enable(file=_faulthandler_file)
+
+
+def restore_crash_capture() -> None:
+    """Undo capture_crashes().
+
+    For a test that calls configure() in-process. These are interpreter-wide hooks, so
+    left installed they outlive the test that installed them: pytest's own
+    unhandled-thread-exception warning stops firing because threading.excepthook is no
+    longer its own, and faulthandler goes on writing to a file the test has deleted.
+    A driver process never needs this - it wants the hooks until it exits."""
+    global _faulthandler_file
+    sys.excepthook = sys.__excepthook__
+    threading.excepthook = threading.__excepthook__
+    faulthandler.disable()
+    if _faulthandler_file is not None:
+        _faulthandler_file.close()
+        _faulthandler_file = None

@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from typing import Sequence
+from pathlib import Path
+from typing import Optional, Sequence
 
 
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
@@ -33,8 +34,25 @@ subprocess only defines the Windows-only constants on Windows, and this module
 is read and tested from the machines the stands are developed on."""
 
 
-def start_driver(args: Sequence[str]) -> subprocess.Popen:
-    """Start a driver process, detached from the console's interrupts."""
+def start_driver(args: Sequence[str], console_path: Optional[Path] = None) -> subprocess.Popen:
+    """Start a driver process, detached from the console's interrupts.
+
+    `console_path` captures the process's raw stdout and stderr. Without it they are
+    INHERITED - not discarded, which is what makes this worth doing: they go to the
+    terminal of whoever launched the test, so a vendor library's message, or a
+    traceback printed on the way down, exists in a scrollback and nowhere else. That
+    is how a 6 h zdrive run's cause came to be missing from its own run directory.
+
+    What it costs is the live view: a person watching the terminal no longer sees each
+    driver's INFO lines as they happen. The run's own operator dashboard is the place
+    for that, and the file is the place for the record."""
+    stdio = {}
+    if console_path is not None:
+        console_path.parent.mkdir(parents=True, exist_ok=True)
+        # Append, matching the driver's own log: a driver restarted mid-run adds to the
+        # file rather than erasing what the last attempt recorded.
+        handle = open(console_path, "a", encoding="utf-8", buffering=1)
+        stdio = {"stdout": handle, "stderr": subprocess.STDOUT}
     if sys.platform == "win32":
-        return subprocess.Popen(list(args), creationflags=CREATE_NEW_PROCESS_GROUP)
-    return subprocess.Popen(list(args), start_new_session=True)
+        return subprocess.Popen(list(args), creationflags=CREATE_NEW_PROCESS_GROUP, **stdio)
+    return subprocess.Popen(list(args), start_new_session=True, **stdio)

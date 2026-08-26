@@ -68,6 +68,7 @@ RAW_DIRNAME = "raw"
 VERDICT_FILENAME = "verdict.json"
 TELEMETRY_FILENAME = "telemetry.csv"
 DRIVER_LOG_FILENAME = "logs.txt"
+DRIVER_CONSOLE_FILENAME = "console.txt"
 """A driver process's own detailed log, written next to the telemetry it
 produced. This is the second artifact type a device directory holds, and the
 reason the layout above uses subdirectories rather than filename suffixes.
@@ -149,3 +150,17 @@ def driver_log_path(output_dir: Path, test_id: str, device: str) -> Path:
     a testbed, in PreTestSetup - is the participant that has both the run's
     test_id and the engine's output dir."""
     return device_dir(output_dir, test_id, device) / DRIVER_LOG_FILENAME
+
+
+def driver_console_path(output_dir: Path, test_id: str, device: str) -> Path:
+    """Where a driver's raw stdout and stderr are captured, beside its own log.
+
+    A second file rather than more of logs.txt, because these are two different
+    things written by two different writers. logs.txt is this project's record,
+    formatted and timestamped, and now carries an unhandled traceback too (see
+    driver_logging.capture_crashes). This one is whatever the process emitted at the
+    file-descriptor level - a vendor library's warnings, anything printed before
+    logging was configured, an interpreter message on the way down - which nothing in
+    Python is in a position to reformat, and which would otherwise exist only in the
+    terminal of whoever started the run."""
+    return device_dir(output_dir, test_id, device) / DRIVER_CONSOLE_FILENAME
