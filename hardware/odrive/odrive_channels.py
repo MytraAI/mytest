@@ -166,6 +166,11 @@ COMMAND_CHANNELS = [
     "set_axis_config_startup_encoder_index_search",
     "set_axis_config_startup_encoder_offset_calibration",
     "set_axis_config_startup_closed_loop_control",
+    "set_pos_estimate",  # turns - writes the axis position estimate, shifting the whole
+                         # position frame: firmware moves input_pos and pos_setpoint with it
+                         # and sets absolute_setpoints, so there is no impulse on the axis.
+                         # The deprecated set_abs_pos() does the same thing and returns the
+                         # shift; this is the call ODrive's own docs point at instead.
     "set_axis_config_startup_homing",
     "set_axis_config_startup_max_wait_for_ready",
     "set_axis_config_watchdog_timeout",

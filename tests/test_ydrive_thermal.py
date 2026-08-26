@@ -167,13 +167,9 @@ def test_the_bus_current_ceiling_is_sized_from_the_stand_not_the_supply():
     assert MAX_BUS_CURRENT_A == pytest.approx(0.8 * 14.97, abs=0.05)
     assert BUS_CURRENT_PERSISTENCE_S == pytest.approx(1.5 * 27.8, abs=0.5)
 
-
-def test_a_sustained_overcurrent_still_needs_more_than_the_supply_can_hold():
-    """Whether this bound can ever engage is open, and the arithmetic is why: the
-    supply's 420 W envelope caps a steady draw at 8.75 A on a 48 V rail, so an
-    overdraw held long enough to satisfy the debounce sags the rail instead and
-    undervoltage_bound catches it. Asserted rather than left in prose so the day
-    the bus is fed by something bigger, this fails and the docstring gets fixed."""
+    # Whether it can engage at all is open: the 420 W envelope caps a steady draw at
+    # 8.75 A on this rail, so a long overdraw sags it into undervoltage_bound first.
+    # Asserted so the day the bus is fed by something bigger, this fails loudly.
     assert deliverable_current_a(MOTOR_BUS.voltage_v) < MAX_BUS_CURRENT_A
 
 

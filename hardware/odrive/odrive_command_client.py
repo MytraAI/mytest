@@ -152,6 +152,15 @@ class OdriveCommandClient(CommandClient):
         """axis0.controller.input_pos - position setpoint, turns - only meaningful in POSITION_CONTROL"""
         self.execute("set_position", value=value)
 
+    def set_pos_estimate(self, value: float) -> None:
+        """axis0.pos_estimate - re-reference the axis to `value` turns, impulse-free.
+
+        Firmware shifts input_pos and pos_setpoint by the same amount and sets
+        absolute_setpoints, so the axis does not move; only what every later
+        position MEANS changes. Writing this is how ODrive's docs say to do what
+        the deprecated set_abs_pos() does."""
+        self.execute("set_pos_estimate", value=value)
+
     def set_velocity(self, value: float) -> None:
         """axis0.controller.input_vel - velocity setpoint, turns/s - only meaningful in VELOCITY_CONTROL"""
         self.execute("set_velocity", value=value)

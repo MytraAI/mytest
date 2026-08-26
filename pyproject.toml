@@ -17,6 +17,11 @@ dependencies = [
     # sits behind a CP2102N USB-UART bridge and announces nothing of its own, so
     # pyserial's list_ports is also how an operator finds which port it is on.
     "pyserial>=3.5",
+    # hardware/vision_home/ watches a webcam for a taught view of the moving
+    # fixture. HEADLESS deliberately: a test bench has no display, and the GUI
+    # build pulls in libraries it cannot use. Neither wheel is compiled with
+    # libavdevice, which is why camera.py never lets OpenCV auto-probe FFMPEG.
+    "opencv-python-headless>=4.9",
 ]
 
 [dependency-groups]

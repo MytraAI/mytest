@@ -72,3 +72,23 @@ def test_check_rails_reports_every_wrong_setpoint_at_once():
         testbed.check_rails()
     assert f"{BRAKE_BUS.name} voltage" in str(caught.value)
     assert f"{MOTOR_BUS.name} current limit" in str(caught.value)
+
+
+def test_the_vision_command_client_outlives_a_camera_scan():
+    """select_best_camera opens every camera on the machine and reads frames from
+    each, which runs to tens of seconds - an absent index on Windows costs an MSMF
+    attempt, a settle, a DSHOW attempt and a last-resort probe.
+
+    Against CommandClient's 5 s default that could never complete, and overrunning
+    is not a slow report: a timed-out REQ socket is left permanently broken, so the
+    testbed's client has to be rebuilt and the run is over."""
+    from hardware.vision_home import camera
+    from testbeds.ydrive_testbed.ydrive_testbed import VISION_COMMAND_TIMEOUT_MS
+
+    max_index = 6
+    optimistic_s = max_index * (3 * 0.1 + camera.RELEASE_SETTLE_S)
+
+    assert VISION_COMMAND_TIMEOUT_MS / 1000 > 4 * optimistic_s, (
+        f"a scan of {max_index} indices costs at least {optimistic_s:.0f}s before any "
+        "Windows backend-probing overhead, and this deadline leaves no room for it"
+    )

@@ -175,6 +175,7 @@ _TELEMETRY_PATHS: Dict[str, Tuple[str, str]] = {
 # command name -> (root, dotted_path) for plain setattr(value) commands. Excludes set_axis_state/
 # set_control_mode (handled specially in execute() - see module docstring) and anything in _METHODS.
 _SETTERS: Dict[str, Tuple[str, str]] = {
+    "set_pos_estimate": ("axis", "pos_estimate"),
     "set_axis_config_commutation_encoder": ("axis", "config.commutation_encoder"),
     "set_axis_config_enable_watchdog": ("axis", "config.enable_watchdog"),
     "set_axis_config_i_bus_hard_max": ("axis", "config.I_bus_hard_max"),

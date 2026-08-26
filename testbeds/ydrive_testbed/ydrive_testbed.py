@@ -50,6 +50,10 @@ from hardware.odrive import odrive_errors
 from hardware.odrive.odrive_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
 from hardware.odrive.odrive_command_client import OdriveCommandClient
 from hardware.tc_daq.tc_daq_channels import TELEMETRY_CHANNELS as TC_DAQ_TELEMETRY_CHANNELS
+from hardware.vision_home.vision_home_channels import (
+    TELEMETRY_CHANNELS as VISION_HOME_TELEMETRY_CHANNELS,
+)
+from hardware.vision_home.vision_home_command_client import VisionHomeCommandClient
 from hardware.tc_daq.transport import SILENCE_TIMEOUT_S as TC_DAQ_SILENCE_TIMEOUT_S
 from protocol.paths import driver_log_path
 from testcases.utils import Stopwatch
@@ -59,12 +63,24 @@ from protocol.wire import (
     DEFAULT_ODRIVE_COMMAND_ENDPOINT,
     DEFAULT_ODRIVE_TELEMETRY_ENDPOINT,
     DEFAULT_TC_DAQ_TELEMETRY_ENDPOINT,
+    DEFAULT_VISION_HOME_COMMAND_ENDPOINT,
+    DEFAULT_VISION_HOME_TELEMETRY_ENDPOINT,
     DEVICE_CPX400DP,
     DEVICE_ODRIVE,
     DEVICE_TC_DAQ,
+    DEVICE_VISION_HOME,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class MarkerAlignment(NamedTuple):
+    """Whether the camera sees the taught view of the fixture, and what it is
+    measured against - from one telemetry frame."""
+
+    aligned: bool
+    score: float
+    taught: bool
 
 
 class Motion(NamedTuple):
@@ -150,6 +166,27 @@ TEARDOWN_VELOCITY_TOLERANCE = 0.05  # turns/s
 """What counts as at rest for the teardown settle. Small enough to mean stopped
 rather than slowed."""
 
+VISION_COMMAND_TIMEOUT_MS = 120_000
+"""How long a vision-home command may take, against CommandClient's 5 s default.
+
+select_best_camera opens every camera on the machine and reads frames from each,
+and none of that is fast: an absent index on Windows costs an MSMF attempt, a
+settle, a DSHOW attempt and a last-resort probe, and a present one costs a release
+settle on top. Six indices runs to tens of seconds.
+
+Generous rather than tuned, because the cost of overrunning is not a slow report -
+a timed-out REQ socket is left permanently broken (see CommandClient), so the
+testbed's client has to be rebuilt and the run is over."""
+
+CAMERA_SOURCE = "0"
+"""Which camera the vision-home driver opens on this bench.
+
+A device index, or an address. NOT A STABLE NUMBER: index numbering is
+per-machine and per-OS, and a built-in camera or a docking station can move a
+USB webcam to an unpredictable one - `python -m hardware.vision_home.main --scan`
+prints what this machine answers on. Pass a new one as
+YdriveTestbed(camera_source=...)."""
+
 BRAKE_SETTLE_S = 0.1
 """Seconds to wait after switching the brake rail, before moving or dwelling.
 
@@ -211,7 +248,7 @@ class YdriveTestbed:
     """Starts/stops the ODrive, CPX400DP and thermocouple DAQ drivers for ydrive, and owns
     connected clients for them. Use as a context manager."""
 
-    DEVICES: Tuple[str, ...] = (DEVICE_ODRIVE, DEVICE_CPX400DP, DEVICE_TC_DAQ)
+    DEVICES: Tuple[str, ...] = (DEVICE_ODRIVE, DEVICE_CPX400DP, DEVICE_TC_DAQ, DEVICE_VISION_HOME)
     """The devices whose driver processes this testbed owns. Declared here
     because this is what starts them; the test case unions this with its DUT
     façade's declaration (there is none for ydrive) and publishes the result, so
@@ -224,12 +261,14 @@ class YdriveTestbed:
         serial_number: Optional[str] = None,
         cpx400dp_host: str = CPX400DP_HOST,
         tc_daq_port: Optional[str] = None,
+        camera_source: str = CAMERA_SOURCE,
         output_dir: Optional[Path] = None,
         test_id: Optional[str] = None,
     ) -> None:
-        """cpx400dp_host defaults to this stand's last self-assigned address; tc_daq_port is found
-        by USB vendor when None; output_dir/test_id put each driver's log beside its telemetry."""
+        """cpx400dp_host, tc_daq_port and camera_source are bench configuration, found by address,
+        USB vendor and index; output_dir/test_id put each driver's log beside its telemetry."""
         self._use_mock = use_mock
+        self._camera_source = camera_source
         self._serial_number = serial_number
         self._cpx400dp_host = cpx400dp_host
         self._tc_daq_port = tc_daq_port
@@ -245,6 +284,8 @@ class YdriveTestbed:
         self._supply: Optional[Cpx400dpCommandClient] = None
         self._supply_telemetry: Optional[TelemetryClient] = None
         self._tc_daq_telemetry: Optional[TelemetryClient] = None
+        self._vision: Optional[VisionHomeCommandClient] = None
+        self._vision_telemetry: Optional[TelemetryClient] = None
 
     def _log_args(self, device: str) -> List[str]:
         """`--log-file` for one device's driver, or nothing if this testbed
@@ -284,10 +325,22 @@ class YdriveTestbed:
             *self._log_args(DEVICE_TC_DAQ),
         ]
 
-        self._processes = [
-            start_driver(odrive_args), start_driver(supply_args), start_driver(tc_daq_args)
+        # The camera that re-references the axis against the world. Pointed at a
+        # device index or an address, because neither is predictable across
+        # benches or operating systems - see hardware/vision_home/camera.py.
+        vision_args = [
+            sys.executable, "-m", "hardware.vision_home.main",
+            "--camera-source", self._camera_source,
+            *self._log_args(DEVICE_VISION_HOME),
         ]
-        self._device_for_process = [DEVICE_ODRIVE, DEVICE_CPX400DP, DEVICE_TC_DAQ]
+
+        self._processes = [
+            start_driver(odrive_args), start_driver(supply_args),
+            start_driver(tc_daq_args), start_driver(vision_args),
+        ]
+        self._device_for_process = [
+            DEVICE_ODRIVE, DEVICE_CPX400DP, DEVICE_TC_DAQ, DEVICE_VISION_HOME
+        ]
         time.sleep(STARTUP_DELAY_S)  # let the drivers bind their sockets
 
         self._command = OdriveCommandClient(endpoint=DEFAULT_ODRIVE_COMMAND_ENDPOINT)
@@ -298,6 +351,11 @@ class YdriveTestbed:
         self._tc_daq_telemetry = TelemetryClient(
             endpoint=DEFAULT_TC_DAQ_TELEMETRY_ENDPOINT, timeout_s=TC_DAQ_STALENESS_S
         )
+        self._vision = VisionHomeCommandClient(
+            endpoint=DEFAULT_VISION_HOME_COMMAND_ENDPOINT,
+            timeout_ms=VISION_COMMAND_TIMEOUT_MS,
+        )
+        self._vision_telemetry = TelemetryClient(endpoint=DEFAULT_VISION_HOME_TELEMETRY_ENDPOINT)
 
         # Before waiting ten seconds on a command server: a driver that has
         # already exited will never answer, and its own log says why.
@@ -315,6 +373,7 @@ class YdriveTestbed:
         # passes with sensors unplugged - what it catches is a driver that
         # started against the wrong port and is streaming something else.
         self._tc_daq_telemetry.verify_channels(TC_DAQ_TELEMETRY_CHANNELS)
+        self._vision_telemetry.verify_channels(VISION_HOME_TELEMETRY_CHANNELS)
 
         self._configure_rails()
 
@@ -425,11 +484,13 @@ class YdriveTestbed:
         self._safe("disconnect the supply backend", lambda: self.supply.disconnect_backend())
 
         for client in (self._command, self._telemetry, self._sync_telemetry,
-                       self._supply, self._supply_telemetry, self._tc_daq_telemetry):
+                       self._supply, self._supply_telemetry, self._tc_daq_telemetry,
+                       self._vision, self._vision_telemetry):
             if client is not None:
                 self._safe(f"close {type(client).__name__}", client.close)
         self._command = self._telemetry = self._sync_telemetry = None
         self._supply = self._supply_telemetry = self._tc_daq_telemetry = None
+        self._vision = self._vision_telemetry = None
 
         for process in self._processes:
             self._safe(f"terminate pid {process.pid}", process.terminate)
@@ -477,6 +538,16 @@ class YdriveTestbed:
         self.supply.enable_output(BRAKE_BUS.output, enabled)
         logger.info("%s %s", BRAKE_BUS.name, "released (rail energized)" if enabled else "engaged (rail de-energized)")
 
+    def get_marker_alignment(self) -> "MarkerAlignment":
+        """Whether the camera sees the taught view, from one frame - one read, so the alignment
+        and what it is measured against describe the same instant."""
+        channels = self.vision_telemetry.latest_frame().channels
+        return MarkerAlignment(
+            aligned=bool(channels["aligned"]),
+            score=float(channels["match_score"]),
+            taught=bool(channels["taught"]),
+        )
+
     def _supply_channels(self) -> Dict[str, object]:
         """Block for the next supply telemetry frame and return its channels. Private: callers ask a
         named question instead, so this stand's channel names live in one place."""
@@ -494,6 +565,18 @@ class YdriveTestbed:
         if self._supply_telemetry is None:
             raise RuntimeError("YdriveTestbed.supply_telemetry accessed before start()")
         return self._supply_telemetry
+
+    @property
+    def vision(self) -> VisionHomeCommandClient:
+        if self._vision is None:
+            raise RuntimeError("testbed not started")
+        return self._vision
+
+    @property
+    def vision_telemetry(self) -> TelemetryClient:
+        if self._vision_telemetry is None:
+            raise RuntimeError("testbed not started")
+        return self._vision_telemetry
 
     @property
     def tc_daq_telemetry(self) -> TelemetryClient:

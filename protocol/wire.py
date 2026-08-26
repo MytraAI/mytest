@@ -89,6 +89,14 @@ DEFAULT_TC_DAQ_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5601"
 DEFAULT_N6974A_COMMAND_ENDPOINT = "tcp://127.0.0.1:5610"
 DEFAULT_N6974A_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5611"
 
+# The fixed camera watching for the marker on a moving test fixture (see
+# hardware/vision_home/). Its own port pair like every other driver. The camera
+# it opens is named by --camera-source on the driver's command line, not here:
+# a device index is per-machine and per-OS, so it is bench configuration rather
+# than a protocol constant.
+DEFAULT_VISION_HOME_COMMAND_ENDPOINT = "tcp://127.0.0.1:5620"
+DEFAULT_VISION_HOME_TELEMETRY_ENDPOINT = "tcp://127.0.0.1:5621"
+
 # Single topic used on the telemetry PUB socket, kept as one constant
 # rather than per-channel topics because subscribers currently want
 # the full frame. Splitting by channel is an easy future change if a
@@ -136,6 +144,11 @@ belongs to the simulated general-purpose DAQ, and a device name keys a
 directory of recorded output, so two backends publishing different channel sets
 under one name would make a stored run ambiguous about which produced it."""
 
+DEVICE_VISION_HOME = "vision_home"
+"""The camera that re-references the axis against the world. Named for what it
+answers rather than for the sensor: an axis whose encoder is on the motor cannot
+see slip between the motor and the load, and this is what does."""
+
 DEVICE_CPX400DP = "cpx400dp"
 """The real TTi CPX400DP bench supply. Deliberately not DEVICE_POWER_SUPPLY:
 that name belongs to the generic simulated supply, whose channel surface is
@@ -171,6 +184,7 @@ TELEMETRY_ENDPOINTS: Dict[str, str] = {
     DEVICE_CPX400DP: DEFAULT_CPX400DP_TELEMETRY_ENDPOINT,
     DEVICE_TC_DAQ: DEFAULT_TC_DAQ_TELEMETRY_ENDPOINT,
     DEVICE_N6974A: DEFAULT_N6974A_TELEMETRY_ENDPOINT,
+    DEVICE_VISION_HOME: DEFAULT_VISION_HOME_TELEMETRY_ENDPOINT,
 }
 
 # High-water marks. ZeroMQ's default is 1000 *messages* on both ends, and

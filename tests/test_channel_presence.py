@@ -344,16 +344,11 @@ def test_every_state_channel_is_published_before_any_driver_starts(monkeypatch):
     missing = sorted(set(DEFAULT_STATE) - seeded_first)
     assert not missing, f"state channels that could miss the header: {missing}"
 
-
-def test_the_bound_status_channels_are_seeded_too(monkeypatch):
-    """Derived from RULEBOOKS rather than hand-listed, and just as droppable: a run
-    missing a bound's status column reads as a run with no supervision of it."""
-    from testcases.ydrive.testcases import base_ydrive_test
-
-    seeded_first, _ = _seed_order(monkeypatch)
-
+    # Bound-status channels too. Derived from RULEBOOKS rather than hand-listed and
+    # just as droppable: a run missing one reads as a run with no supervision of it.
+    from testcases.ydrive.testcases.base_ydrive_test import BaseYdriveTest
     assert "test_status" in seeded_first
-    for rulebook in base_ydrive_test.BaseYdriveTest.RULEBOOKS:
+    for rulebook in BaseYdriveTest.RULEBOOKS:
         for bound in rulebook.bounds:
             assert f"{bound.label}_status" in seeded_first
 
@@ -416,3 +411,23 @@ def test_a_stream_that_lacks_the_channel_reports_nothing_either_way():
         transitions += evaluator.evaluate({"board_vbus_voltage": 48.0}, i * 0.079)
 
     assert not transitions, f"a stream with no temperatures moved a thermal bound: {transitions}"
+
+
+def test_every_device_a_testbed_declares_is_one_the_engine_records():
+    """A testbed's DEVICES and the engine's TELEMETRY_ENDPOINTS have to agree, or a
+    run refuses to start with DeviceNotRecorded - correctly, since the alternative is
+    a run directory quietly missing a whole device.
+
+    Two lists in two files, so adding a driver to a stand and forgetting the engine
+    is a one-line omission that only shows up on the bench. This is that check."""
+    from protocol.wire import TELEMETRY_ENDPOINTS
+    from testbeds.example_testbed.example_testbed import ExampleTestbed
+    from testbeds.ydrive_testbed.ydrive_testbed import YdriveTestbed
+    from testbeds.zdrive_testbed.zdrive_testbed import ZdriveTestbed
+
+    for testbed in (YdriveTestbed, ZdriveTestbed, ExampleTestbed):
+        unrecorded = [d for d in testbed.DEVICES if d not in TELEMETRY_ENDPOINTS]
+        assert not unrecorded, (
+            f"{testbed.__name__} declares {unrecorded}, which the engine does not "
+            "subscribe to - every run of it would refuse to start"
+        )

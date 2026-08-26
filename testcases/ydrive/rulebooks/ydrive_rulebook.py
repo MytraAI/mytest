@@ -1,5 +1,5 @@
-"""Evaluation Rulebook for ydrive: two fatal safety-net bounds on
-board-level DC bus channels, checked regardless of what a given test's
+"""Evaluation Rulebook for ydrive: fatal safety-net bounds on board-level
+DC bus and motor channels, checked regardless of what a given test's
 main_execution actually does:
 
 - overcurrent_bound: board_ibus > 12A for 42s continuous (persistence_s
@@ -18,6 +18,16 @@ main_execution actually does:
   being hit is the supply's own in_power_limit_2, and a bound on it is an
   open action (see AI/Mytest.md); it needs a decision about whether
   hitting the envelope should be fatal or merely recorded.
+- motor_current_bound: |motor_foc_iq_measured| > 17A for 21s continuous,
+  fatal. A STALL DETECTOR, not a headroom bound: normal duty at 1800 lb
+  sits above 17 A for 65% of frames, and what separates it from an axis
+  pushing a hard stop is that the turnaround breaks the stretch every
+  leg. 150% of one leg (14.0 s median) against a measured worst healthy
+  stretch of 9.58 s. See MAX_MOTOR_CURRENT_A.
+- marker_correction_bound: distance_since_correction_m > 1000 m, fatal. Not
+  a bound on drift - a bound on how long the mechanism that removes it may go
+  on not working, since nothing else on this stand can see the load slip past
+  the motor. See MAX_DISTANCE_SINCE_CORRECTION_M.
 - undervoltage_bound: board_vbus_voltage < 10.5V, no persistence -
   trusted instantaneously rather than debounced.
 - power_envelope_bound: in_power_limit_2 is False, RECORDED not fatal -
@@ -126,6 +136,62 @@ Cleared the moment the current drops back, so this is a continuous stretch and
 not a total. The same run's longest continuous stretch above MAX_BUS_CURRENT_A
 was 0.19 s, against 0.32% of frames above it at all."""
 
+MAX_MOTOR_CURRENT_A = 17.0
+"""Motor-phase current, either direction, above which the axis is doing something
+other than moving the load.
+
+NOT A HEADROOM BOUND, and this is why the number looks wrong. Normal duty at 1800 lb
+sits ABOVE it: |Iq| over a 2169 m run had a median of 17.84 A and a p95 of 18.19 A
+against an 18.0 A soft max, with 65% of frames past 17 A. What separates duty from
+trouble here is not the height of the current but how long it is held - so the whole
+bound is really MOTOR_CURRENT_PERSISTENCE_S, and this is just the floor above which
+the clock is allowed to run.
+
+Signed both ways, because Iq's sign is the direction of travel and a stall is a stall
+going either way - the same run ran -18.79 A to +18.90 A. Magnitude, in effect, but
+expressed as two limits because that is what the evaluator compares.
+
+What it catches: an axis pushing something that will not move. The 2026-08-25 14:23
+run drove into a mechanical stop and held 18.0 A at zero velocity with -3.44 Nm for
+the 19 s until a person stopped it. Nothing in the rulebook or the test noticed."""
+
+MOTOR_CURRENT_PERSISTENCE_S = 21.0
+"""How long |motor_foc_iq_measured| must stay above MAX_MOTOR_CURRENT_A before the
+run stops.
+
+150% of one leg of the stroke - 14.0 s median over 180 legs at 1800 lb, giving 21.0 s
+- so no single leg of normal duty, current held the whole way, can trip it. Only a
+current that outlasts the motion producing it can.
+
+The measured margin is better than that ratio suggests. Cleared the moment the
+current drops back, so this is a continuous stretch and not a total, and the
+turnaround at each end of the stroke breaks the stretch: the same run's longest
+continuous stretch above 17 A was 9.58 s, less than half of this. A stall does not
+get that reprieve, which is the whole distinction being drawn."""
+
+MAX_DISTANCE_SINCE_CORRECTION_M = 1000.0
+"""How far the load may travel without the camera re-referencing the axis.
+
+NOT A BOUND ON DRIFT, which this test does not measure. It bounds how long the thing
+that REMOVES the drift may go on not working. A bumped camera, a turnaround that stops
+reaching the marker, a lens that fogs: corrections stop, the load resumes walking
+exactly as it did before, and nothing else on this stand can see it - the encoder is on
+the motor.
+
+A first cut, deliberately loose. Corrections land on most cycles, and a cycle covers
+24.3 m, so this is about 41 consecutive cycles of seeing nothing: an occasional miss
+cannot reach it and a camera that has stopped working entirely gets there in under
+20 minutes.
+
+Sized by what the clearance can absorb rather than by what is normal. Slip runs about
+305 mm per km against a floor mark, so 1000 m is roughly 0.3 m of uncorrected walk
+against the 0.59 m between the measured overshoot peak and the mechanical stop. Twice
+this would spend all of it, and what that looks like is the 2026-08-25 14:23 run:
+1800 lb into a hard stop at the current limit.
+
+No persistence, because the channel cannot spike - it rises monotonically between
+corrections and is reset to zero by one."""
+
 IN_POWER_LIMIT_EXPECTED = False
 """What in_power_limit_2 should read: the motor bus inside the supply's power
 envelope.
@@ -209,6 +275,14 @@ YDRIVE_RULEBOOK = Rulebook(
             persistence_s=BUS_CURRENT_PERSISTENCE_S,
         ),
         Bound(
+            channel="motor_foc_iq_measured",
+            upper=MAX_MOTOR_CURRENT_A,
+            lower=-MAX_MOTOR_CURRENT_A,
+            name="motor_current_bound",
+            fatal=True,
+            persistence_s=MOTOR_CURRENT_PERSISTENCE_S,
+        ),
+        Bound(
             channel="board_vbus_voltage",
             lower=10.5,
             name="undervoltage_bound",
@@ -218,6 +292,12 @@ YDRIVE_RULEBOOK = Rulebook(
             channel="in_power_limit_2",
             expected=IN_POWER_LIMIT_EXPECTED,
             name="power_envelope_bound",
+        ),
+        Bound(
+            channel="distance_since_correction_m",
+            upper=MAX_DISTANCE_SINCE_CORRECTION_M,
+            name="marker_correction_bound",
+            fatal=True,
         ),
         Bound(
             channel="stopping_distance_m",
