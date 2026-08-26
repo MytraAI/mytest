@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from ..backend import HardwareBackend, HardwareError, MissingChannelError, to_jsonable
@@ -367,6 +368,15 @@ class OdriveBackend(HardwareBackend):
         self._serial_number = serial_number
         self._discovery_timeout_s = discovery_timeout_s
         self._odrv = None  # the odrive package's device handle, once connected
+        self._reading = threading.Lock()
+        """Held for the whole of one frame, and by disconnect() before it lets the
+        handle go.
+
+        A frame is read attribute by attribute on a worker thread while disconnect()
+        runs on the event loop, so without this the handle can be dropped part-way
+        through one - see disconnect(). Not a guard on _odrv generally: the command
+        path reaches the device through _require_connected(), which answers a caller
+        rather than a reader mid-frame."""
         self._AxisState = None
         self._ControlMode = None
         self._last_watched: Dict[str, Any] = {}
@@ -501,10 +511,29 @@ class OdriveBackend(HardwareBackend):
             return "unknown"
 
     async def disconnect(self) -> None:
+        """Idle the axis and let the device handle go, after any frame already being
+        read has finished.
+
+        THE WAIT IS THE POINT. Reading a frame walks the handle attribute by
+        attribute on a worker thread; this runs on the event loop. Dropping the
+        handle underneath that read raised `AttributeError: 'NoneType' object has no
+        attribute 'axis0'` from _read_one - which runner.py treats as fatal and
+        _read_one's own comment reads as the device's attribute graph having changed
+        mid-run. It had not: the driver was being shut down, and said so as a device
+        fault, logging CRITICAL on a teardown that was going correctly. A frame is
+        about 39 USB round-trips, so the wait is tens of milliseconds.
+
+        Ordered deliberately: the axis is idled first, so a frame that is still in
+        flight describes a stand already being brought down rather than one that has
+        lost its handle."""
         if self._odrv is not None:
             logger.info("disconnecting from ODrive serial_number=%s", getattr(self._odrv, "serial_number", None))
             await self._set_axis_state("IDLE")
-            self._odrv = None
+            await asyncio.to_thread(self._reading.acquire)
+            try:
+                self._odrv = None
+            finally:
+                self._reading.release()
 
     async def get_status(self) -> dict:
         self._require_connected()
@@ -550,10 +579,14 @@ class OdriveBackend(HardwareBackend):
     async def stream_samples(self) -> AsyncIterator[dict]:
         while True:
             if self._odrv is not None:
+                # None means disconnect() took the handle between the test above and
+                # the read starting - a shutdown, so there is no frame and nothing
+                # wrong. See _read_all_channels().
                 frame = await asyncio.to_thread(self._read_all_channels)
-                self._accumulate_turns_traveled(frame)
-                self._log_error_transitions(frame)
-                yield frame
+                if frame is not None:
+                    self._accumulate_turns_traveled(frame)
+                    self._log_error_transitions(frame)
+                    yield frame
             await asyncio.sleep(SAMPLE_INTERVAL_S)
 
     def _log_error_transitions(self, frame: Dict[str, Any]) -> None:
@@ -667,19 +700,31 @@ class OdriveBackend(HardwareBackend):
         }
         self._frames_since_cache_refresh = 0
 
-    def _read_all_channels(self) -> dict:
+    def _read_all_channels(self) -> Optional[dict]:
         """One frame: the live channels off the board, the cached tier from memory.
 
         Thirty-nine USB round-trips instead of a hundred - see _CACHED_CHANNELS for why
-        the other sixty-one do not need asking about."""
-        if self._frames_since_cache_refresh >= CACHED_REFRESH_FRAMES:
-            self._refresh_cached_channels()
-        self._frames_since_cache_refresh += 1
-        result = dict(self._cached_channels)
-        for name, (root, path) in _TELEMETRY_PATHS.items():
-            if name not in _CACHED_CHANNELS:
-                result[name] = self._read_one(root, path)
-        return result
+        the other sixty-one do not need asking about.
+
+        Held under _reading for the whole frame, so the handle cannot be let go
+        part-way through one - see disconnect().
+
+        Returns None if the handle has already gone, which is a shutdown rather than a
+        fault: stream_samples() tests the handle before this runs, on the event loop,
+        and disconnect() can take it between that test and this thread starting. The
+        test that decides is therefore this one, under the lock disconnect() waits
+        on."""
+        with self._reading:
+            if self._odrv is None:
+                return None
+            if self._frames_since_cache_refresh >= CACHED_REFRESH_FRAMES:
+                self._refresh_cached_channels()
+            self._frames_since_cache_refresh += 1
+            result = dict(self._cached_channels)
+            for name, (root, path) in _TELEMETRY_PATHS.items():
+                if name not in _CACHED_CHANNELS:
+                    result[name] = self._read_one(root, path)
+            return result
 
     async def _set_axis_state(self, state: str) -> None:
         if state not in _AXIS_STATE_NAMES:
