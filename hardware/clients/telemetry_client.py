@@ -24,7 +24,8 @@ affected; the deadline only fires when the stream genuinely goes silent.
 """
 from __future__ import annotations
 
-from typing import Iterable, Iterator
+import threading
+from typing import Iterable, Iterator, List
 
 import zmq
 
@@ -41,8 +42,29 @@ class TelemetryTimeout(TimeoutError):
     that care can tell a silent-stream timeout apart from other errors."""
 
 
+class ConcurrentTelemetryRead(RuntimeError):
+    """Raised when two threads read one TelemetryClient.
+
+    ONE CONSUMER PER CLIENT. A ZeroMQ SUB socket is not thread-safe, and two
+    threads in recv_multipart() at once interleave: each takes part of a
+    two-part message and both are left holding a fragment. That surfaced as
+    `ValueError: not enough values to unpack (expected 2, got 1)` from a caller
+    that had nothing to do with either thread.
+
+    The crash is the lesser half. A subscription delivers each frame ONCE, so
+    two readers of one client divide the stream between them rather than each
+    seeing all of it - and when one of them is LiveRulebookRunner, the fatal
+    bounds are evaluated on whichever frames the other reader did not take
+    first, silently. Both halves go away by giving each consumer its own client
+    on the same endpoint, which is what the testbeds do."""
+
+
 class TelemetryClient:
-    """Subscriber for the hardware driver's raw telemetry stream."""
+    """Subscriber for the hardware driver's raw telemetry stream.
+
+    NOT SHARED BETWEEN THREADS - see ConcurrentTelemetryRead. A testbed that
+    hands one client to a runner and reads another itself opens two clients on
+    the same endpoint."""
 
     def __init__(self, endpoint: str = DEFAULT_TELEMETRY_ENDPOINT, timeout_s: float = 5.0):
         self._ctx = zmq.Context.instance()
@@ -53,6 +75,36 @@ class TelemetryClient:
         self._timeout_s = timeout_s
         self._poller = zmq.Poller()
         self._poller.register(self._socket, zmq.POLLIN)
+        self._reader = threading.Lock()
+        """Held across each receive, never waited on: it is a detector, not a
+        guard. Serializing two readers would stop the crash and leave them
+        splitting the stream, which is the worse half of the bug - so a second
+        thread is told what it has done instead of being made to queue."""
+
+    def _recv_frame(self) -> bytes:
+        """The payload of one message already reported ready by the poller.
+
+        The topic frame is dropped: it is the subscription filter, not data.
+        Both halves are checked rather than unpacked, so a message that is not
+        the expected [topic, payload] pair says what arrived - a bare unpack
+        reports only that a tuple was the wrong size, from a stack frame that
+        does not mention telemetry at all."""
+        if not self._reader.acquire(blocking=False):
+            raise ConcurrentTelemetryRead(
+                "this TelemetryClient is already being read by another thread - "
+                "give each consumer its own client on the same endpoint"
+            )
+        try:
+            parts: List[bytes] = self._socket.recv_multipart()
+        finally:
+            self._reader.release()
+        if len(parts) != 2:
+            raise ConcurrentTelemetryRead(
+                f"expected a [topic, payload] telemetry message, got {len(parts)} "
+                "part(s) - a torn message, which means this client is being read "
+                "by more than one thread"
+            )
+        return parts[1]
 
     def frames(self) -> Iterator[TelemetryFrame]:
         """Blocking generator of telemetry frames. Iterate with a
@@ -70,8 +122,7 @@ class TelemetryClient:
                     f"no telemetry frame within {self._timeout_s:.1f}s - "
                     "hardware driver or publisher may have stopped"
                 )
-            _, raw = self._socket.recv_multipart()
-            yield TelemetryFrame.from_bytes(raw)
+            yield TelemetryFrame.from_bytes(self._recv_frame())
 
     def discard_backlog(self) -> int:
         """Drop every frame already queued, and report how many.
@@ -87,7 +138,7 @@ class TelemetryClient:
         every frame."""
         dropped = 0
         while self._poller.poll(0):
-            self._socket.recv_multipart()
+            self._recv_frame()
             dropped += 1
         return dropped
 
@@ -106,8 +157,7 @@ class TelemetryClient:
         staleness deadline."""
         frame = next(self.frames())
         while self._poller.poll(0):
-            _, raw = self._socket.recv_multipart()
-            frame = TelemetryFrame.from_bytes(raw)
+            frame = TelemetryFrame.from_bytes(self._recv_frame())
         return frame
 
     def verify_channels(self, expected: Iterable[str]) -> None:

@@ -370,6 +370,8 @@ class ZdriveTestbed:
         self._command: Optional[OdriveCommandClient] = None
         self._telemetry: Optional[TelemetryClient] = None
         self._sync_telemetry: Optional[TelemetryClient] = None
+        self._sync_bus_telemetry: Optional[TelemetryClient] = None
+        self._sync_tc_daq_telemetry: Optional[TelemetryClient] = None
         self._supply: Optional[Cpx400dpCommandClient] = None
         self._supply_telemetry: Optional[TelemetryClient] = None
         self._bus: Optional[N6974aCommandClient] = None
@@ -455,9 +457,20 @@ class ZdriveTestbed:
         self._supply_telemetry = TelemetryClient(endpoint=DEFAULT_CPX400DP_TELEMETRY_ENDPOINT)
         self._bus = N6974aCommandClient(endpoint=DEFAULT_N6974A_COMMAND_ENDPOINT)
         self._bus_telemetry = TelemetryClient(endpoint=DEFAULT_N6974A_TELEMETRY_ENDPOINT)
+        self._sync_bus_telemetry = TelemetryClient(endpoint=DEFAULT_N6974A_TELEMETRY_ENDPOINT)
         self._tc_daq_telemetry = TelemetryClient(
             endpoint=DEFAULT_TC_DAQ_TELEMETRY_ENDPOINT, timeout_s=TC_DAQ_STALENESS_S
         )
+        self._sync_tc_daq_telemetry = TelemetryClient(
+            endpoint=DEFAULT_TC_DAQ_TELEMETRY_ENDPOINT, timeout_s=TC_DAQ_STALENESS_S
+        )
+        """A second subscription on the same endpoint, for this process's own reads.
+
+        The one above goes to LiveRulebookRunner, which reads it on a thread of its
+        own for the whole run. A SUB socket is not thread-safe and a subscription
+        delivers each frame once, so a testbed reading the runner's client would
+        both tear messages and take frames the bounds were meant to see - see
+        ConcurrentTelemetryRead. One client per consumer is what keeps them apart."""
 
         # Before waiting on a command server or a telemetry deadline: a driver
         # that has already exited will never answer, and its own log says why.
@@ -718,6 +731,7 @@ class ZdriveTestbed:
         self._safe("disconnect the motor bus backend", lambda: self.bus.disconnect_backend())
 
         for client in (self._command, self._telemetry, self._sync_telemetry,
+                       self._sync_bus_telemetry, self._sync_tc_daq_telemetry,
                        self._supply, self._supply_telemetry,
                        self._bus, self._bus_telemetry, self._tc_daq_telemetry):
             if client is not None:
@@ -725,7 +739,8 @@ class ZdriveTestbed:
         self._command = self._telemetry = self._sync_telemetry = None
         self._supply = self._supply_telemetry = None
         self._bus = self._bus_telemetry = None
-        self._tc_daq_telemetry = None
+        self._tc_daq_telemetry = self._sync_tc_daq_telemetry = None
+        self._sync_bus_telemetry = None
 
         for process in self._processes:
             self._safe(f"terminate pid {process.pid}", process.terminate)
@@ -810,7 +825,7 @@ class ZdriveTestbed:
         a limit wants the readings that exist rather than a None to guard against - and a
         channel going open is already fatal through the rulebook's own bound, which is a
         better place to notice it than a flow-control check."""
-        channels = self.tc_daq_telemetry.latest_frame().channels
+        channels = self.sync_tc_daq_telemetry.latest_frame().channels
         readings = {}
         for name, value in channels.items():
             if name.startswith("temperature_") and name.endswith("_c"):
@@ -921,7 +936,7 @@ class ZdriveTestbed:
 
         `voltage`, `current` and `power` all come from one acquisition, so they
         are simultaneous rather than read a sample apart."""
-        return self.bus_telemetry.latest_frame().channels
+        return self.sync_bus_telemetry.latest_frame().channels
 
     def get_brake_voltage(self) -> float:
         return self.get_supply_channels()[f"voltage_{BRAKE_BUS.output}"]
@@ -937,6 +952,20 @@ class ZdriveTestbed:
         supply absorbs regen."""
         return self.get_bus_channels()["current"]
 
+
+    @property
+    def sync_tc_daq_telemetry(self) -> TelemetryClient:
+        """This process's own thermocouple subscription - see the constructor."""
+        if self._sync_tc_daq_telemetry is None:
+            raise RuntimeError("ZdriveTestbed.sync_tc_daq_telemetry accessed before start()")
+        return self._sync_tc_daq_telemetry
+
+    @property
+    def sync_bus_telemetry(self) -> TelemetryClient:
+        """This process's own motor-bus subscription - see the constructor."""
+        if self._sync_bus_telemetry is None:
+            raise RuntimeError("ZdriveTestbed.sync_bus_telemetry accessed before start()")
+        return self._sync_bus_telemetry
 
     @property
     def tc_daq_telemetry(self) -> TelemetryClient:
