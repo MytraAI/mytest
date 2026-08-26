@@ -64,6 +64,29 @@ see ManualTest.
   Read at the ODrive rather than at the supply deliberately: what matters is the
   voltage where it is consumed, and with the sense leads open the two differ.
 
+- overspeed_bound: vel_estimate beyond +/-40 turns/s, fatal, no persistence.
+
+  THE LOAD IS MOVING FASTER THAN ANYTHING COMMANDED IT TO. This is the bound for
+  a fall: a disarmed axis on a loaded stand does not stop, it accelerates under
+  1000 lb, and every other bound here stays green while it does. Bus voltage is
+  nominal, bus current is zero because the drive is no longer drawing, phase
+  current is zero, nothing is hot. Without this the run records a drop and
+  reports a pass.
+
+  Both directions, because a load running away upward is the same fault as one
+  running away downward and neither is commanded. 40 turns/s is over twice the
+  23.8 turns/s peak seen across a 242-cycle run - the controller's own vel_limit
+  is 18 turns/s and the estimate overshoots it - and under half the 92.9 turns/s
+  a released 1000 lb load reached on this axis, so it separates a runaway from
+  the top of a normal stroke by a wide margin in both directions.
+
+  Undebounced. Like brake_slip_bound this cannot PREVENT a fall - at the
+  acceleration this axis showed, the load is past 40 turns/s within one telemetry
+  frame of letting go - and for the same reason debouncing it would be
+  meaningless: the second frame of a fall is not more informative than the first,
+  it is just later. What it buys is that the drop lands in the verdict as a fatal
+  violation instead of in the log as an error with PASSing bounds.
+
 - overtemperature_bound_<n>: temperature_<n>_c > 70C on every LIVE thermocouple
   channel, fatal, debounced 5s.
 
@@ -212,6 +235,18 @@ MIN_BUS_VOLTAGE_V = 10.5
 """Fatal floor on the DC bus measured at the ODrive - the same value as the
 board's dc_bus_undervoltage_trip_level."""
 
+MAX_AXIS_SPEED_TURNS_S = 40.0
+"""Fatal ceiling on axis speed in either direction: the load is no longer under
+control of anything that commands a velocity.
+
+Turns/s, matching the control path rather than METERS_PER_TURN - 40 turns/s is
+0.384 m/s - because what this is compared against is the controller's vel_limit,
+which is set in turns/s.
+
+Placed to separate a runaway from a stroke, with room on both sides: measured
+peaks over a 242-cycle run reach 23.8 turns/s against a controller vel_limit of
+18, and a released 1000 lb load on this axis reached 92.9."""
+
 BASE_ZDRIVE_TEST_NAME = "base_zdrive_test"
 MANUAL_TEST_NAME = "zdrive_manual_test"
 BRAKE_HOLD_TEST_NAME = "zdrive_brake_hold_test"
@@ -255,6 +290,13 @@ ZDRIVE_RULEBOOK = Rulebook(
             channel="board_vbus_voltage",
             lower=MIN_BUS_VOLTAGE_V,
             name="undervoltage_bound",
+            fatal=True,
+        ),
+        Bound(
+            channel="vel_estimate",
+            upper=MAX_AXIS_SPEED_TURNS_S,
+            lower=-MAX_AXIS_SPEED_TURNS_S,
+            name="overspeed_bound",
             fatal=True,
         ),
         Bound(

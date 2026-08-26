@@ -41,6 +41,8 @@ from testbeds.zdrive_testbed.zdrive_testbed import (
     BRAKE_BUS,
     MOTOR_BUS,
     N6974A_DISSIPATORS,
+    ODRIVE_BUS_HARD_MAX_A,
+    ODRIVE_BUS_SOFT_MAX_A,
     ODRIVE_MAX_REGEN_CURRENT_A,
     ODRIVE_MOTOR_HARD_MAX_A,
     ODRIVE_MOTOR_SOFT_MAX_A,
@@ -49,6 +51,7 @@ from testbeds.zdrive_testbed.zdrive_testbed import (
 )
 from testcases.zdrive.channels import DEFAULT_STATE
 from testcases.zdrive.rulebooks.zdrive_rulebook import (
+    MAX_AXIS_SPEED_TURNS_S,
     MAX_BUS_CURRENT_A,
     MAX_BUS_VOLTAGE_V,
     MAX_MOTOR_CURRENT_A,
@@ -181,6 +184,28 @@ def test_the_bus_setpoint_is_below_the_odrive_s_overvoltage_trip():
     the bus under that trip."""
     local_sense_high_v = MOTOR_BUS.voltage_v * 1.01
     assert local_sense_high_v < 55.0
+
+
+def test_the_odrive_draws_less_than_the_supply_will_source():
+    """The source-side mirror of the regen pair, and the direction of the
+    inequality matters for the same reason. If the supply's current limit were
+    the binding constraint it would leave voltage priority, and a constant-power
+    load past a current limit collapses the bus rather than sagging it - which
+    reaches the ODrive as DC_BUS_UNDER_VOLTAGE and drops whatever it was
+    holding."""
+    assert ODRIVE_BUS_SOFT_MAX_A < MOTOR_BUS.current_limit_a, (
+        "the ODrive may draw more than the supply will source"
+    )
+    assert ODRIVE_BUS_HARD_MAX_A < MOTOR_BUS.current_limit_a, (
+        "the drive's own trip sits above the supply's limit, so the bus collapses first"
+    )
+
+
+def test_the_bus_limits_are_ordered():
+    """Soft backs off torque, hard disarms. A soft limit at or above the hard one
+    would mean the controller is allowed to command its way straight into a trip
+    instead of slowing down - the same ordering the motor limits keep."""
+    assert ODRIVE_BUS_SOFT_MAX_A < ODRIVE_BUS_HARD_MAX_A
 
 
 def test_the_motor_limits_are_ordered():
@@ -442,6 +467,33 @@ def test_the_bus_bounds_agree_with_what_the_testbed_programs():
     assert MAX_MOTOR_CURRENT_A == ODRIVE_MOTOR_HARD_MAX_A, (
         "the motor bound and the ODrive's programmed hard limit disagree"
     )
+
+
+def test_the_overspeed_bound_sits_above_a_stroke_and_below_a_fall():
+    """The one bound that catches a dropped load, so it has to clear the top of a
+    normal stroke without reaching the speed a released load runs away at.
+    Measured peaks over a 242-cycle run reach 23.8 turns/s; a released 1000 lb
+    load on this axis reached 92.9."""
+    assert MAX_AXIS_SPEED_TURNS_S > 23.8, "would fire at the top of a normal stroke"
+    assert MAX_AXIS_SPEED_TURNS_S < 92.9, "a released load would not reach it"
+
+
+def test_the_overspeed_bound_is_the_only_thing_a_fall_trips():
+    """A disarmed axis on a loaded stand stops drawing current before it starts
+    moving, so every electrical bound reads healthy through the whole fall. This
+    is what stops that reading as a pass."""
+    fall = {"vel_estimate": 92.9, "board_vbus_voltage": 48.0, "current": 0.0,
+            "motor_foc_iq_measured": 0.0, "voltage": 48.0}
+    violated = [
+        bound.label
+        for bound in ZDRIVE_RULEBOOK.bounds
+        if bound.channel in fall
+        and (
+            (bound.upper is not None and fall[bound.channel] > bound.upper)
+            or (bound.lower is not None and fall[bound.channel] < bound.lower)
+        )
+    ]
+    assert violated == ["overspeed_bound"]
 
 
 def test_the_overvoltage_bound_sits_above_operation_and_below_the_odrive_trip():
