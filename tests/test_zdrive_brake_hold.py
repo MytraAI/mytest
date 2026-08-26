@@ -490,7 +490,7 @@ def test_the_run_is_attributable_in_the_verdict():
     # to say how high it went, since that is now a per-test choice.
     assert metadata["top_position_turns"] == BrakeHoldTest.TOP_POSITION
     assert metadata["hold_s"] == BrakeHoldTest.HOLD_S
-    assert metadata["brake_holds"] == 0
+    assert metadata["loaded_brake_holds"] == 0
 
 
 # --- tuning -----------------------------------------------------------------

@@ -256,3 +256,62 @@ def test_the_test_is_registered_and_in_the_rulebook():
     assert CycleBrakeHoldTest.TEST_NAME == CYCLE_BRAKE_HOLD_TEST_NAME
     assert CYCLE_BRAKE_HOLD_TEST_NAME in TEST_NAMES
     assert "zdrive.cycle_brake_hold" in REGISTERED_TESTS
+
+
+# --- what the review turned up -----------------------------------------------
+
+
+def test_the_wait_is_a_named_step_so_a_still_stand_is_not_reported_as_moving():
+    """A cycle can sit at the bottom for minutes. Without this, current_step still reads
+    move_to and an operator watching the dashboard sees the stand described as moving."""
+    stand = FakeStand(fet=30.0)
+    case = ThermalCase(stand)
+
+    wait_for_thermal_headroom(case)
+
+    assert case.state["current_step"] == "wait_for_thermal_headroom"
+
+
+def test_the_wait_count_is_published_once_per_outcome():
+    """One write per path. It was written twice per iteration, which published the same
+    number to the same channel back to back for no reason."""
+    stand = FakeStand(fet=30.0)
+    case = ThermalCase(stand)
+    writes = []
+    real = case.set_state
+    case.set_state = lambda name, value: (writes.append(name), real(name, value))[1]
+
+    wait_for_thermal_headroom(case)
+
+    assert writes.count("thermal_waits") == 1
+
+
+def test_the_distance_baseline_goes_through_the_testbed_not_a_channel_name():
+    """Which ODrive channel carries the travel count is the driver's business. A test
+    reaching into get_channels() by name is a module knowing a fact about a device it
+    does not own."""
+    import inspect
+
+    source = inspect.getsource(CycleBrakeHoldTest.main_execution)
+
+    assert "get_distance_travelled_m()" in source
+    assert "turns_traveled" not in source
+
+
+def test_the_dwell_is_measured_rather_than_computed_from_the_wait_count():
+    """Each temperature check blocks for a frame from two devices, so DWELL_S plus
+    waits x THERMAL_WAIT_S is close and not true - and this channel exists to say what
+    actually happened."""
+    import inspect
+
+    source = inspect.getsource(CycleBrakeHoldTest.main_execution)
+
+    assert "time.monotonic()" in source
+    assert "waits * THERMAL_WAIT_S" not in source
+
+
+def test_only_loaded_holds_are_counted_and_the_name_says_so():
+    """The brake engages twice a cycle - at the top carrying 1000 lb, and at the bottom
+    where the load is already on its stop and it holds nothing. Only the first is wear."""
+    assert "loaded_brake_holds" in DEFAULT_STATE
+    assert "brake_holds" not in DEFAULT_STATE

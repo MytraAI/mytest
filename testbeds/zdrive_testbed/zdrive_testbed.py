@@ -766,6 +766,15 @@ class ZdriveTestbed:
         consuming .telemetry (e.g. LiveRulebookRunner)."""
         return self.sync_telemetry.latest_frame().channels
 
+    def get_distance_travelled_m(self) -> float:
+        """Metres of travel the axis has covered since its driver connected.
+
+        The driver counts the path frame by frame, so every reversal is in it - see the
+        odrive's turns_traveled. Cumulative from connect rather than from a run, so a
+        caller wanting one run's travel takes the difference. Here rather than in a test
+        because which ODrive channel carries it is the driver's business, not a test's."""
+        return turns_to_metres(self.get_channels()["turns_traveled"])
+
     def get_fet_temperature_c(self) -> float:
         """The inverter FET temperature, in Celsius, off the ODrive's own thermistor.
 

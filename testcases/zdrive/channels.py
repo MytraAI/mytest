@@ -41,7 +41,13 @@ DEFAULT_STATE: Dict[str, Any] = {
     # against which ticket, without anyone keeping a separate note. Published
     # under a channel name rather than a label, so rewording the prompt cannot
     # rename the channel stored runs are keyed by.
-    "brake_holds": 0,
+    "loaded_brake_holds": 0,
+    # Holds where the brake was actually carrying the load, which is the count that
+    # means anything for wear. CycleBrakeHoldTest engages the brake twice per cycle -
+    # once at the top, where it holds 1000 lb, and once at the bottom, where the load
+    # is already resting on its hard stop and the brake is holding nothing. Only the
+    # first is counted, and the name says so rather than leaving a reader to work out
+    # which of the two a bare "brake_holds" meant.
     "brake_slip_m": 0.0,
     "total_distance_m": 0.0,
     "bottom_dwell_s": 0.0,

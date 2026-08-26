@@ -19,6 +19,7 @@ travelled.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, Optional
 
 from protocol.wire import DEVICE_ODRIVE
@@ -45,7 +46,6 @@ from ..teststeps.teststeps import (
     release_brake_in_place,
     set_tuning_params,
     wait_for_thermal_headroom,
-    THERMAL_WAIT_S,
 )
 from .base_zdrive_test import BaseZdriveTest
 
@@ -148,13 +148,13 @@ class BrakeHoldTest(_LiftingZdriveTest):
 
     def __init__(self, test_id: Optional[str] = None, use_mock: bool = False, require_engine: bool = True):
         super().__init__(test_id, use_mock, require_engine=require_engine)
-        self.brake_holds = 0
+        self.loaded_brake_holds = 0
 
     def result_metadata(self) -> dict:
         """What this run was, for the verdict."""
         return {
             **self.run_details,
-            "brake_holds": self.brake_holds,
+            "loaded_brake_holds": self.loaded_brake_holds,
             "top_position_turns": self.TOP_POSITION,
             "hold_s": self.HOLD_S,
         }
@@ -202,11 +202,11 @@ class BrakeHoldTest(_LiftingZdriveTest):
         )
 
         slip = hold_on_brake(self, self.HOLD_S, origin)
-        self.brake_holds += 1
-        self.set_state("brake_holds", self.brake_holds)
+        self.loaded_brake_holds += 1
+        self.set_state("loaded_brake_holds", self.loaded_brake_holds)
         logger.info(
             "test %s: brake hold %d complete, slipped %+.6f m",
-            self.test_id, self.brake_holds, slip,
+            self.test_id, self.loaded_brake_holds, slip,
         )
 
         # In place again, deliberately: if the brake slipped, the axis is no
@@ -240,7 +240,7 @@ class CycleBrakeHoldTest(_LiftingZdriveTest):
 
     def __init__(self, test_id: Optional[str] = None, use_mock: bool = False, require_engine: bool = True):
         super().__init__(test_id, use_mock, require_engine=require_engine)
-        self.brake_holds = 0
+        self.loaded_brake_holds = 0
         self._distance_at_run_start_m: Optional[float] = None
         """What the driver's travel counter read when this run's cycling began. None until
         main_execution seeds it, which is what holds the derived channels back until there
@@ -251,7 +251,7 @@ class CycleBrakeHoldTest(_LiftingZdriveTest):
         """What this run was, for the verdict."""
         return {
             **self.run_details,
-            "brake_holds": self.brake_holds,
+            "loaded_brake_holds": self.loaded_brake_holds,
             "total_distance_m": self.total_distance_m,
             "top_position_turns": self.TOP_POSITION,
             "hold_s": self.HOLD_S,
@@ -306,9 +306,7 @@ class CycleBrakeHoldTest(_LiftingZdriveTest):
 
         # After setup, so the hand-positioning above is not counted as this run's
         # travel. The driver's counter runs from its own connect.
-        self._distance_at_run_start_m = turns_to_metres(
-            self.testbed.get_channels()["turns_traveled"]
-        )
+        self._distance_at_run_start_m = self.testbed.get_distance_travelled_m()
 
         release_brake_in_place(self)
 
@@ -316,8 +314,8 @@ class CycleBrakeHoldTest(_LiftingZdriveTest):
             move_to(self, origin + self.TOP_POSITION)
 
             slip_m = hold_on_brake(self, self.HOLD_S, origin)
-            self.brake_holds += 1
-            self.set_state("brake_holds", self.brake_holds)
+            self.loaded_brake_holds += 1
+            self.set_state("loaded_brake_holds", self.loaded_brake_holds)
 
             # In place, deliberately: if the brake slipped, the axis is no longer
             # where the move left the setpoint.
@@ -327,18 +325,21 @@ class CycleBrakeHoldTest(_LiftingZdriveTest):
             # Brake on and axis idle for the dwell. The load is on its hard stop, so
             # nothing here depends on either of them holding it.
             engage_brake(self)
+            dwell_from = time.monotonic()
             self.wait_for(self.DWELL_S)
 
-            # Then the temperatures, in the one state where waiting is free. The dwell
-            # this publishes is the whole of it, waits included, so a cycle that cooled
-            # down first can be told from one that did not - the brake enters the next
-            # hold at a different temperature, and slip is compared across them.
+            # Then the temperatures, in the one state where waiting is free. Measured
+            # rather than computed from DWELL_S and the wait count: each temperature
+            # check blocks for a frame from two devices, so the arithmetic would be
+            # close and not true. What it is for is telling a cycle that cooled down
+            # first from one that did not - the brake enters the next hold at a
+            # different temperature, and slip is compared across them.
             waits = wait_for_thermal_headroom(self)
-            self.set_state("bottom_dwell_s", self.DWELL_S + waits * THERMAL_WAIT_S)
+            self.set_state("bottom_dwell_s", time.monotonic() - dwell_from)
 
             logger.info(
                 "test %s: hold %d complete, slipped %+.6f m, %.1f m travelled in all%s",
-                self.test_id, self.brake_holds, slip_m, self.total_distance_m,
+                self.test_id, self.loaded_brake_holds, slip_m, self.total_distance_m,
                 f", after {waits} thermal wait(s)" if waits else "",
             )
 

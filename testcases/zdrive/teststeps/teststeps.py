@@ -821,6 +821,7 @@ def temperatures_need_a_wait(test_case: BaseZdriveTest) -> Optional[str]:
     return None
 
 
+@step
 def wait_for_thermal_headroom(test_case: BaseZdriveTest) -> int:
     """Block until nothing on the stand is too hot to lift, and report how long it took.
 
@@ -833,22 +834,28 @@ def wait_for_thermal_headroom(test_case: BaseZdriveTest) -> int:
 
     Called with the load on its bottom stop, the brake engaged and the axis idle, which
     is the only state in this cycle where waiting an arbitrary length of time costs
-    nothing and risks nothing."""
+    nothing and risks nothing. Nothing, precisely: the load is on its hard stop so
+    neither the brake nor the controller is carrying it, and this brake is
+    magnet-applied - engaged is the rail UNPOWERED, so a wait of any length draws no
+    coil current at all (see ZdriveTestbed's BRAKE_BUS).
+
+    A step, so a stand sitting still for minutes is not reported as whatever move ran
+    last. It contains no other step, so it can be one."""
     waits = 0
     while True:
         objection = temperatures_need_a_wait(test_case)
-        test_case.set_state("thermal_waits", waits)
         if objection is None:
+            test_case.set_state("thermal_waits", waits)
             if waits:
                 logger.info("test %s: cool enough to lift after %d wait(s)",
                             test_case.test_id, waits)
             return waits
         waits += 1
+        test_case.set_state("thermal_waits", waits)
         logger.warning(
             "test %s: %s - holding at the bottom for %.0f s (wait %d)",
             test_case.test_id, objection, THERMAL_WAIT_S, waits,
         )
-        test_case.set_state("thermal_waits", waits)
         test_case.wait_for(THERMAL_WAIT_S)
 
 
