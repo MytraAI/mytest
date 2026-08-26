@@ -284,10 +284,10 @@ def test_the_bounded_channel_is_seeded_so_a_fresh_run_can_start():
 
 
 def test_the_bound_is_a_gross_fault_net_not_a_performance_figure():
-    """0.25 m is 26 turns. A healthy stop is a fraction of a turn, because the axis
+    """0.25 m is 23.6 turns. A healthy stop is a fraction of a turn, because the axis
     is close to self-locking - so this catches the brake AND the screw having let
     go, rather than grading a brake."""
-    assert MAX_STOPPING_DISTANCE_M / METERS_PER_TURN == pytest.approx(26.04, abs=0.01)
+    assert MAX_STOPPING_DISTANCE_M / METERS_PER_TURN == pytest.approx(23.63, abs=0.01)
     assert MAX_STOPPING_DISTANCE_M < abs(BrakeEnduranceTest.TOP_POSITION) * METERS_PER_TURN
 
 

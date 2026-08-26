@@ -325,13 +325,13 @@ powering it RELEASES the brake. 120 W is inside the envelope, so this rail does
 get real current
 limiting."""
 
-METERS_PER_TURN = 0.0096
+METERS_PER_TURN = 0.01058
 """How far the load travels per motor turn.
 
 Stand geometry, so it lives with the stand rather than in whichever test needed
 it first: every test that reports a distance or a speed in the units an operator
-thinks in converts through this. The 0.528 m of stroke is 55 turns; 0.48 m is the
-50 turns a cycling hold lifts to.
+thinks in converts through this. The 0.582 m of stroke is 55 turns; 0.529 m is
+the 50 turns a cycling hold lifts to.
 
 Metres, matching ydrive. This was millimetres, and the argument for that was real:
 this axis is short and a brake slip lands around a micron, which in metres is a
