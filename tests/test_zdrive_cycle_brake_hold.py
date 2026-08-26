@@ -1,10 +1,11 @@
 """CycleBrakeHoldTest: the brake hold, repeated, with the stand's temperatures deciding
 when it may lift again.
 
-Two things this test asserts that no other zdrive test does: that a hold which slipped
-measurably ends the run, and that a stand too hot to lift waits at the bottom instead of
-lifting anyway. Everything about the second is arithmetic against limits declared
-elsewhere, which is the point - a second copy of a limit is a limit that drifts.
+Three things this test asserts that no other zdrive test does: that a hold which slipped
+measurably ends the run, that a stand too hot to lift waits at the bottom instead of
+lifting anyway, and that the brake is handed the load on one cycle in HOLD_INTERVAL_CYCLES
+rather than on all of them. Everything about the second is arithmetic against limits
+declared elsewhere, which is the point - a second copy of a limit is a limit that drifts.
 """
 from __future__ import annotations
 
@@ -258,6 +259,119 @@ def test_the_test_is_registered_and_in_the_rulebook():
     assert "zdrive.cycle_brake_hold" in REGISTERED_TESTS
 
 
+# --- the hold schedule -------------------------------------------------------
+
+
+def _holds_within(test, cycles=30):
+    """Which of the first `cycles` cycles hand the load to the brake."""
+    return [cycle for cycle in range(1, cycles + 1) if test.hold_is_due(cycle)]
+
+
+def test_the_brake_takes_the_load_once_every_ten_cycles():
+    """The nine between are a lift and a lower under the controller, with the brake
+    released throughout - so the drive accumulates duty ten times faster than the brake
+    accumulates loaded holds."""
+    assert CycleBrakeHoldTest.HOLD_INTERVAL_CYCLES == 10
+    assert _holds_within(_case()) == [10, 20, 30]
+
+
+def test_every_hold_is_earned_by_a_full_interval_of_duty():
+    """Holds land on the multiples rather than one cycle in from them, so each measures a
+    brake that has just done nine lifts. Nothing before cycle 10 holds, which is also why
+    a run ending inside its first ten cycles records no slip."""
+    test = _case()
+
+    assert not any(test.hold_is_due(cycle) for cycle in range(1, 10))
+    assert test.hold_is_due(10)
+
+
+def test_an_interval_of_one_holds_on_every_cycle():
+    """The schedule is a generalisation rather than a mode: an interval of 1 is the
+    every-cycle sequence, with no branch of its own to keep working."""
+    test = CycleBrakeHoldTest(require_engine=False, hold_interval_cycles=1)
+
+    assert _holds_within(test, cycles=5) == [1, 2, 3, 4, 5]
+
+
+def test_the_interval_can_be_overridden_without_editing_the_class():
+    """As BrakeEnduranceTest takes a slower trigger speed - a shakedown wanting holds
+    sooner should not need a source edit."""
+    test = CycleBrakeHoldTest(require_engine=False, hold_interval_cycles=3)
+
+    assert _holds_within(test, cycles=10) == [3, 6, 9]
+
+
+@pytest.mark.parametrize("interval", [0, -1])
+def test_an_interval_below_one_is_refused_before_the_run_starts(interval):
+    """A zero would raise on the first modulo instead: partway through a cycle, after the
+    operator has answered the prompt and gone, with the load already lifted."""
+    with pytest.raises(ValueError):
+        CycleBrakeHoldTest(require_engine=False, hold_interval_cycles=interval)
+
+
+@pytest.mark.parametrize("interval", [True, 10.0, "10"])
+def test_an_interval_that_is_not_a_whole_number_of_cycles_is_refused(interval):
+    """True is an int to isinstance and would quietly mean an interval of 1 - every cycle
+    holding, on a run launched to do the opposite. A float clears the modulo and is then
+    recorded through an integer format."""
+    with pytest.raises(TypeError):
+        CycleBrakeHoldTest(require_engine=False, hold_interval_cycles=interval)
+
+
+def test_the_next_hold_is_reported_off_the_counter_that_decides_it():
+    """What the log claims and what the loop does come from lift_cycles alone. Derived
+    from the holds instead, a path that ever declined a due hold would leave every later
+    line naming a cycle already past, with nothing disagreeing."""
+    test = _case()
+
+    for completed in range(0, 30):
+        test.lift_cycles = completed
+        owed = test.next_hold_number()
+        falls_on = owed * CycleBrakeHoldTest.HOLD_INTERVAL_CYCLES
+
+        assert falls_on > completed, "a hold cannot be owed on a cycle already run"
+        assert test.hold_is_due(falls_on), "the cycle it names must be one that holds"
+        assert not any(
+            test.hold_is_due(c) for c in range(completed + 1, falls_on)
+        ), "and must be the FIRST such cycle"
+
+
+def test_the_cycle_count_is_of_finished_cycles():
+    """lift_cycles and total_distance_m are read together, so they have to describe the
+    same work: a run that dies on the way up must not report a cycle whose travel the
+    distance beside it only partly contains. The schedule therefore asks about the cycle
+    ABOUT to run, which is one past the last completed."""
+    import inspect
+
+    source = inspect.getsource(CycleBrakeHoldTest.main_execution)
+
+    assert "cycle = self.lift_cycles + 1" in source
+    assert source.index("wait_for_thermal_headroom") < source.index(
+        "self.lift_cycles = cycle"
+    ), "the count advances only once the cycle is back down and read"
+
+
+def test_the_drive_s_duty_and_the_brake_s_wear_are_separate_counts():
+    """Neither recovers the other: the holds do not say how far the drive worked, and
+    the cycles do not say how often the brake carried the load."""
+    assert "lift_cycles" in DEFAULT_STATE
+    assert "loaded_brake_holds" in DEFAULT_STATE
+
+
+def test_a_stored_run_carries_the_schedule_it_ran_under():
+    """A count of holds cannot be compared across runs without it - the same 41 holds is
+    41 cycles of duty at an interval of 1 and 410 at an interval of 10."""
+    test = _case()
+    test.lift_cycles = 410
+    test.loaded_brake_holds = 41
+
+    metadata = test.result_metadata()
+
+    assert metadata["hold_interval_cycles"] == 10
+    assert metadata["lift_cycles"] == 410
+    assert metadata["loaded_brake_holds"] == 41
+
+
 # --- what the review turned up -----------------------------------------------
 
 
@@ -311,7 +425,8 @@ def test_the_dwell_is_measured_rather_than_computed_from_the_wait_count():
 
 
 def test_only_loaded_holds_are_counted_and_the_name_says_so():
-    """The brake engages twice a cycle - at the top carrying 1000 lb, and at the bottom
-    where the load is already on its stop and it holds nothing. Only the first is wear."""
+    """The brake engages at the bottom of every cycle, where the load is already on its
+    stop and it holds nothing, and at the top only on the cycles that measure it. Only
+    the second is wear."""
     assert "loaded_brake_holds" in DEFAULT_STATE
     assert "brake_holds" not in DEFAULT_STATE
