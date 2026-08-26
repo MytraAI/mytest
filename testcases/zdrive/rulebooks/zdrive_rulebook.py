@@ -87,11 +87,11 @@ see ManualTest.
   violated, so these carry TC_DROPOUT_GRACE_S instead, longer because this DAQ
   drops the odd sample and one dropped sample is not a lost sensor.
 
-- stopping_distance_bound: stopping_distance_mm > 250, fatal, no persistence.
+- stopping_distance_bound: stopping_distance_m > 0.25, fatal, no persistence.
 
   NOT A HARDWARE CHANNEL. BrakeEnduranceTest publishes each brake event's stopping
   distance as run state, and the runner merges published state into what it
-  evaluates - so a brake that no longer stops the load in 250 mm aborts the run
+  evaluates - so a brake that no longer stops the load in 0.25 m aborts the run
   through the same path as any bus or motor bound, and the number that did it lands
   in the verdict's timeline instead of only in a log line.
 
@@ -105,10 +105,10 @@ see ManualTest.
   on a channel carrying no value is unevaluable, and the runner treats unevaluable
   as a stop, so None would end every run on its first frame.
 
-  A GROSS-FAULT NET, NOT A PERFORMANCE FIGURE. 250 mm is 26 turns, and a healthy
+  A GROSS-FAULT NET, NOT A PERFORMANCE FIGURE. 0.25 m is 26 turns, and a healthy
   stop from this test's trigger speed is a fraction of a turn - the axis is
   effectively self-locking, so the screw stops the load about as much as the brake
-  does. A stop that ran to 250 mm would mean the brake and the screw had both let
+  does. A stop that ran to 0.25 m would mean the brake and the screw had both let
   go. Placed to catch that rather than to grade a brake.
 
 TEST_NAMES lists every concrete zdrive TestCase.TEST_NAME that starts a runner
@@ -161,13 +161,15 @@ bounded. Stand configuration: unplug one and this has to change with it, because
 a numeric bound on an unread channel is unevaluable and stops every run on its
 first frame."""
 
-MAX_STOPPING_DISTANCE_MM = 250.0
+MAX_STOPPING_DISTANCE_M = 0.25
 """How far the load may travel after the brake is commanded, measured from the
 command rather than from when the brake bites - so it includes the coast through
 BRAKE_SETTLE_S.
 
-Millimetres, matching ZdriveTestbed.MM_PER_TURN: 250 mm is 26 turns of this
-drive."""
+Metres, matching ZdriveTestbed.METERS_PER_TURN: 0.25 m is 26 turns of this drive.
+Measured stops on a 1000 lb load ran 0.060 to 0.073 m, and that figure is known to
+UNDER-report - the baseline is taken a telemetry frame after the brake was
+commanded, which at the speeds involved omits 0.043 to 0.083 m."""
 
 MIN_BUS_VOLTAGE_V = 10.5
 """Fatal floor on the DC bus measured at the ODrive - the same value as the
@@ -217,8 +219,8 @@ ZDRIVE_RULEBOOK = Rulebook(
             fatal=True,
         ),
         Bound(
-            channel="stopping_distance_mm",
-            upper=MAX_STOPPING_DISTANCE_MM,
+            channel="stopping_distance_m",
+            upper=MAX_STOPPING_DISTANCE_M,
             name="stopping_distance_bound",
             fatal=True,
         ),

@@ -20,11 +20,11 @@ import textwrap
 
 import pytest
 
-from testbeds.zdrive_testbed.zdrive_testbed import MM_PER_TURN, Motion
+from testbeds.zdrive_testbed.zdrive_testbed import METERS_PER_TURN, Motion
 from testcases.zdrive.channels import DEFAULT_STATE
 from testcases.zdrive.rulebooks.zdrive_rulebook import (
     BRAKE_ENDURANCE_TEST_NAME,
-    MAX_STOPPING_DISTANCE_MM,
+    MAX_STOPPING_DISTANCE_M,
     TEST_NAMES,
     ZDRIVE_RULEBOOK,
 )
@@ -194,7 +194,7 @@ def test_the_fall_is_bounded_by_position_as_well_as_speed():
     distance = brake_from_speed(case, target=TARGET, trigger_speed=TRIGGER, backstop_turns=20.0)
     assert "brake:engage" in testbed.calls
     assert distance > 0
-    assert case.state["brake_speed_turns_s"] < TRIGGER
+    assert case.state["brake_speed_m_s"] < TRIGGER
 
 
 # --- what the measurement is baselined on -----------------------------------
@@ -205,11 +205,11 @@ def test_the_distance_is_baselined_after_the_brake_command_not_on_the_trigger():
     charge that frame's coasting to the brake. The frame after the rail drops is
     the first one the brake has been asked to do anything about."""
     _, _, distance = _brake_once()
-    expected = (RESTED_POSITION - BASELINE_POSITION) * MM_PER_TURN
+    expected = (RESTED_POSITION - BASELINE_POSITION) * METERS_PER_TURN
     assert distance == pytest.approx(expected)
 
     trigger_frame_position = FRAMES[2][0]
-    from_trigger = (RESTED_POSITION - trigger_frame_position) * MM_PER_TURN
+    from_trigger = (RESTED_POSITION - trigger_frame_position) * METERS_PER_TURN
     assert distance < from_trigger, "still measuring from the trigger frame"
 
 
@@ -218,16 +218,16 @@ def test_the_recorded_speed_is_the_one_the_brake_saw_not_the_trigger():
     the engagement speed is below the trigger. What was asked for lives in the
     run's metadata instead."""
     case, _, _ = _brake_once()
-    assert case.state["brake_speed_turns_s"] == pytest.approx(BASELINE_VELOCITY)
-    assert case.state["brake_speed_turns_s"] < FRAMES[2][1], "recorded the trigger frame"
+    assert case.state["brake_speed_m_s"] == pytest.approx(BASELINE_VELOCITY * METERS_PER_TURN)
+    assert case.state["brake_speed_m_s"] < FRAMES[2][1], "recorded the trigger frame"
 
 
 def test_the_distance_and_speed_come_off_the_same_frame():
     """A speed from one frame and a position from another describe two different
     instants, which is not a measurement of anything."""
     case, _, distance = _brake_once()
-    assert case.state["brake_speed_turns_s"] == pytest.approx(BASELINE_VELOCITY)
-    assert distance == pytest.approx((RESTED_POSITION - BASELINE_POSITION) * MM_PER_TURN)
+    assert case.state["brake_speed_m_s"] == pytest.approx(BASELINE_VELOCITY * METERS_PER_TURN)
+    assert distance == pytest.approx((RESTED_POSITION - BASELINE_POSITION) * METERS_PER_TURN)
 
 
 def test_creep_across_the_rest_counts_against_the_distance():
@@ -236,14 +236,14 @@ def test_creep_across_the_rest_counts_against_the_distance():
     _, _, distance = _brake_once()
     settled_position = FRAMES[-2][0]
     assert RESTED_POSITION > settled_position, "the fixture has no creep to count"
-    assert distance > (settled_position - BASELINE_POSITION) * MM_PER_TURN
+    assert distance > (settled_position - BASELINE_POSITION) * METERS_PER_TURN
 
 
 def test_the_distance_is_published_in_millimetres():
     """The bound is written in millimetres, so the channel has to be."""
     case, _, distance = _brake_once()
-    assert case.state["stopping_distance_mm"] == pytest.approx(distance)
-    assert distance == pytest.approx(1.6 * MM_PER_TURN)
+    assert case.state["stopping_distance_m"] == pytest.approx(distance)
+    assert distance == pytest.approx(1.6 * METERS_PER_TURN)
 
 
 # --- the failures it has to report ------------------------------------------
@@ -265,10 +265,10 @@ def test_a_brake_that_never_stops_the_load_raises():
 def test_the_stopping_distance_bound_is_fatal_and_undebounced():
     """One bad stop IS the event: it is one number per brake event, not a sampled
     signal that can spike, so debouncing would mean waiting for a second one."""
-    bound = next(b for b in ZDRIVE_RULEBOOK.bounds if b.channel == "stopping_distance_mm")
+    bound = next(b for b in ZDRIVE_RULEBOOK.bounds if b.channel == "stopping_distance_m")
     assert bound.fatal
     assert bound.persistence_s is None
-    assert bound.upper == MAX_STOPPING_DISTANCE_MM == 250.0
+    assert bound.upper == MAX_STOPPING_DISTANCE_M == 0.25
     assert bound.lower is None
 
 
@@ -276,19 +276,19 @@ def test_the_bounded_channel_is_seeded_so_a_fresh_run_can_start():
     """A numeric bound on a channel carrying no value is unevaluable, and the
     runner treats unevaluable as a stop - so None here would end every run on its
     first frame, before anything moved."""
-    assert DEFAULT_STATE["stopping_distance_mm"] == 0.0
-    assert DEFAULT_STATE["brake_speed_turns_s"] == 0.0
+    assert DEFAULT_STATE["stopping_distance_m"] == 0.0
+    assert DEFAULT_STATE["brake_speed_m_s"] == 0.0
     assert DEFAULT_STATE["brake_cycles"] == 0
-    bound = next(b for b in ZDRIVE_RULEBOOK.bounds if b.channel == "stopping_distance_mm")
+    bound = next(b for b in ZDRIVE_RULEBOOK.bounds if b.channel == "stopping_distance_m")
     assert bound.evaluate(DEFAULT_STATE) is False, "a fresh run must be able to start"
 
 
 def test_the_bound_is_a_gross_fault_net_not_a_performance_figure():
-    """250 mm is 26 turns. A healthy stop is a fraction of a turn, because the axis
+    """0.25 m is 26 turns. A healthy stop is a fraction of a turn, because the axis
     is close to self-locking - so this catches the brake AND the screw having let
     go, rather than grading a brake."""
-    assert MAX_STOPPING_DISTANCE_MM / MM_PER_TURN == pytest.approx(26.04, abs=0.01)
-    assert MAX_STOPPING_DISTANCE_MM < abs(BrakeEnduranceTest.TOP_POSITION) * MM_PER_TURN
+    assert MAX_STOPPING_DISTANCE_M / METERS_PER_TURN == pytest.approx(26.04, abs=0.01)
+    assert MAX_STOPPING_DISTANCE_M < abs(BrakeEnduranceTest.TOP_POSITION) * METERS_PER_TURN
 
 
 # --- the test case ----------------------------------------------------------

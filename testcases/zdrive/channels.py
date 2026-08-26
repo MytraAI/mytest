@@ -6,7 +6,7 @@ stream from frame 1 instead of appearing when a step first computes them.
 THIS IS NOT COSMETIC. The telemetry engine fixes a wide file's header from the
 first HEADER_SAMPLE_FRAMES it sees and drops any channel that appears later. The
 drivers are already publishing before a run's first step runs, so a channel first
-written partway through a sequence - `brake_slip_turns` is written only after the
+written partway through a sequence - `brake_slip_m` is written only after the
 hold, tens of seconds in - would be logged once and dropped, and the measurement
 the run exists to take would be missing from the recorded file while the run
 reported a clean pass.
@@ -42,22 +42,22 @@ DEFAULT_STATE: Dict[str, Any] = {
     # under a channel name rather than a label, so rewording the prompt cannot
     # rename the channel stored runs are keyed by.
     "brake_holds": 0,
-    "brake_slip_turns": None,
+    "brake_slip_m": None,
     # How far the load moved while the brake alone held it. None rather than 0.0
     # until a hold has happened, because 0.0 would read as a perfect hold that
     # never took place - and unlike a numeric Bound's channel, nothing bounds
     # this, so None costs nothing here.
     "brake_cycles": 0,
-    "brake_speed_turns_s": 0.0,
-    "stopping_distance_mm": 0.0,
+    "brake_speed_m_s": 0.0,
+    "stopping_distance_m": 0.0,
     # The last brake-from-speed event: how fast the load was moving when the brake
     # was commanded, and how far it then travelled. In turns/s because that is the
     # unit the trigger is set in, so the number asked for and the number recorded
     # are directly comparable; in millimetres because that is the unit the bound is
     # written in and what an operator measures with.
     #
-    # Seeded 0.0, not None, unlike brake_slip_turns above: zdrive_rulebook bounds
-    # stopping_distance_mm, a numeric bound on a channel carrying no value is
+    # Seeded 0.0, not None, unlike brake_slip_m above: zdrive_rulebook bounds
+    # stopping_distance_m, a numeric bound on a channel carrying no value is
     # unevaluable, and unevaluable stops a run - so None here would abort every run
     # on its first frame, before anything moved. The cost is that rows before the
     # first brake event read as a stop in no distance rather than as no stop yet.

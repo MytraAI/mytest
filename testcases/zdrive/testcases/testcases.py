@@ -138,7 +138,7 @@ class BrakeHoldTest(_LiftingZdriveTest):
     HOLD_S = 5.0
     """How long the brake holds the load at the top with the axis idle. The whole
     measurement: nothing but the brake opposes the load's weight for this long,
-    and `brake_slip_turns` is what moved."""
+    and `brake_slip_m` is what moved."""
 
     def __init__(self, test_id: Optional[str] = None, use_mock: bool = False, require_engine: bool = True):
         super().__init__(test_id, use_mock, require_engine=require_engine)
@@ -199,7 +199,7 @@ class BrakeHoldTest(_LiftingZdriveTest):
         self.brake_holds += 1
         self.set_state("brake_holds", self.brake_holds)
         logger.info(
-            "test %s: brake hold %d complete, slipped %+.3f turns",
+            "test %s: brake hold %d complete, slipped %+.6f m",
             self.test_id, self.brake_holds, slip,
         )
 
@@ -304,7 +304,7 @@ class BrakeEnduranceTest(_LiftingZdriveTest):
 
         # All three streams: the bus bounds are the supply's channels, the motor
         # bounds the ODrive's and the thermal bounds the DAQ's, and no device
-        # publishes another's. stopping_distance_mm is published state rather than
+        # publishes another's. stopping_distance_m is published state rather than
         # a device channel, and the runner merges state into what it evaluates.
         self.runner.start(
             self.testbed.telemetry,
@@ -331,7 +331,7 @@ class BrakeEnduranceTest(_LiftingZdriveTest):
             # Straight from that hold into the drop: the axis is already idle, so
             # releasing the brake is the whole of it and the controller never
             # enters the loop.
-            stopping_distance_mm = brake_from_speed(
+            stopping_distance_m = brake_from_speed(
                 self,
                 target=origin + self.BOTTOM_POSITION,
                 trigger_speed=self._trigger_speed,
@@ -340,18 +340,18 @@ class BrakeEnduranceTest(_LiftingZdriveTest):
             self.brake_cycles += 1
             self.set_state("brake_cycles", self.brake_cycles)
             logger.info(
-                "test %s: brake cycle %d complete - slipped %+.3f turns at the top, "
-                "stopped in %.1f mm",
-                self.test_id, self.brake_cycles, slip, stopping_distance_mm,
+                "test %s: brake cycle %d complete - slipped %+.6f m at the top, "
+                "stopped in %.3f m",
+                self.test_id, self.brake_cycles, slip, stopping_distance_m,
             )
 
             # Finish the descent under the controller, at the ordinary velocity
             # limit - the drop above is the only uncontrolled part of a cycle.
             #
             # AFTER the brake event, deliberately: a bad stop publishes
-            # stopping_distance_mm, stopping_distance_bound fires on it, and this
+            # stopping_distance_m, stopping_distance_bound fires on it, and this
             # step's entry check raises before anything drives the load. So the one
-            # cycle that ends with a brake which could not stop the load in 250 mm
+            # cycle that ends with a brake which could not stop the load in 0.25 m
             # is also the one that never moves it afterwards.
             release_brake_in_place(self)
             move_to(self, origin + self.BOTTOM_POSITION)

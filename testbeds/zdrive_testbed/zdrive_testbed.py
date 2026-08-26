@@ -252,22 +252,36 @@ powering it RELEASES the brake. 120 W is inside the envelope, so this rail does
 get real current
 limiting."""
 
-MM_PER_TURN = 9.6
+METERS_PER_TURN = 0.0096
 """How far the load travels per motor turn.
 
 Stand geometry, so it lives with the stand rather than in whichever test needed
 it first: every test that reports a distance or a speed in the units an operator
-thinks in converts through this. The 528 mm of stroke is 55 turns; 192 mm is the
-20 turns a brake hold lifts to.
+thinks in converts through this. The 0.528 m of stroke is 55 turns; 0.48 m is the
+50 turns a cycling hold lifts to.
 
-Millimetres rather than metres, unlike ydrive's METERS_PER_TURN, because this
-axis is short and what it measures is small: a brake slip here lands under a
-micron, which in metres is a column of leading zeros. THE CONTROL PATH STAYS IN
-TURNS - this converts for reporting, and nothing commands a position through it.
+Metres, matching ydrive. This was millimetres, and the argument for that was real:
+this axis is short and a brake slip lands around a micron, which in metres is a
+column of leading zeros. What outweighed it is that one stand had ended up with
+both a distance in mm and an accumulating total that only reads sensibly in m -
+a cycling run covers kilometres - and a stand carrying two length units is a
+stand where somebody eventually reads the wrong column, in a FATAL bound.
+
+THE CONTROL PATH STAYS IN TURNS: this converts for reporting, and nothing
+commands a position through it. TRIGGER_SPEED_TURNS_S is a control input and
+deliberately stays in turns/s, which is the one place this stand still differs
+from ydrive's TRIGGER_SPEED_M_S.
 
 A converted figure is not automatically a measured one: the load encoder's
 resolution sets the floor, and a slip of a few counts is the smallest travel this
 stand can distinguish from zero."""
+
+def turns_to_metres(turns: float) -> float:
+    """Turns of the motor as metres of travel. Reporting only - see METERS_PER_TURN.
+
+    A function because a run's derived channels evaluate on the state publisher's
+    thread, where reaching through a testbed to a telemetry socket would be a race."""
+    return float(turns) * METERS_PER_TURN
 
 RAILS = (BRAKE_BUS,)
 """Every CPX400DP output this stand uses. start() iterates this to configure
