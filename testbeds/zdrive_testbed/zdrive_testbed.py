@@ -65,7 +65,7 @@ from hardware.odrive.odrive_channels import (
 from hardware.odrive.odrive_command_client import OdriveCommandClient
 from hardware.tc_daq.tc_daq_channels import TELEMETRY_CHANNELS as TC_DAQ_TELEMETRY_CHANNELS
 from hardware.tc_daq.transport import SILENCE_TIMEOUT_S as TC_DAQ_SILENCE_TIMEOUT_S
-from protocol.paths import driver_log_path
+from protocol.paths import driver_console_path, driver_log_path
 from protocol.wire import (
     DEFAULT_CPX400DP_COMMAND_ENDPOINT,
     DEFAULT_CPX400DP_TELEMETRY_ENDPOINT,
@@ -353,6 +353,13 @@ class ZdriveTestbed:
             return []
         return ["--log-file", str(driver_log_path(self._output_dir, self._test_id, device))]
 
+    def _console_path(self, device: str):
+        """Where to capture this device's raw stdout/stderr, or None if this testbed
+        wasn't told which run it belongs to - see start_driver()."""
+        if self._output_dir is None or self._test_id is None:
+            return None
+        return driver_console_path(self._output_dir, self._test_id, device)
+
     def start(self) -> None:
         """Bring all four drivers up, verify their channel surfaces, and
         configure the motor bus, the brake rail and the ODrive's current limits -
@@ -399,8 +406,10 @@ class ZdriveTestbed:
         ]
 
         self._processes = [
-            start_driver(odrive_args), start_driver(supply_args), start_driver(bus_args),
-            start_driver(tc_daq_args),
+            start_driver(odrive_args, self._console_path(DEVICE_ODRIVE)),
+            start_driver(supply_args, self._console_path(DEVICE_CPX400DP)),
+            start_driver(bus_args, self._console_path(DEVICE_N6974A)),
+            start_driver(tc_daq_args, self._console_path(DEVICE_TC_DAQ)),
         ]
         self._device_for_process = [
             DEVICE_ODRIVE, DEVICE_CPX400DP, DEVICE_N6974A, DEVICE_TC_DAQ,

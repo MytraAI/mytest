@@ -55,7 +55,7 @@ from hardware.vision_home.vision_home_channels import (
 )
 from hardware.vision_home.vision_home_command_client import VisionHomeCommandClient
 from hardware.tc_daq.transport import SILENCE_TIMEOUT_S as TC_DAQ_SILENCE_TIMEOUT_S
-from protocol.paths import driver_log_path
+from protocol.paths import driver_console_path, driver_log_path
 from testcases.utils import Stopwatch
 from protocol.wire import (
     DEFAULT_CPX400DP_COMMAND_ENDPOINT,
@@ -294,6 +294,13 @@ class YdriveTestbed:
             return []
         return ["--log-file", str(driver_log_path(self._output_dir, self._test_id, device))]
 
+    def _console_path(self, device: str):
+        """Where to capture this device's raw stdout/stderr, or None if this testbed
+        wasn't told which run it belongs to - see start_driver()."""
+        if self._output_dir is None or self._test_id is None:
+            return None
+        return driver_console_path(self._output_dir, self._test_id, device)
+
     def start(self) -> None:
         """Bring all three drivers up, verify their channel surfaces, and configure both rails'
         setpoints - with the outputs left OFF. Energizing is a test's decision, not a testbed's."""
@@ -335,8 +342,10 @@ class YdriveTestbed:
         ]
 
         self._processes = [
-            start_driver(odrive_args), start_driver(supply_args),
-            start_driver(tc_daq_args), start_driver(vision_args),
+            start_driver(odrive_args, self._console_path(DEVICE_ODRIVE)),
+            start_driver(supply_args, self._console_path(DEVICE_CPX400DP)),
+            start_driver(tc_daq_args, self._console_path(DEVICE_TC_DAQ)),
+            start_driver(vision_args, self._console_path(DEVICE_VISION_HOME)),
         ]
         self._device_for_process = [
             DEVICE_ODRIVE, DEVICE_CPX400DP, DEVICE_TC_DAQ, DEVICE_VISION_HOME

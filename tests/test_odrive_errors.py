@@ -10,10 +10,12 @@ the frame rate buries everything around it, which is the same as not logging it.
 from __future__ import annotations
 
 import logging
+import sys
+import threading
 
 import pytest
 
-from hardware.driver_logging import PROJECT_LOGGERS, configure
+from hardware.driver_logging import PROJECT_LOGGERS, configure, restore_crash_capture
 from hardware.odrive import odrive_errors as oe
 from hardware.odrive.odrive_backend import OdriveBackend
 
@@ -245,12 +247,19 @@ def isolated_logging():
     configure() appends handlers to the root logger, so a test that does not
     remove its own would leak a FileHandler into every later test. Only handlers
     added during the test are closed - closing the ones pytest installed breaks
-    caplog for everything that follows."""
+    caplog for everything that follows.
+
+    It also installs interpreter-wide crash hooks, which leak the same way and are
+    worse: pytest owns threading.excepthook to report a thread that died, and
+    faulthandler would keep a deleted tmp_path file open. See restore_crash_capture."""
     root = logging.getLogger()
     before = list(root.handlers)
     before_level = root.level
     before_levels = {name: logging.getLogger(name).level for name in PROJECT_LOGGERS}
+    before_hooks = (sys.excepthook, threading.excepthook)
     yield root
+    restore_crash_capture()
+    sys.excepthook, threading.excepthook = before_hooks
     for handler in root.handlers:
         if handler not in before:
             handler.close()
