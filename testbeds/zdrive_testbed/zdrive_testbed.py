@@ -129,19 +129,37 @@ testbed connects their backends. Only socket binding happens here - each
 backend's own connect() runs when connect_backend() is called below, and carries
 its own timeout."""
 
-N6974A_HOST = "169.254.160.111"
+N6974A_HOST = "192.168.50.10"
 """This stand's motor-bus supply, serial MY63000121.
 
-Not a stable address, and observed to move within a single session: the
-instrument self-assigns a link-local address, so it takes a new one whenever it
-is power-cycled - which on this stand is routine, because the N7909A dissipator
-is only discovered at power-on. `A-N6974A-00121.local` is the same instrument by
-mDNS name and follows it. Pass either as ZdriveTestbed(n6974a_host=...)."""
+STATIC, on a private subnet of its own, after self-assignment cost an evening.
+The instrument was set to DHCP on a segment with no DHCP server, so it drew a
+fresh link-local address every power cycle - and this stand power-cycles it
+routinely, because the N7909A dissipator is only discovered at power-on. It
+moved three times in one session while a fixed address here went stale.
+
+It has its own adapter and subnet: the supply is 192.168.50.10/24 and the
+stand's "Ethernet 3" is 192.168.50.1/24, which leaves the brake supply
+undisturbed on the other adapter (see CPX400DP_HOST, still self-assigned).
+
+NOT A LINK-LOCAL ADDRESS, deliberately. 169.254.0.0/16 is reserved for
+automatic self-assignment (RFC 3927), and a statically-entered address in that
+range is a spec violation: setting this instrument to a static 169.254 address
+raised a network fault on its front panel while SCPI still reported it healthy
+(STATus:QUEStionable? +0, empty error queue). A real static configuration needs
+a private subnet on the instrument AND on every host that talks to it.
+
+Pass an override as ZdriveTestbed(n6974a_host=...)."""
 
 N6974A_MDNS_HOST = "A-N6974A-00121.local"
 """The same supply by mDNS name: it advertises itself as `A-<model>-<serial>
-.local`, which follows it when its address changes. Needs an mDNS responder on
-the host - macOS has one built in, a Windows or CentOS stand may not."""
+.local`, which follows an address that moves. Needs an mDNS responder on the host
+- macOS has one built in, a Windows or CentOS stand may not.
+
+Kept, but no longer the answer to a moving address: N6974A_HOST is static now, so
+there is nothing to follow. It is the fallback if that static configuration is ever
+reset, which is how the instrument arrived at three different addresses in one
+evening. Untested from the Windows stand, where the responder may not exist."""
 
 N6974A_DISSIPATORS = 1
 """How many Keysight N7909A power dissipator units are cabled to the supply.
