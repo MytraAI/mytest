@@ -17,6 +17,15 @@ takes, the bus rises and the external clamp on this stand dissipates the
 overflow - autonomously, on its own threshold, reporting nothing to any channel
 here.
 
+THE SOURCING DIRECTION IS PAIRED THE SAME WAY, by ODRIVE_BUS_SOFT_MAX_A against
+MOTOR_BUS.current_limit_a: the drive is permitted to draw less than the supply is
+programmed to deliver, so what limits a lift is the drive backing off its torque
+rather than the supply leaving voltage priority. The failure that ordering exists
+to prevent is not a sag. A motor controller is a constant-power load, so past the
+supply's current limit it pulls harder as the voltage drops, and the bus collapses
+through the ODrive's undervoltage trip in less time than a telemetry frame -
+dropping whatever the axis was holding.
+
 THE BRAKE IS MAGNET-APPLIED, AND SO FAIL-SAFE. A permanent magnet supplies the
 holding force, so the brake is engaged whenever its rail is unpowered; powering
 CPX400DP output 1 cancels that field and releases it. Losing the rail therefore
@@ -216,10 +225,16 @@ in current priority mode"`. What holds the bus to 48 V is the setpoint itself,
 check_rails() confirming it, and zdrive_rulebook's bus_overvoltage_bound at
 52 V.
 
-25 A is this model's rated output, so the positive limit is set wide on purpose:
-current limiting for this stand is the ODrive's soft/hard phase limits, and a
-supply limit below the rating would make zdrive_rulebook's bus_current_bound
-unfireable - the same trap ydrive's overcurrent_bound fell into.
+25 A is this model's rated output, and the positive limit is left there on
+purpose: a supply limit below the rating would make zdrive_rulebook's
+bus_current_bound unfireable - the same trap ydrive's overcurrent_bound fell
+into.
+
+WHAT HOLDS BUS CURRENT UNDER IT IS ODRIVE_BUS_SOFT_MAX_A, at the drive, not this
+number. The motor phase limits do not do it: bus current is mechanical power over
+bus voltage, so at constant load it rises with SPEED while phase current stays
+flat, and a lift can sit well inside its phase limits while drawing the supply's
+full rating.
 
 -12.75 A is the whole sinking capability one N7909A gives a 2 kW model, and it is
 programmed rather than inherited: recognising a dissipator raises what the
@@ -240,6 +255,46 @@ supply's willingness to absorb is never the constraint, because when it is, the
 bus rises and the external clamp fires on a threshold nothing here can see. This
 is persistent ODrive state and the board ships it at 0.0, which returns no regen
 at all and leaves a two-quadrant supply with nothing to do."""
+
+ODRIVE_BUS_SOFT_MAX_A = 22.0
+"""How much current the ODrive may draw from the supply before it backs off.
+
+The binding half of the SOURCE pair, and the mirror of ODRIVE_MAX_REGEN_CURRENT_A
+on the sinking side: it sits below MOTOR_BUS.current_limit_a so the supply's
+willingness to source is never the constraint. When it is, the supply leaves
+voltage priority, and a constant-power load behind a current limit pulls harder
+as the voltage falls - so the bus does not sag, it collapses. What the ODrive
+reports for that is DC_BUS_UNDER_VOLTAGE, at a threshold volts below anything
+this stand measures.
+
+`axis0.config.I_bus_soft_max`, which the controller enforces by REDUCING TORQUE
+rather than by tripping - unlike I_bus_hard_max or config.dc_max_positive_current,
+which disarm. So this caps lift SPEED, not lifting force: at constant load a
+slower lift draws less bus current. A lift that reaches this limit finishes, a
+little slower. It does not stall.
+
+22 A rather than something nearer the supply's 25 A because bus current at the
+DRIVE runs above what the supply reports - the ODrive's own bus capacitance
+supplies the peaks - and it is the supply that has to stay inside its limit.
+Measured on a 1000 lb load, peaks reach 26 A at the drive against 24.5 A at the
+supply.
+
+Persistent ODrive state, and the board ships it at inf: uncapped in both the soft
+and the hard direction."""
+
+ODRIVE_BUS_HARD_MAX_A = 24.0
+"""The bus current at which the ODrive disarms itself rather than draw more.
+
+`axis0.config.I_bus_hard_max`, and the backstop to ODRIVE_BUS_SOFT_MAX_A exactly
+as ODRIVE_MOTOR_HARD_MAX_A is to the soft phase limit: the soft limit is what the
+controller aims to hold, this is what happens when it cannot. The 2 A between
+them is transient headroom, so measured bus current may overshoot what the
+controller allows without the axis tripping.
+
+Still below MOTOR_BUS.current_limit_a, so a runaway is stopped by the drive's own
+trip while the supply is still regulating. Above the supply's limit there is no
+trip left to reach - the bus collapses instead, and every threshold that reads
+volts sees it only afterwards."""
 
 ODRIVE_MOTOR_SOFT_MAX_A = 55.0
 """The motor phase current the controller is allowed to command.
@@ -570,18 +625,24 @@ class ZdriveTestbed:
         )
 
     def _configure_odrive_limits(self) -> None:
-        """Program the ODrive's regen cap and motor current limits.
+        """Program the ODrive's bus current limits and its motor current limits.
 
         These are persistent device state, written every run so the stand does
         not depend on what the last person to touch the board left behind. The
-        regen cap in particular ships at 0.0, which returns nothing to the supply
-        and would leave the two-quadrant bus doing no work at all."""
+        bus limits in particular ship at 0.0 for regen - which returns nothing to
+        the supply and would leave the two-quadrant bus doing no work at all -
+        and at inf for draw, which lets the drive pull the supply out of
+        regulation."""
         self.command.set_board_config_max_regen_current(ODRIVE_MAX_REGEN_CURRENT_A)
+        self.command.set_axis_config_i_bus_soft_max(ODRIVE_BUS_SOFT_MAX_A)
+        self.command.set_axis_config_i_bus_hard_max(ODRIVE_BUS_HARD_MAX_A)
         self.command.set_motor_config_current_soft_max(ODRIVE_MOTOR_SOFT_MAX_A)
         self.command.set_motor_config_current_hard_max(ODRIVE_MOTOR_HARD_MAX_A)
         logger.info(
-            "ODrive limits configured: regen cap %.1f A (bus sinks to %.2f A), motor phase "
-            "current %.1f A soft / %.1f A hard",
+            "ODrive limits configured: bus draw %.1f A soft / %.1f A hard (supply sources to "
+            "%.1f A), regen cap %.1f A (bus sinks to %.2f A), motor phase current %.1f A soft / "
+            "%.1f A hard",
+            ODRIVE_BUS_SOFT_MAX_A, ODRIVE_BUS_HARD_MAX_A, MOTOR_BUS.current_limit_a,
             ODRIVE_MAX_REGEN_CURRENT_A, MOTOR_BUS.sink_current_limit_a,
             ODRIVE_MOTOR_SOFT_MAX_A, ODRIVE_MOTOR_HARD_MAX_A,
         )
