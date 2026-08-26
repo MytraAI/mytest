@@ -103,11 +103,26 @@ LATCHED_CHANNELS: Tuple[str, ...] = (
     "active_errors",
     "disarm_reason",
     "detailed_disarm_reason",
-    "last_drv_fault",
     "axis_procedure_result",
 )
-"""What `clear_errors()` resets. These hold a fault until something clears them,
-which is why a stale one from a previous run blocks arming until it is."""
+"""What `clear_errors()` resets. These hold a value until something clears them.
+
+`last_drv_fault` is NOT among them - see RECORD_ONLY_CHANNELS."""
+
+RECORD_ONLY_CHANNELS: Tuple[str, ...] = ("last_drv_fault",)
+"""What `clear_errors()` does not touch, and nothing can: the gate driver's record
+of the last fault it saw.
+
+THE NAME IS THE SEMANTICS - the LAST fault, not a present one. It is written when
+the DRV chip faults and then kept for diagnosis, so once it is non-zero it stays
+non-zero for the life of the board's power. Treated as something to clear, it
+refuses every subsequent run: measured on 2026-08-26, a person switched the
+supplies off mid-run, the gate driver recorded its own rail collapsing as
+0x400000, and every restart afterwards failed with "still latched after being
+cleared" while `active_errors` read 0 and the board was fit.
+
+Recorded and logged, never a gate. A gate-driver failure that actually prevents
+operation says so through `active_errors`, which is what arming depends on."""
 
 CONDITION_CHANNELS: Tuple[str, ...] = (
     "commutmapper_status",
@@ -131,7 +146,19 @@ way until it moves. `encoder_onboard0_get_field_strength` quantifies it if the
 chip exposes it. A magnet that reads out of range at every position is a mounting
 problem, not something a test can clear."""
 
-ERROR_CHANNELS: Tuple[str, ...] = LATCHED_CHANNELS + CONDITION_CHANNELS
+ERROR_CHANNELS: Tuple[str, ...] = LATCHED_CHANNELS + RECORD_ONLY_CHANNELS + CONDITION_CHANNELS
+
+GATING_CHANNELS: Tuple[str, ...] = ("active_errors",) + CONDITION_CHANNELS
+"""What decides whether the board can operate NOW, and the only thing a caller
+should refuse to start on.
+
+Everything else watched here describes something that already happened -
+`disarm_reason` is why it last disarmed, `axis_procedure_result` how the last
+procedure ended, `last_drv_fault` what the gate driver last saw. History is worth
+recording and worth reading; it is not a reason to refuse a stand that is
+currently fit. The distinction is what stops an event nobody planned for -
+somebody switching the supplies off mid-run - from leaving the stand unusable
+until a person finds the one bit that is stuck."""
 
 STATE_CHANNELS: Tuple[str, ...] = ("axis_current_state",)
 """Watched so a fault can be read against it rather than because it is wrong: a
@@ -159,14 +186,19 @@ value after the bus is up is the reason an axis will refuse CLOSED_LOOP_CONTROL,
 and that is worth a line in the log rather than a silent refusal later."""
 
 _BENIGN: Dict[str, Tuple[Any, ...]] = {
-    "axis_procedure_result": (0,),  # SUCCESS
+    "axis_procedure_result": (0, 1),  # SUCCESS, BUSY
     "commutmapper_status": _BENIGN_COMPONENT_STATUS,
     "posvelmapper_status": _BENIGN_COMPONENT_STATUS,
     "encoder_onboard0_status": _BENIGN_COMPONENT_STATUS,
 }
 """Values that mean "nothing wrong", for channels whose benign value is not
 simply an empty bitmask. Decides whether a transition is logged as a fault
-appearing, a fault clearing, or neither."""
+appearing, a fault clearing, or neither.
+
+BUSY IS PROGRESS, NOT A FAULT: it means a procedure is running right now, which
+is the normal state part-way through arming. Read as a fault it put a WARNING in
+the log on every single arm, and any check sampling the board mid-arm saw a stand
+that was working as one that was broken."""
 
 
 def decode_bitmask(value: Any, enum_name: str) -> str:
@@ -244,13 +276,29 @@ def faults_in_frame(channels: Dict[str, Any]) -> Dict[str, str]:
 
     For a caller deciding whether the board is fit to be armed, rather than one
     reporting what it is doing - describe_frame() decodes everything it can,
-    including the channels that are fine. Reads the watched set rather than a
-    caller's own list, so a fault in a channel that caller never thought of is
-    still seen."""
+    including the channels that are fine.
+
+    ONLY THE CHANNELS THAT CAN STOP IT OPERATING, which is not every watched
+    channel: see GATING_CHANNELS for why a record of a past fault must not refuse
+    a board that is presently fit, and records_in_frame() for reading those."""
     return {
         channel: describe(channel, channels[channel])
-        for channel in WATCHED_CHANNELS
+        for channel in GATING_CHANNELS
         if channel in channels and is_fault(channel, channels[channel])
+    }
+
+
+def records_in_frame(channels: Dict[str, Any]) -> Dict[str, str]:
+    """The watched channels describing something that already happened, decoded.
+
+    The other half of faults_in_frame(): what is worth recording about this board
+    without being a reason to refuse it - see GATING_CHANNELS."""
+    return {
+        channel: describe(channel, channels[channel])
+        for channel in RECORD_ONLY_CHANNELS + LATCHED_CHANNELS
+        if channel not in GATING_CHANNELS
+        and channel in channels
+        and is_fault(channel, channels[channel])
     }
 
 

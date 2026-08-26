@@ -379,6 +379,15 @@ class OdriveBackend(HardwareBackend):
         rather than a reader mid-frame."""
         self._AxisState = None
         self._ControlMode = None
+        self._inherited: Dict[str, str] = {}
+        """What was already reading as a fault on the board's FIRST frame, decoded.
+
+        State this run did not cause: the board keeps `last_drv_fault` and the latched
+        registers across a driver restart, so a run that follows an aborted one - or one
+        that followed somebody switching the supplies off - opens holding the previous
+        run's wreckage. Captured so a stored run says what it inherited, instead of a
+        reader having to find the previous run to know whether a value was this run's
+        doing. Empty on a board that came up clean."""
         self._last_watched: Dict[str, Any] = {}
         """Last seen value of each channel in odrive_errors.WATCHED_CHANNELS, so
         error logging can fire on change rather than on every frame."""
@@ -536,6 +545,8 @@ class OdriveBackend(HardwareBackend):
                 self._reading.release()
 
     async def get_status(self) -> dict:
+        """What this board is, and what it was already holding when this driver
+        connected - see _inherited."""
         self._require_connected()
         axis = self._odrv.axis0
         return {
@@ -543,6 +554,7 @@ class OdriveBackend(HardwareBackend):
             "serial_number": getattr(self._odrv, "serial_number", None),
             "axis_state": int(axis.current_state),
             "control_mode": int(axis.controller.config.control_mode),
+            "inherited_faults": dict(self._inherited),
         }
 
     async def execute(self, action: str, **params: Any) -> Any:
@@ -616,11 +628,20 @@ class OdriveBackend(HardwareBackend):
                 self._last_watched[channel] = current
                 if previous is _UNSET:
                     # First frame: report only what is already wrong, so a clean
-                    # start does not announce eight channels reading zero.
+                    # start does not announce eight channels reading zero. Kept as
+                    # this run's inherited state too - see _inherited - so what the
+                    # board arrived holding is in the record and not only in a log
+                    # line somebody has to go and find.
                     if odrive_errors.is_fault(channel, current):
+                        decoded = odrive_errors.describe(channel, current)
+                        self._inherited[channel] = decoded
+                        gates = channel in odrive_errors.GATING_CHANNELS
                         logger.warning(
-                            "%s is already set at startup: %s (%s)",
-                            channel, current, odrive_errors.describe(channel, current),
+                            "%s is already set at startup: %s (%s) - %s",
+                            channel, current, decoded,
+                            "this board cannot operate until it clears" if gates
+                            else "a record of something that already happened, not a "
+                                 "reason to refuse this run",
                         )
                     continue
                 line = odrive_errors.format_transition(channel, previous, current)
