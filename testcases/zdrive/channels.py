@@ -42,7 +42,21 @@ DEFAULT_STATE: Dict[str, Any] = {
     # under a channel name rather than a label, so rewording the prompt cannot
     # rename the channel stored runs are keyed by.
     "brake_holds": 0,
-    "brake_slip_m": None,
+    "brake_slip_m": 0.0,
+    "total_distance_m": 0.0,
+    "bottom_dwell_s": 0.0,
+    "thermal_waits": 0,
+    "fet_temperature_c": 0.0,
+    # How far the drive has travelled in all, how long the last bottom dwell
+    # actually took, how many 60 s thermal waits it contained, and what the FET read
+    # when that was decided. The dwell and the wait count are what let a cycle that
+    # cooled down first be told from one that did not: the brake enters the next hold
+    # at a different temperature, and slip is compared across them.
+    #
+    # Seeded 0.0 rather than None because a run records these from frame 1 and the
+    # engine drops a channel that first appears later. total_distance_m is derived
+    # (sampled every tick from the ODrive's turns_traveled) rather than published by a
+    # step, so its seed is what the record holds until the run's cycling begins.
     # How far the load moved while the brake alone held it. None rather than 0.0
     # until a hold has happened, because 0.0 would read as a perfect hold that
     # never took place - and unlike a numeric Bound's channel, nothing bounds
@@ -56,9 +70,15 @@ DEFAULT_STATE: Dict[str, Any] = {
     # are directly comparable; in millimetres because that is the unit the bound is
     # written in and what an operator measures with.
     #
-    # Seeded 0.0, not None, unlike brake_slip_m above: zdrive_rulebook bounds
-    # stopping_distance_m, a numeric bound on a channel carrying no value is
-    # unevaluable, and unevaluable stops a run - so None here would abort every run
-    # on its first frame, before anything moved. The cost is that rows before the
-    # first brake event read as a stop in no distance rather than as no stop yet.
+    # Seeded 0.0 rather than None, as brake_slip_m now is too: zdrive_rulebook puts a
+    # numeric bound on both, a numeric bound on a channel carrying no value is
+    # unevaluable, and unevaluable stops a run - so None would abort every run on its
+    # first frame, before anything moved.
+    #
+    # brake_slip_m WAS None, and the comment here used to contrast the two. It changed
+    # when brake_slip_bound was added: a channel stops being allowed to say "nothing
+    # has happened yet" the moment something bounds it. The cost, both times, is that
+    # rows before the first event read as a measurement of zero rather than as an
+    # absence - which for slip is at least the truthful answer, since a brake that has
+    # not been asked to hold anything has not slipped.
 }

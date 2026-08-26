@@ -766,6 +766,31 @@ class ZdriveTestbed:
         consuming .telemetry (e.g. LiveRulebookRunner)."""
         return self.sync_telemetry.latest_frame().channels
 
+    def get_fet_temperature_c(self) -> float:
+        """The inverter FET temperature, in Celsius, off the ODrive's own thermistor.
+
+        The drive's own thermal state, which no thermocouple on this stand measures: the
+        TCs are on the brake and the motor. The board derates its current limit above
+        board_config_inverter0_temp_limit_lower (83.96 C measured) and disarms above the
+        upper limit (103.11 C), and a derate would quietly change what a lift does."""
+        return float(self.get_channels()["motor_fet_thermistor_temperature"])
+
+    def get_tc_temperatures_c(self) -> Dict[int, float]:
+        """Every wired thermocouple, by channel number, in Celsius.
+
+        Only the channels carrying a number: this DAQ streams eight and reports FAULT for
+        one it cannot read, which the driver publishes as None. A caller comparing against
+        a limit wants the readings that exist rather than a None to guard against - and a
+        channel going open is already fatal through the rulebook's own bound, which is a
+        better place to notice it than a flow-control check."""
+        channels = self.tc_daq_telemetry.latest_frame().channels
+        readings = {}
+        for name, value in channels.items():
+            if name.startswith("temperature_") and name.endswith("_c"):
+                if isinstance(value, (int, float)):
+                    readings[int(name.split("_")[1])] = float(value)
+        return readings
+
     def get_supply_channels(self) -> Dict[str, object]:
         """Block for the next supply telemetry frame and return its channels.
 

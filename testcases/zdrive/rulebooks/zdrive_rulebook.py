@@ -87,6 +87,11 @@ see ManualTest.
   violated, so these carry TC_DROPOUT_GRACE_S instead, longer because this DAQ
   drops the odd sample and one dropped sample is not a lost sensor.
 
+- brake_slip_bound: brake_slip_m > 0.010, fatal. A brake-has-let-go trip, not
+  a wear threshold - measured slip is one encoder count. See MAX_BRAKE_SLIP_M.
+- fet_overtemperature_bound: motor_fet_thermistor_temperature > 80 C for 5 s,
+  fatal. Below the board's own 83.96 C derate point, and above the threshold at
+  which a cycling test stops lifting and waits. See MAX_FET_TEMPERATURE_C.
 - stopping_distance_bound: stopping_distance_m > 0.25, fatal, no persistence.
 
   NOT A HARDWARE CHANNEL. BrakeEnduranceTest publishes each brake event's stopping
@@ -171,6 +176,38 @@ Measured stops on a 1000 lb load ran 0.060 to 0.073 m, and that figure is known 
 UNDER-report - the baseline is taken a telemetry frame after the brake was
 commanded, which at the speeds involved omits 0.043 to 0.083 m."""
 
+MAX_BRAKE_SLIP_M = 0.010
+"""How far the load may slip while the brake alone is holding it.
+
+A "THE BRAKE HAS LET GO" TRIP, NOT A WEAR THRESHOLD, and the measurements say so: over
+73 holds of 5 s at 1000 lb the recorded slip was +/-0.000001 m, one encoder count. This
+is ten thousand times that, so nothing short of the brake releasing reaches it.
+
+It cannot prevent a fall either. At the free-fall acceleration this axis showed, a fully
+released brake covers 10 mm inside one telemetry frame, so by the time this fires the
+load is already moving. What it buys is that a brake which has failed does not get
+cycled another thousand times.
+
+What would catch WEAR is the trend in brake_slip_m across a run, which at one micron of
+resolution would show long before this threshold - and which no bound can express,
+because a threshold tight enough to see it would fire on encoder noise."""
+
+MAX_FET_TEMPERATURE_C = 80.0
+"""Fatal ceiling on the ODrive's own inverter FET thermistor.
+
+Below the 83.96 C at which this board begins derating its current limit, measured off
+the drive: past that point a lift gets less current than the test believes it asked for.
+Above teststeps.FET_WAIT_C, which is where a cycle stops lifting and waits - so reaching
+this one means the stand went on heating while it was already being held back, which is
+not a warm lab.
+
+Debounced, unlike undervoltage_bound: this is one thermistor sampled every frame, and a
+single bad reading should not end a run that may have been cycling for days."""
+
+FET_PERSISTENCE_S = 5.0
+"""How long the FET must stay above MAX_FET_TEMPERATURE_C before the run stops. The same
+5 s the thermocouples get, for the same reason."""
+
 MIN_BUS_VOLTAGE_V = 10.5
 """Fatal floor on the DC bus measured at the ODrive - the same value as the
 board's dc_bus_undervoltage_trip_level."""
@@ -179,12 +216,14 @@ BASE_ZDRIVE_TEST_NAME = "base_zdrive_test"
 MANUAL_TEST_NAME = "zdrive_manual_test"
 BRAKE_HOLD_TEST_NAME = "zdrive_brake_hold_test"
 BRAKE_ENDURANCE_TEST_NAME = "zdrive_brake_endurance_test"
+CYCLE_BRAKE_HOLD_TEST_NAME = "zdrive_cycle_brake_hold_test"
 
 TEST_NAMES = [
     BASE_ZDRIVE_TEST_NAME,
     MANUAL_TEST_NAME,
     BRAKE_HOLD_TEST_NAME,
     BRAKE_ENDURANCE_TEST_NAME,
+    CYCLE_BRAKE_HOLD_TEST_NAME,
 ]
 
 ZDRIVE_RULEBOOK = Rulebook(
@@ -217,6 +256,19 @@ ZDRIVE_RULEBOOK = Rulebook(
             lower=MIN_BUS_VOLTAGE_V,
             name="undervoltage_bound",
             fatal=True,
+        ),
+        Bound(
+            channel="brake_slip_m",
+            upper=MAX_BRAKE_SLIP_M,
+            name="brake_slip_bound",
+            fatal=True,
+        ),
+        Bound(
+            channel="motor_fet_thermistor_temperature",
+            upper=MAX_FET_TEMPERATURE_C,
+            name="fet_overtemperature_bound",
+            fatal=True,
+            persistence_s=FET_PERSISTENCE_S,
         ),
         Bound(
             channel="stopping_distance_m",

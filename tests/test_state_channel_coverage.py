@@ -33,9 +33,13 @@ import testcases
 SET_STATE_LITERAL = re.compile(r'set_state\(\s*"([A-Za-z_][A-Za-z0-9_]*)"')
 """set_state("name", ...) - a literal name only. A computed one has no literal to find."""
 
-DERIVED_KEY_LITERAL = re.compile(r'^\s*"([A-Za-z_][A-Za-z0-9_]*)":', re.M)
+DERIVED_KEY_LITERAL = re.compile(r'"([A-Za-z_][A-Za-z0-9_]*)"\s*:')
 """A key in the dict a derived_channels() implementation returns. Derived channels never
-pass through set_state() at a call site, so the sweep above cannot see them."""
+pass through set_state() at a call site, so the sweep above cannot see them.
+
+Not anchored to the start of a line, which it was: a one-line `return {"x": y}` was then
+invisible in both directions - unseeded and unnoticed, or seeded and reported as an
+orphan. A check whose answer depends on how the code was formatted is not a check."""
 
 FIELD_CHANNEL_LITERAL = re.compile(r'RunDetail\(\s*"[^"]*"\s*,\s*"([A-Za-z_][A-Za-z0-9_]*)"')
 """An operator-prompt field's channel. Published through the field object rather than by

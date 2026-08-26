@@ -67,6 +67,7 @@ from testbeds.zdrive_testbed.zdrive_testbed import (
     ZdriveTestbed,
 )
 from testcases.step import step
+from testcases.zdrive.rulebooks.zdrive_rulebook import MAX_TEMPERATURE_C
 from testcases.utils import Stopwatch, spawn_operator_prompt
 from testcases.zdrive.testcases.base_zdrive_test import BaseZdriveTest
 
@@ -765,6 +766,90 @@ def hold_on_brake(test_case: BaseZdriveTest, hold_s: float, origin: float = 0.0)
         test_case.test_id, hold_s, held_from - origin, slip_m, held_to - origin,
     )
     return slip_m
+
+
+FET_WAIT_C = 70.0
+"""FET temperature at or above which a cycle waits instead of lifting.
+
+Fourteen degrees below the 83.96 C at which this board starts derating its own current
+limit - measured off the drive, not a datasheet figure. A derate would reduce the
+current available to a lift without announcing it, which changes what the test does
+while the test goes on believing it did the same thing every cycle.
+
+The ER-64 run peaked at 32.0 C, but it was armed 2.6% of the time behind a 300 s dwell.
+A cycling hold is armed nearer half the time on the same 1000 lb load, so this threshold
+is expected to do real work rather than sit unused."""
+
+TC_HEADROOM_C = 5.0
+"""How close a thermocouple may get to its own fatal bound before a cycle waits.
+
+Against zdrive_rulebook's MAX_TEMPERATURE_C, so the wait tracks the bound rather than
+restating it: move the bound and this moves with it. Five degrees is enough to stop a
+cycle rather than the run - the alternative is a fatal bound firing on a stand that
+would have cooled if anything had asked it to."""
+
+THERMAL_WAIT_S = 60.0
+"""How long to wait before re-reading, when anything is too hot to lift."""
+
+
+def temperatures_need_a_wait(test_case: BaseZdriveTest) -> Optional[str]:
+    """Whether anything on this stand is too hot to start another lift, and which thing.
+
+    ONE PLACE THAT DECIDES, over all three sensors: the drive's own FET thermistor and
+    both wired thermocouples. Returns a description of the hottest objection, or None to
+    proceed. A caller waits and asks again.
+
+    The two limits are expressed differently on purpose. The FET has its own absolute
+    threshold, because what it is protecting against is the board silently derating. The
+    thermocouples are compared against their own fatal bound less a margin, because what
+    they are protecting against is that bound firing and ending the run - so the number
+    that matters is the one already declared, not a second copy of it."""
+    testbed: ZdriveTestbed = test_case.testbed
+    fet = testbed.get_fet_temperature_c()
+    test_case.set_state("fet_temperature_c", fet)
+    if fet >= FET_WAIT_C:
+        return f"the inverter FET is at {fet:.1f} C, at or above the {FET_WAIT_C:.0f} C ceiling"
+
+    tc_ceiling = MAX_TEMPERATURE_C - TC_HEADROOM_C
+    hot = {n: t for n, t in testbed.get_tc_temperatures_c().items() if t >= tc_ceiling}
+    if hot:
+        worst = max(hot, key=hot.get)
+        return (
+            f"thermocouple {worst} is at {hot[worst]:.1f} C, within {TC_HEADROOM_C:.0f} C "
+            f"of its {MAX_TEMPERATURE_C:.0f} C fatal bound"
+        )
+    return None
+
+
+def wait_for_thermal_headroom(test_case: BaseZdriveTest) -> int:
+    """Block until nothing on the stand is too hot to lift, and report how long it took.
+
+    Returns the number of THERMAL_WAIT_S waits, so a caller can record it. Unbounded,
+    deliberately: a stand that cannot cool is one whose cycle rate has collapsed, and
+    stopping the run over that would be worse than continuing slowly. What makes that
+    survivable rather than silent is that the count is published - a run quietly
+    producing a tenth of the cycles anyone expected looks exactly like a healthy run
+    otherwise.
+
+    Called with the load on its bottom stop, the brake engaged and the axis idle, which
+    is the only state in this cycle where waiting an arbitrary length of time costs
+    nothing and risks nothing."""
+    waits = 0
+    while True:
+        objection = temperatures_need_a_wait(test_case)
+        test_case.set_state("thermal_waits", waits)
+        if objection is None:
+            if waits:
+                logger.info("test %s: cool enough to lift after %d wait(s)",
+                            test_case.test_id, waits)
+            return waits
+        waits += 1
+        logger.warning(
+            "test %s: %s - holding at the bottom for %.0f s (wait %d)",
+            test_case.test_id, objection, THERMAL_WAIT_S, waits,
+        )
+        test_case.set_state("thermal_waits", waits)
+        test_case.wait_for(THERMAL_WAIT_S)
 
 
 ARM_SETTLE_S = 0.5

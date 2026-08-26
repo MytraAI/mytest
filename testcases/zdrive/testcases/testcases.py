@@ -19,11 +19,15 @@ travelled.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
+
+from protocol.wire import DEVICE_ODRIVE
+from testbeds.zdrive_testbed.zdrive_testbed import turns_to_metres
 
 from ..rulebooks.zdrive_rulebook import (
     BRAKE_ENDURANCE_TEST_NAME,
     BRAKE_HOLD_TEST_NAME,
+    CYCLE_BRAKE_HOLD_TEST_NAME,
     MANUAL_TEST_NAME,
 )
 from ..teststeps.teststeps import (
@@ -40,6 +44,8 @@ from ..teststeps.teststeps import (
     prompt_for_SN_ER_load,
     release_brake_in_place,
     set_tuning_params,
+    wait_for_thermal_headroom,
+    THERMAL_WAIT_S,
 )
 from .base_zdrive_test import BaseZdriveTest
 
@@ -208,6 +214,136 @@ class BrakeHoldTest(_LiftingZdriveTest):
         release_brake_in_place(self)
         move_to(self, origin + self.BOTTOM_POSITION)
 
+
+
+class CycleBrakeHoldTest(_LiftingZdriveTest):
+    """Repeats the brake hold indefinitely: lift to the top, hand the load to the brake for a hold, lower it back onto its stop and dwell - recording how far it slipped each time, how far the drive has travelled in all, and waiting at the bottom whenever the stand is too hot to lift again."""
+
+    TEST_NAME = CYCLE_BRAKE_HOLD_TEST_NAME
+
+    TOP_POSITION = -50.0
+    """Where each hold happens, in turns from the bottom. Negative: up is negative.
+
+    Five turns inside TOP_OF_STROKE, matching BrakeEnduranceTest. Targeting the declared
+    limit itself was considered and rejected: the measured overshoot on this axis is only
+    0.084 turns, but every target is relative to an origin a person sets by hand on their
+    stop, so the margin is only as good as that. It buys 2.6% more distance per hour and
+    costs 6.5% of the brake actuations, because the moves lengthen with the stroke."""
+
+    HOLD_S = 2.0
+    """How long the brake holds the load at the top with the axis idle. The measurement:
+    nothing but the brake opposes the load's weight for this long."""
+
+    DWELL_S = 2.0
+    """How long the load sits on its bottom stop between cycles, brake engaged and axis
+    idle, before the temperatures are checked."""
+
+    def __init__(self, test_id: Optional[str] = None, use_mock: bool = False, require_engine: bool = True):
+        super().__init__(test_id, use_mock, require_engine=require_engine)
+        self.brake_holds = 0
+        self._distance_at_run_start_m: Optional[float] = None
+        """What the driver's travel counter read when this run's cycling began. None until
+        main_execution seeds it, which is what holds the derived channels back until there
+        is something true to say: the counter runs from the driver's connect, and setup has
+        a person hand-moving the load onto its stop."""
+
+    def result_metadata(self) -> dict:
+        """What this run was, for the verdict."""
+        return {
+            **self.run_details,
+            "brake_holds": self.brake_holds,
+            "total_distance_m": self.total_distance_m,
+            "top_position_turns": self.TOP_POSITION,
+            "hold_s": self.HOLD_S,
+            "dwell_s": self.DWELL_S,
+        }
+
+    DERIVED_FROM_DEVICES = (DEVICE_ODRIVE,)
+
+    def derived_channels(self, latest: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        """How far the drive has travelled, sampled off the ODrive's own count of the path.
+
+        Sampled rather than pushed because it is a live quantity: a value written once per
+        cycle would read as a staircase whose steps are wherever the code happened to run.
+        turns_traveled counts frame to frame, so a lift and its return are both in it."""
+        frame = latest.get(DEVICE_ODRIVE)
+        if frame is None or self._distance_at_run_start_m is None:
+            return {}
+        travelled = (
+            turns_to_metres(frame["turns_traveled"]) - self._distance_at_run_start_m
+        )
+        return {"total_distance_m": travelled}
+
+    @property
+    def total_distance_m(self) -> float:
+        """This run's travel in metres, read back from the state the derivation publishes,
+        so there is one computation of it and the verdict cannot disagree with the record."""
+        return float(self.state_snapshot().get("total_distance_m", 0.0))
+
+    def main_execution(self) -> None:
+        # Asked first, while nothing is energized and the brake is still holding: it
+        # needs a person and does not need the stand, and a run nobody can attribute
+        # to a DUT is not worth the hours it takes.
+        self.run_details = prompt_for_SN_ER_load(self, self.RUN_DETAIL_FIELDS)
+
+        prepare_for_operation(self)
+        set_tuning_params(self)
+
+        # All three streams: the bus bounds are the supply's channels, the motor and
+        # slip bounds the ODrive's, and the thermal bounds the DAQ's. No device
+        # publishes another's.
+        self.runner.start(
+            self.testbed.telemetry,
+            self.testbed.bus_telemetry,
+            self.testbed.tc_daq_telemetry,
+        )
+
+        # The load is held by nothing while the operator works, which is safe only at
+        # the bottom of the stroke - see establish_origin_at_bottom(). No rig check
+        # after this one: -50 turns is qualified geometry, and a prompt that can only
+        # be answered once is not a gate on a run that repeats indefinitely.
+        origin = self._origin = establish_origin_at_bottom(self)
+
+        # After setup, so the hand-positioning above is not counted as this run's
+        # travel. The driver's counter runs from its own connect.
+        self._distance_at_run_start_m = turns_to_metres(
+            self.testbed.get_channels()["turns_traveled"]
+        )
+
+        release_brake_in_place(self)
+
+        while True:
+            move_to(self, origin + self.TOP_POSITION)
+
+            slip_m = hold_on_brake(self, self.HOLD_S, origin)
+            self.brake_holds += 1
+            self.set_state("brake_holds", self.brake_holds)
+
+            # In place, deliberately: if the brake slipped, the axis is no longer
+            # where the move left the setpoint.
+            release_brake_in_place(self)
+            move_to(self, origin + self.BOTTOM_POSITION)
+
+            # Brake on and axis idle for the dwell. The load is on its hard stop, so
+            # nothing here depends on either of them holding it.
+            engage_brake(self)
+            self.wait_for(self.DWELL_S)
+
+            # Then the temperatures, in the one state where waiting is free. The dwell
+            # this publishes is the whole of it, waits included, so a cycle that cooled
+            # down first can be told from one that did not - the brake enters the next
+            # hold at a different temperature, and slip is compared across them.
+            waits = wait_for_thermal_headroom(self)
+            self.set_state("bottom_dwell_s", self.DWELL_S + waits * THERMAL_WAIT_S)
+
+            logger.info(
+                "test %s: hold %d complete, slipped %+.6f m, %.1f m travelled in all%s",
+                self.test_id, self.brake_holds, slip_m, self.total_distance_m,
+                f", after {waits} thermal wait(s)" if waits else "",
+            )
+
+            # Handed back only now, after the temperatures said yes.
+            release_brake_in_place(self)
 
 
 class BrakeEnduranceTest(_LiftingZdriveTest):
