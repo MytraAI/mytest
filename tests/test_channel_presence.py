@@ -130,8 +130,10 @@ def test_declared_channel_lists_match_the_implementation_tables():
 
     Mirrors _validate_channel_coverage()'s own invariant, including
     _SPECIAL_COMMANDS - set_axis_state/set_control_mode are implemented as
-    dedicated methods with enum validation rather than table entries."""
+    dedicated methods with enum validation rather than table entries - and
+    _COMPUTED_CHANNELS, which the driver works out rather than reads off the board."""
     from hardware.odrive.odrive_backend import (
+        _COMPUTED_CHANNELS,
         _METHODS,
         _SETTERS,
         _SPECIAL_COMMANDS,
@@ -139,7 +141,7 @@ def test_declared_channel_lists_match_the_implementation_tables():
     )
     from hardware.odrive.odrive_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
 
-    assert set(TELEMETRY_CHANNELS) == set(_TELEMETRY_PATHS)
+    assert set(TELEMETRY_CHANNELS) == set(_TELEMETRY_PATHS) | _COMPUTED_CHANNELS
     assert set(COMMAND_CHANNELS) == set(_SETTERS) | set(_METHODS) | _SPECIAL_COMMANDS
 
 
@@ -199,6 +201,12 @@ def test_runner_makes_an_unevaluable_bound_fatal_instead_of_dying():
 
         def state_snapshot(self):
             return {}
+
+        def record_frame(self, device, channels):
+            pass  # derived channels are exercised in tests/test_derived_channels.py
+
+        def await_derivation_frames(self):
+            pass
 
     class Client:
         def discard_backlog(self):

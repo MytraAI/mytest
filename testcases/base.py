@@ -234,6 +234,9 @@ class TestCase(ABC):
         # device's frames to this run only while this stream is live, so
         # publishing first means no frame can be produced before the engine
         # knows where it belongs.
+        # Before the thread starts publishing, so the first frame already carries them
+        # and a run cannot open with its derived channels absent.
+        self._publisher.set_derivation(self.derived_channels, self.DERIVED_FROM_DEVICES)
         self._publisher.start()
 
         dashboard = spawn_operator_dashboard(self.test_id, getattr(self, "TEST_NAME", "unknown"))
@@ -566,6 +569,34 @@ class TestCase(ABC):
         the live evaluator can gate a Bound on them (see
         RunStatePublisher.state_snapshot)."""
         self._publisher.set_state(name, value)
+
+    DERIVED_FROM_DEVICES: Tuple[str, ...] = ()
+    """Devices whose frames derived_channels() reads.
+
+    Declared so a missing stream fails at runner.start() instead of in the data. A
+    derivation whose device never arrives publishes nothing, and the channel then holds
+    the value its channel list seeded it with - present in the recording, numeric, and
+    wrong, which is worse than absent."""
+
+    def state_snapshot(self) -> Dict[str, Any]:
+        """Everything this run has published, pushed or derived, as of now.
+
+        For a test reading back its own derived channels rather than recomputing them, so
+        the value it decides on is the value that was recorded."""
+        return self._publisher.state_snapshot()
+
+    def derived_channels(self, latest: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        """Channels this test computes from telemetry rather than pushes from a code path.
+
+        `latest` is the newest channels from each device, keyed by device name:
+        latest["odrive"]["turns_traveled"]. Evaluated on every state tick, so what it
+        returns is sampled at the stream's rate instead of latched wherever some code path
+        last remembered to call set_state() - which for a live quantity is the difference
+        between a measurement and a staircase.
+
+        Runs on the publisher thread. Cheap, no sockets, and no motion: this is reporting.
+        A device that has sent nothing yet is simply absent from `latest`."""
+        return {}
 
     def teardown_step(self, description: str, action: Callable[[], None]) -> None:
         """Run one teardown action, logging (not raising) on failure so

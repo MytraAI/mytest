@@ -633,6 +633,22 @@ class YdriveTestbed:
             if name in channels
         }
 
+    @staticmethod
+    def turns_to_metres(turns: float) -> float:
+        """Turns of the motor as metres of track. Reading only - see METERS_PER_TURN.
+
+        Static and side-effect-free because the run's derived channels call it from the
+        state publisher's thread, where touching a telemetry socket would be a race."""
+        return float(turns) * METERS_PER_TURN
+
+    def get_distance_travelled_m(self) -> float:
+        """Metres of track the axis has covered since its driver connected.
+
+        The driver counts the path frame by frame, so every overshoot and reversal is in
+        it - see the odrive's turns_traveled. Cumulative from connect, not from a run, so
+        a caller wanting one run's distance takes the difference."""
+        return self.turns_to_metres(self._odrive_channels()["turns_traveled"])
+
     def get_pos_estimate(self) -> float:
         return self._odrive_channels()["pos_estimate"]
 

@@ -317,9 +317,9 @@ class FakeMarkerStand:
 class MarkerTestCase:
     test_id = "test-marker"
 
-    def __init__(self, testbed, marker_reference_turns=None, total_distance_m=0.0):
+    def __init__(self, testbed, position_claimed_at_marker=None, total_distance_m=0.0):
         self.testbed = testbed
-        self.marker_reference_turns = marker_reference_turns
+        self.position_claimed_at_marker = position_claimed_at_marker
         self.total_distance_m = total_distance_m
         self.distance_at_last_correction_m = 0.0
         self._last_position = 0.0
@@ -356,7 +356,7 @@ def test_the_camera_is_only_asked_while_the_axis_is_near_the_marker():
     from testcases.ydrive.teststeps.teststeps import MarkerWatch
 
     stand = FakeMarkerStand(position=-6.0)
-    watch = MarkerWatch(MarkerTestCase(stand, marker_reference_turns=-15.0))
+    watch = MarkerWatch(MarkerTestCase(stand, position_claimed_at_marker=-15.0))
 
     _sweep(watch, [110.0, 80.0, 40.0, 10.0])
     assert stand.reads == 0, "the far end of the stroke is not a place the marker can be"
@@ -371,7 +371,7 @@ def test_a_sighting_re_references_the_axis_and_commands_no_motion():
     from testcases.ydrive.teststeps.teststeps import MarkerWatch
 
     stand = FakeMarkerStand(position=-6.0)          # pulled back by the time it lands
-    case = MarkerTestCase(stand, marker_reference_turns=-15.0)
+    case = MarkerTestCase(stand, position_claimed_at_marker=-15.0)
     watch = MarkerWatch(case)
 
     _sweep(watch, [-15.1])
@@ -384,31 +384,13 @@ def test_a_sighting_re_references_the_axis_and_commands_no_motion():
     assert len(stand.calls) == 1, stand.calls
 
 
-def test_the_travel_counter_moves_with_the_coordinates():
-    """A correction changes what every position means, so the mark the next leg's
-    distance is measured from has to shift with it or that leg is measured across two
-    coordinate systems."""
-    from testcases.ydrive.teststeps.teststeps import MarkerWatch
-
-    case = MarkerTestCase(FakeMarkerStand(position=-6.0), marker_reference_turns=-15.0)
-    case._last_position = -17.4
-    watch = MarkerWatch(case)
-
-    _sweep(watch, [-15.1])
-    watch.apply()
-
-    assert case._last_position == pytest.approx(-17.4 + 0.1), (
-        "shifted by the correction, not left in the old coordinates"
-    )
-
-
 def test_the_first_sighting_of_the_leg_is_the_one_used():
     """Always the same crossing of the same view at the same sign of speed, so whatever
     lag there is between the two streams biases every correction the same way."""
     from testcases.ydrive.teststeps.teststeps import MarkerWatch
 
     stand = FakeMarkerStand(position=-6.0)
-    watch = MarkerWatch(MarkerTestCase(stand, marker_reference_turns=-15.0))
+    watch = MarkerWatch(MarkerTestCase(stand, position_claimed_at_marker=-15.0))
 
     _sweep(watch, [-12.0, -14.0, -16.0, -17.4])
     watch.apply()
@@ -423,7 +405,7 @@ def test_an_unaligned_leg_corrects_nothing():
     from testcases.ydrive.teststeps.teststeps import MarkerWatch
 
     stand = FakeMarkerStand(position=-6.0, aligned=False, score=0.31)
-    case = MarkerTestCase(stand, marker_reference_turns=-15.0)
+    case = MarkerTestCase(stand, position_claimed_at_marker=-15.0)
     watch = MarkerWatch(case)
 
     _sweep(watch, [-12.0, -15.0, -17.4])
@@ -438,7 +420,7 @@ def test_a_leg_with_no_reference_view_corrects_nothing():
     from testcases.ydrive.teststeps.teststeps import MarkerWatch
 
     stand = FakeMarkerStand(position=-15.0, taught=False, aligned=False)
-    case = MarkerTestCase(stand, marker_reference_turns=-15.0)
+    case = MarkerTestCase(stand, position_claimed_at_marker=-15.0)
     watch = MarkerWatch(case)
 
     _sweep(watch, [-15.0])
@@ -458,14 +440,14 @@ def test_a_camera_that_has_stopped_publishing_does_not_stop_the_stroke():
     from testcases.ydrive.teststeps.teststeps import MarkerWatch
 
     stand = FakeMarkerStand(position=-6.0, raises=TelemetryTimeout("no frame"))
-    case = MarkerTestCase(stand, marker_reference_turns=-15.0, total_distance_m=430.0)
+    case = MarkerTestCase(stand, position_claimed_at_marker=-15.0, total_distance_m=430.0)
     watch = MarkerWatch(case)
 
     _sweep(watch, [-12.0, -15.0, -17.4])
     watch.apply()
 
     assert stand.calls == []
-    assert case.state["distance_since_correction_m"] == pytest.approx(430.0)
+    assert case.distance_at_last_correction_m == 0.0, "the mark did not move, so nothing landed"
 
 
 def test_setup_selects_against_the_committed_view_then_re_teaches():
@@ -485,7 +467,7 @@ def test_setup_selects_against_the_committed_view_then_re_teaches():
     assert [c for c in stand.calls if not c.startswith(("axis:", "brake:", "move:"))] == [
         "select", "pos_estimate:-15.0", "teach"
     ]
-    assert case.state["marker_reference_turns"] == -15.0
+    assert case.state["position_claimed_at_marker"] == -15.0
 
 
 # --- the marker's place in the stroke ---------------------------------------
@@ -500,7 +482,7 @@ def test_the_marker_is_above_the_top_of_the_stroke_so_its_number_is_negative():
 
     test = T(require_engine=False)
 
-    assert test.marker_reference_turns == T.MARKER_POSITION
+    assert test.position_claimed_at_marker == T.MARKER_POSITION
     assert T.BRAKE_TARGET_POSITION < T.START_POSITION, "0 is the top, 110 the bottom"
     assert T.MARKER_POSITION < T.BRAKE_TARGET_POSITION, (
         f"the marker is above the top of the stroke, so it is negative - "
@@ -651,29 +633,28 @@ def test_the_alignment_window_scales_with_the_frame():
         assert windows[w] / w == pytest.approx(ALIGN_TOLERANCE_FRAC, abs=0.002)
 
 
-def test_the_distance_since_a_correction_landed_is_published():
-    """Not a measurement of the drive - whether this mechanism is still working. A
-    bumped camera stops corrections dead and, with nothing bounding drift, the load
-    then walks exactly as it did before with nothing saying so. Metres because that
-    is the unit the brake's clearance is in."""
+def test_only_a_landed_correction_moves_the_mark_the_distance_is_measured_from():
+    """distance_since_correction_m is derived from this mark on every frame, so leaving it
+    alone is how a dead camera shows up: the channel climbs and never resets. Not a
+    measurement of the drive - whether this mechanism is still working."""
     from testcases.ydrive.teststeps.teststeps import MarkerWatch
 
     stand = FakeMarkerStand(position=-6.0, aligned=False, score=0.2)
-    case = MarkerTestCase(stand, marker_reference_turns=-15.0)
+    case = MarkerTestCase(stand, position_claimed_at_marker=-15.0)
 
     for travelled in (120.0, 260.0, 400.0):
         case.total_distance_m = travelled
         watch = MarkerWatch(case)
         _sweep(watch, [-15.0])
         watch.apply()
-        assert case.state["distance_since_correction_m"] == pytest.approx(travelled)
+        assert case.distance_at_last_correction_m == 0.0, "nothing seen, so nothing landed"
 
-    # a correction resets it, so the channel reads "how far since it last worked"
     stand._alignment = (True, 0.99, True)
     watch = MarkerWatch(case)
     _sweep(watch, [-15.0])
     watch.apply()
-    assert case.state["distance_since_correction_m"] == 0.0
+
+    assert case.distance_at_last_correction_m == pytest.approx(400.0)
 
 
 def test_a_camera_that_stops_correcting_ends_the_run():

@@ -27,11 +27,9 @@ axis to it - the one thing on this stand that can see the load slip past
 the motor. Watches rather than reads, because the fixture crosses the
 camera's view in flight and does not stop there.
 
-move_to: commands one target position, blocks until arrived and
-settled, and returns the furthest position reached along the way - which
-past an overshoot is not the position arrival was accepted at, and is
-what a caller measuring distance travelled accumulates. See its docstring
-for when that equals the path the load took and when it falls short.
+move_to: commands one target position, blocks until arrived and settled,
+and returns where arrival was accepted. cycle_leg is one leg of the
+stroke under a test's cycling tolerances.
 
 engage_brake / release_brake: the brake and the axis state moved together,
 each confirming the axis reached the state it was asked for - so the motor
@@ -439,7 +437,9 @@ def establish_reference_by_camera(test_case: BaseYdriveTest, marker_position: fl
         )
     else:
         test_case.set_state("camera_selected_by", "reference view")
-        test_case.set_state("camera_source", chosen["camera_source"])
+        # Not camera_source: the vision driver publishes that name itself, continuously,
+        # and state is merged into every device's rows - so pushing it here would
+        # overwrite the driver's own reading with a one-shot copy of it.
         test_case.set_state("marker_match_score", chosen["match_score"])
         logger.info(
             "test %s: camera %s sees the marker at %.4f - candidates %s",
@@ -448,7 +448,7 @@ def establish_reference_by_camera(test_case: BaseYdriveTest, marker_position: fl
         )
 
     testbed.command.set_pos_estimate(marker_position)
-    test_case.set_state("marker_reference_turns", marker_position)
+    test_case.set_state("position_claimed_at_marker", marker_position)
     logger.info(
         "test %s: the marker is position %.1f turns, and every position is now absolute",
         test_case.test_id, marker_position,
@@ -501,7 +501,7 @@ class MarkerWatch:
         and whatever lag there is between the two streams biases every correction alike."""
         if self.seen_at is not None:
             return
-        if abs(motion.position - self.test_case.marker_reference_turns) > MARKER_SEARCH_WINDOW_TURNS:
+        if abs(motion.position - self.test_case.position_claimed_at_marker) > MARKER_SEARCH_WINDOW_TURNS:
             return
         try:
             marker = self.test_case.testbed.get_marker_alignment()
@@ -531,13 +531,13 @@ class MarkerWatch:
         if self.seen_at is None:
             # A bumped camera, or a turnaround that stops reaching the marker, stops
             # corrections dead - and with nothing bounding drift the load then walks
-            # exactly as it did before. This counter rising and staying up is that.
-            since = test_case.total_distance_m - test_case.distance_at_last_correction_m
-            test_case.set_state("distance_since_correction_m", since)
+            # exactly as it did before. distance_since_correction_m rising and staying up
+            # is that; it is derived from the mark below, not published here.
             logger.info(
                 "test %s: no marker alignment this leg (best score %.3f) - nothing "
                 "corrected, %.0f m since the last one",
-                test_case.test_id, self.best_score, since,
+                test_case.test_id, self.best_score,
+                test_case.total_distance_m - test_case.distance_at_last_correction_m,
             )
             return
 
@@ -545,16 +545,16 @@ class MarkerWatch:
         # has moved since - so the marker's number plus that gap is what here should be
         # called, and the correction is the rest.
         here = test_case.testbed.get_pos_estimate()
-        should_read = test_case.marker_reference_turns + (here - self.seen_at)
+        should_read = test_case.position_claimed_at_marker + (here - self.seen_at)
         correction = should_read - here
         # Impulse-free: the firmware shifts input_pos and pos_setpoint by the same amount,
         # so this changes what positions MEAN rather than moving the load.
+        # The driver skips the step across this write rather than booking it as travel -
+        # see the odrive backend's _accumulate_turns_traveled().
         test_case.testbed.command.set_pos_estimate(should_read)
-        # Which is exactly why the travel counter's mark has to move with them, or the
-        # next leg's distance is measured across a change of coordinates.
-        test_case._last_position += correction
+        # The mark, not the channel: distance_since_correction_m is derived from this on
+        # every frame, so moving the mark is the whole of what a landed correction records.
         test_case.distance_at_last_correction_m = test_case.total_distance_m
-        test_case.set_state("distance_since_correction_m", 0.0)
         logger.info(
             "test %s: re-referenced %+.4f turns (%+.1f mm) - marker seen at %.3f, "
             "score %.3f",
@@ -572,8 +572,11 @@ def move_to(
     arrival_timeout_s: float = DEFAULT_ARRIVAL_TIMEOUT_S,
     each_frame: Optional[Callable[[Motion], None]] = None,
 ) -> float:
-    """Command one target, block until arrived and settled, and return the FURTHEST position
-    reached - past an overshoot that is not where arrival was accepted, which is the point.
+    """Command one target, block until arrived and settled, and return where arrival was
+    accepted - which under a loose gate is short of the target, and after an overshoot is on
+    the way back from it. Distance travelled does NOT come from here: the odrive driver counts
+    the path frame by frame as turns_traveled, which is the only account that has the
+    overshoot in it.
 
     `each_frame` sees every frame of the move, for what has to be watched WHILE the load is
     moving rather than after it stops. It runs at the stream's rate, so it must be cheap, and
@@ -582,10 +585,6 @@ def move_to(
     testbed.command.set_position(target)
     test_case.set_state("position_target", target)
     deadline: Stopwatch = Stopwatch(duration_s=arrival_timeout_s)
-    # Tracked from the first frame of the move rather than from a read before it,
-    # so learning which way the load is going costs no extra telemetry frame.
-    furthest: Optional[float] = None
-    outward: float = 0.0
     # Closed-loop: block on live readings until we've actually arrived AND
     # settled (not just passing through the target while still moving). Each
     # get_motion() call blocks on the next telemetry frame, so this loop is
@@ -598,21 +597,30 @@ def move_to(
         _require_still_driving(test_case, motion, f"moving to {target}")
         if each_frame is not None:
             each_frame(motion)
-        if furthest is None:
-            furthest = motion.position
-            outward = 1.0 if target >= motion.position else -1.0
-        elif (motion.position - furthest) * outward > 0:
-            furthest = motion.position
         within_tolerance: bool = (
             abs(motion.position - target) <= position_tolerance
             and abs(motion.velocity) <= velocity_tolerance
         )
         if within_tolerance:
-            return furthest
+            return motion.position
         if deadline.expired:
             raise TimeoutError(
                 f"test {test_case.test_id}: position didn't settle at {target} within {arrival_timeout_s}s"
             )
+
+
+def cycle_leg(test_case: BaseYdriveTest, target: float,
+              each_frame: Optional[Callable[[Motion], None]] = None) -> float:
+    """One end-to-end leg of a normal stroke, under the test's own cycling tolerances rather
+    than move_to's defaults. The brake is not touched and the axis stays armed."""
+    return move_to(
+        test_case,
+        target,
+        position_tolerance=test_case.CYCLE_POSITION_TOLERANCE,
+        velocity_tolerance=test_case.CYCLE_VELOCITY_TOLERANCE,
+        arrival_timeout_s=test_case.MOVE_TIMEOUT_S,
+        each_frame=each_frame,
+    )
 
 
 def _await_axis_armed(test_case: BaseYdriveTest, armed: bool, timeout_s: float) -> None:

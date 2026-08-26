@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from typing import Any, AsyncIterator, Dict, List
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from protocol.wire import DEVICE_ODRIVE
 
@@ -43,6 +43,7 @@ DEFAULTS: Dict[str, Any] = {
     "axis_is_homed": False,
     "axis_is_armed": False,
     "pos_estimate": 0.0,  # overwritten by the physics tick each sample - see stream_samples()
+    "turns_traveled": 0.0,  # overwritten by the physics tick each sample - see stream_samples()
     "vel_estimate": 0.0,  # overwritten by the physics tick each sample - see stream_samples()
     "active_errors": 0,  # overwritten by the physics tick each sample - see stream_samples()
     "disarm_reason": 0,  # overwritten by the physics tick each sample - see stream_samples()
@@ -156,6 +157,8 @@ class MockOdriveBackend(HardwareBackend):
         self._input_vel = 0.0
         self._input_torque = 0.0
         self._pos_estimate = 0.0
+        self._turns_traveled = 0.0
+        self._position_last_frame: Optional[float] = None
         self._vel_estimate = 0.0
         self._active_errors = 0
         self._disarm_reason = 0
@@ -208,6 +211,16 @@ class MockOdriveBackend(HardwareBackend):
         # and no-op (or return a harmless placeholder), rather than raising,
         # so a test exercising the full command surface doesn't need to know
         # which channels are "real" physics vs. plumbing-only in the mock.
+        if action == "set_pos_estimate":
+            # The firmware shifts input_pos and pos_setpoint by the same amount, so this
+            # renames where the axis IS without moving it - which is the only reason a
+            # test writes it. A mock that let the load chase the new number instead would
+            # turn a drift correction into a lurch, and would do it only under --mock.
+            shift = params["value"] - self._pos_estimate
+            self._pos_estimate = params["value"]
+            self._input_pos += shift
+            self._position_last_frame = None  # the step is not travel - see the real driver
+            return None
         if action == "set_abs_pos":
             self._pos_estimate = params["pos"]
             return None
@@ -248,6 +261,12 @@ class MockOdriveBackend(HardwareBackend):
             else:  # TORQUE_CONTROL
                 self._vel_estimate += self._input_torque * SAMPLE_INTERVAL_S * 2.0
             self._pos_estimate += self._vel_estimate * SAMPLE_INTERVAL_S
+        # Outside the closed-loop branch, because turns_traveled has to be accounted
+        # the same way whatever the axis is doing - see the real driver's
+        # _accumulate_turns_traveled() for why the step across a write is skipped.
+        if self._position_last_frame is not None:
+            self._turns_traveled += abs(self._pos_estimate - self._position_last_frame)
+        self._position_last_frame = self._pos_estimate
 
     def _hero_channels(self) -> Dict[str, Any]:
         iq_measured = abs(self._vel_estimate) * 0.3 + abs(self._input_torque) * 0.5
@@ -258,6 +277,7 @@ class MockOdriveBackend(HardwareBackend):
         return {
             "axis_current_state": self._axis_state,
             "pos_estimate": self._pos_estimate,
+            "turns_traveled": self._turns_traveled,
             "vel_estimate": self._vel_estimate,
             "active_errors": self._active_errors,
             "disarm_reason": self._disarm_reason,
