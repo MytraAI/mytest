@@ -69,7 +69,7 @@ DEFAULT_STATE: Dict[str, Any] = {
     # means an operator said so. A run that corrected against the wrong reference
     # is only interpretable if the record says which.
     "marker_match_score": 0.0,
-    "marker_reference_turns": None,
+    "position_claimed_at_marker": None,
     # What the camera saw and what was taken out because of it. The correction is
     # the load's slip past the motor over one cycle, which no other channel on
     # this stand can see: the encoder is on the motor. Seeded 0.0 rather than
@@ -83,8 +83,10 @@ DEFAULT_STATE: Dict[str, Any] = {
     # HOW total_distance_m IS ARRIVED AT DEPENDS ON WHICH TEST PUBLISHED IT, so a
     # bound or a report reading it needs test_name too. EnduranceCycleTest computes
     # it from its setpoints and assumes every cycle reaches them;
-    # CycleBrakeEnduranceTest measures it turnaround to turnaround from pos_estimate,
-    # because it accepts overshoot and so does not stop at its setpoints.
+    # CycleBrakeEnduranceTest reads the odrive's turns_traveled, the driver's own
+    # frame-by-frame count of the path, because it accepts overshoot and so does not
+    # stop at its setpoints. The driver's channel is the record either way - this one
+    # is that count in metres, from the start of this run.
     # distance_since_brake_m has one publisher and is derived from the other two.
     #
     # Seeded for the same reason the operator's answers are: the engine fixes a

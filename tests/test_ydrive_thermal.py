@@ -195,12 +195,19 @@ class FakePublisher:
     def state_snapshot(self):
         return dict(self.state)
 
+    def record_frame(self, device, channels):
+        pass  # derived channels are exercised in tests/test_derived_channels.py
+
+    def await_derivation_frames(self):
+        pass
+
 
 class FakeFrame:
-    def __init__(self, channels):
+    def __init__(self, channels, device="odrive"):
         self.seq = 0
         self.t = 0.0
         self.channels = channels
+        self.device = device
 
 
 class FakeStream:

@@ -189,6 +189,9 @@ class LiveRulebookRunner:
         ]
         for thread in self._threads:
             thread.start()
+        # These threads are what feed the test's derived channels, so this is the
+        # moment those channels either start flowing or are shown not to.
+        self._publisher.await_derivation_frames()
 
     def stop(self) -> None:
         """Signal every background thread to stop and wait for them to exit."""
@@ -224,6 +227,11 @@ class LiveRulebookRunner:
                     # skipped on every frame while the run reported a clean
                     # pass. Read in-process from the publisher: nothing crosses
                     # the wire and nothing is lost.
+                    # This thread is already the only in-process reader of this
+                    # stream, so it is what feeds the test's derived channels too -
+                    # a sampler of its own would mean a second subscriber per
+                    # device to see frames this one already has.
+                    self._publisher.record_frame(frame.device, frame.channels)
                     channels = {**frame.channels, **self._publisher.state_snapshot()}
                     self.evaluate(channels, seq=frame.seq, frame_t=frame.t)
                 except FatalBoundViolation as exc:

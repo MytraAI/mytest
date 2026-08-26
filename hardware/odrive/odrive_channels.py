@@ -35,6 +35,11 @@ TELEMETRY_CHANNELS = [
     "axis_is_armed",  # bool - whether the axis is actively controlling the motor
     "pos_estimate",  # turns - axis position estimate (confirmed direct on axis0, not under .encoder)
     "vel_estimate",  # turns/s - axis velocity estimate
+    # COMPUTED, not read off the board: the running sum of |pos_estimate| change
+    # frame to frame, so it counts the path the axis took rather than the distance
+    # between where it was told to go and where it stopped. Turns, because what a
+    # turn moves belongs to the stand. See _accumulate_turns_traveled().
+    "turns_traveled",
     "active_errors",  # bitmask (Error enum) - currently-active error flags, auto-clears when resolved
     "disarm_reason",  # Error enum int - reason the axis last disarmed, cleared via clear_errors
     "detailed_disarm_reason",  # int - extra detail on disarm_reason, not populated for every error type

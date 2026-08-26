@@ -37,6 +37,12 @@ class FakePublisher:
     def state_snapshot(self):
         return {}
 
+    def record_frame(self, device, channels):
+        pass  # derived channels are exercised in tests/test_derived_channels.py
+
+    def await_derivation_frames(self):
+        pass
+
 
 def frames_for(values, device="odrive", test_id="run1"):
     return [

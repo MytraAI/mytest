@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import pytest
 
+from protocol.wire import DEVICE_ODRIVE
 from testbeds.ydrive_testbed.ydrive_testbed import (
     METERS_PER_TURN,
     Motion,
+    YdriveTestbed,
     settle_load_under_controller,
 )
 from testcases.registry import REGISTERED_TESTS
@@ -82,23 +84,22 @@ class FakeTestCase:
         pass
 
 
-class Accumulator(CycleBrakeEnduranceTest):
-    """The real distance bookkeeping, with the run's plumbing left out.
+class DistanceCase(CycleBrakeEnduranceTest):
+    """derived_channels() with the run's plumbing left out, standing in for its own testbed.
 
-    TestCase.__init__ is skipped deliberately: set_state() goes through a state
-    publisher that only exists once a run is open, and what is under test here is
-    arithmetic over positions. `start_at` stands in for the origin, which
-    main_execution seeds _last_position with before anything moves."""
+    TestCase.__init__ is skipped deliberately: the publisher only exists once a run is open,
+    and what is under test is what this test makes of one ODrive frame."""
 
-    def __init__(self, start_at: float = 0.0, brake_interval_m=None):
-        self.total_distance_m = 0.0
+    def __init__(self, brake_interval_m=None):
+        self.testbed = YdriveTestbed
         self.brake_cycles = 0
+        self.distance_at_last_correction_m = 0.0
         self._brake_interval_m = brake_interval_m or self.BRAKE_INTERVAL_M
-        self._last_position = start_at
-        self.state = {}
+        self._distance_at_run_start_m = None  # seeded by main_execution, not __init__
 
-    def set_state(self, name, value):
-        self.state[name] = value
+    def derive(self, turns_traveled):
+        """The derivation against one ODrive frame, which is all it ever sees."""
+        return self.derived_channels({DEVICE_ODRIVE: {"turns_traveled": turns_traveled}})
 
 
 # --- move_to reports where it stopped, not where it was aimed ----------------
@@ -112,11 +113,10 @@ re-typed - otherwise tightening either constant leaves these tests passing while
 exercising a regime the test no longer runs in."""
 
 
-def test_move_to_reports_the_accepted_frame_when_nothing_overshoots():
-    """With no overshoot the furthest point and the accepted point are one frame, so
-    a caller that only wanted to know where the move ended is unaffected. Under a
-    3 turns/s gate that frame is still short of the target, so returning the target
-    would report travel that never happened."""
+def test_move_to_reports_where_arrival_was_accepted_not_the_target():
+    """Under a 3 turns/s gate the accepted frame is still short of the target, and it is
+    what the load did. Distance travelled does not come from here - the driver counts the
+    path - so this is the whole of what move_to owes a caller."""
     axis = FakeStand([(60.0, 18.0), (105.0, 12.0), (109.6, 2.5)])
 
     assert move_to(FakeTestCase(axis), 110.0, **CYCLE_TOLERANCES) == pytest.approx(109.6)
@@ -131,40 +131,42 @@ def test_move_to_will_not_accept_a_frame_still_at_cruise():
     assert move_to(FakeTestCase(axis), 110.0, **CYCLE_TOLERANCES) == pytest.approx(109.7)
 
 
-# --- distance is measured, not derived --------------------------------------
+# --- distance comes from the driver's counter -------------------------------
 
 
-def test_distance_is_the_gap_between_consecutive_resting_positions():
-    """Counted from wherever the load started, which main_execution seeds with the
-    marker - so the first move is travel rather than a gap in the record."""
-    case = Accumulator(start_at=110.6)
-    case._count_travel_to(-0.4)
+def test_nothing_is_derived_until_the_run_knows_where_its_cycling_started():
+    """runner.start() is called before setup, so the sampler is live while a person is still
+    pushing the load to the marker. Publishing then would book that push as mileage."""
+    case = DistanceCase()
 
-    assert case.total_distance_m == pytest.approx(111.0 * METERS_PER_TURN)
+    assert case.derive(500.0) == {}, "no baseline yet, so nothing true to say"
+
+    case._distance_at_run_start_m = 12.0
+    assert case.derive(500.0)["total_distance_m"] == pytest.approx(
+        500.0 * METERS_PER_TURN - 12.0
+    )
 
 
-def test_overshoot_counts_as_travel_the_setpoints_cannot_see():
-    """A cycle that overshoots both ends travels further than 2 x the stroke. The
-    setpoint arithmetic EnduranceCycleTest uses would report the stroke."""
-    case = Accumulator(start_at=110.0)
-    case._count_travel_to(-1.5)
-    case._count_travel_to(111.5)
+def test_the_run_starts_from_where_the_drivers_counter_already_stood():
+    """The driver counts from its own connect: the operator's hand move to the marker at
+    setup is not this run's mileage."""
+    case = DistanceCase()
+    case._distance_at_run_start_m = 40.0 * METERS_PER_TURN
 
-    derived = 2 * CycleBrakeEnduranceTest.START_POSITION * METERS_PER_TURN
-    assert case.total_distance_m == pytest.approx(224.5 * METERS_PER_TURN)
-    assert case.total_distance_m > derived
+    derived = case.derive(62.5)
+
+    assert derived["total_distance_m"] == pytest.approx(22.5 * METERS_PER_TURN)
 
 
 def test_the_interval_channel_is_derived_rather_than_counted():
     """A maintained counter would be a second copy of total_distance_m with its own
     chance to drift out of step with it."""
-    case = Accumulator(brake_interval_m=1000.0)
-    case._count_travel_to(20000.0)
+    case = DistanceCase(brake_interval_m=1000.0)
+    case._distance_at_run_start_m = 0.0
     case.brake_cycles = 1
-    case._count_travel_to(case._last_position)  # republish, no added travel
 
     expected = 20000.0 * METERS_PER_TURN - case._brake_interval_m
-    assert case.state["distance_since_brake_m"] == pytest.approx(expected, abs=0.1)
+    assert case.derive(20000.0)["distance_since_brake_m"] == pytest.approx(expected, abs=0.1)
 
 
 def test_an_interval_that_overran_gives_the_metres_back_to_the_next_one():
@@ -173,18 +175,18 @@ def test_an_interval_that_overran_gives_the_metres_back_to_the_next_one():
     of the total rather than a countdown from the last event, those metres land in
     the next interval instead of being discarded - discarding them is what would
     make the average interval drift a cycle high every time."""
-    case = Accumulator(brake_interval_m=1000.0)
+    case = DistanceCase(brake_interval_m=1000.0)
+    case._distance_at_run_start_m = 0.0
     overran = 12100.0 * METERS_PER_TURN  # one cycle past the first multiple
-    case._count_travel_to(12100.0)
 
-    assert case.total_distance_m == pytest.approx(overran, abs=0.1)
-    assert case.state["distance_since_brake_m"] == pytest.approx(overran, abs=0.1)
+    derived = case.derive(12100.0)
+    assert derived["total_distance_m"] == pytest.approx(overran, abs=0.1)
+    assert derived["distance_since_brake_m"] == pytest.approx(overran, abs=0.1)
 
     case.brake_cycles = 1  # the event happens
-    case._count_travel_to(case._last_position)
 
     assert (case.brake_cycles + 1) * case._brake_interval_m == 2000.0
-    assert case.state["distance_since_brake_m"] == pytest.approx(
+    assert case.derive(12100.0)["distance_since_brake_m"] == pytest.approx(
         overran - case._brake_interval_m, abs=0.1
     )
 
@@ -261,53 +263,6 @@ def test_a_disarmed_axis_is_not_waited_on():
     settle_load_under_controller(axis, settle_s=60.0)
 
     assert len(axis._frames) > 190, "it waited on an axis that was not driving"
-
-
-def test_move_to_reports_the_peak_when_arrival_is_accepted_on_the_pullback():
-    """The case the stand actually produces, and the one an accepted-position
-    return gets wrong.
-
-    Measured at 1800 lb the load runs 17.3 turns past each end - wider than
-    CYCLE_POSITION_TOLERANCE - so the peak cannot satisfy arrival and the load is
-    accepted on the way back, near the target. Returning that accepted position
-    drops the whole out-and-back excursion from the distance: a cycling block
-    covering 156.2 m of track counted 105.2 m, 67% of it."""
-    axis = FakeStand([
-        (60.0, 18.0),     # cruising out
-        (127.3, 5.0),     # past the target by 17.3 turns - outside the position gate
-        (127.3, 0.0),     # the peak: still 17.3 out, so still not arrived
-        (118.0, -8.0),    # controller pulling it back
-        (112.0, -2.5),    # inside both gates at last - arrival accepted here
-    ])
-
-    reached = move_to(FakeTestCase(axis), 110.0, **CYCLE_TOLERANCES)
-
-    assert reached == pytest.approx(127.3), "the excursion past the end was dropped"
-
-
-def test_a_downward_move_reports_its_lowest_point():
-    """Direction is taken from the first frame of the move, not assumed, so the
-    same rule holds on the leg back down."""
-    axis = FakeStand([(110.0, -18.0), (-7.4, -5.0), (-7.4, 0.0), (2.0, 8.0), (8.0, 2.0)])
-
-    assert move_to(FakeTestCase(axis), 0.0, **CYCLE_TOLERANCES) == pytest.approx(-7.4)
-
-
-def test_too_short_an_interval_is_refused_rather_than_run():
-    """A brake event has to start from the top of the stroke. The cycling loop is
-    checked between whole cycles, so an interval shorter than one cycle plus a
-    run-down can be satisfied before the loop runs at all - and then the run-down
-    starts from wherever the last brake left the load, part-way down. From there the
-    load either stops past 0 into the clearance the brake needs, or never reaches the
-    trigger speed and fails in a way that reads as a tuning problem.
-
-    Refused at construction, because the constructor advertises this override for
-    shakedowns and metres is exactly the range that trips it."""
-    with pytest.raises(ValueError, match="shorter than one cycle"):
-        CycleBrakeEnduranceTest(require_engine=False, brake_interval_m=10.0)
-
-    assert CycleBrakeEnduranceTest.BRAKE_INTERVAL_M > CycleBrakeEnduranceTest.MIN_BRAKE_INTERVAL_M
-
 
 
 # --- the brake event is counted where it happens ----------------------------

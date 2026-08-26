@@ -14,10 +14,11 @@ from testcases.asimov.rulebook import Bound, Rulebook
 
 
 class FakeFrame:
-    def __init__(self, seq, channels):
+    def __init__(self, seq, channels, device="odrive"):
         self.seq = seq
         self.t = float(seq)
         self.channels = channels
+        self.device = device
 
 
 class FakePublisher:
@@ -29,6 +30,12 @@ class FakePublisher:
 
     def state_snapshot(self):
         return dict(self.state)
+
+    def record_frame(self, device, channels):
+        pass  # derived channels are exercised in tests/test_derived_channels.py
+
+    def await_derivation_frames(self):
+        pass
 
 
 class FakeTelemetryClient:

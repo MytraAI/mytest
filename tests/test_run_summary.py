@@ -33,6 +33,12 @@ class FakePublisher:
     def state_snapshot(self):
         return dict(self.state)
 
+    def record_frame(self, device, channels):
+        pass  # derived channels are exercised in tests/test_derived_channels.py
+
+    def await_derivation_frames(self):
+        pass
+
 
 def make_runner(*bounds):
     rulebook = Rulebook(name="test_rulebook", test_names=["t"], bounds=list(bounds))

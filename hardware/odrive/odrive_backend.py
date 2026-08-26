@@ -259,6 +259,12 @@ _METHODS: Dict[str, Tuple[str, str, List[str]]] = {
 # can still account for them.
 _SPECIAL_COMMANDS = {"set_axis_state", "set_control_mode"}
 
+# turns_traveled has no attribute path: the driver computes it from pos_estimate
+# frame to frame rather than reading it off the board - see
+# _accumulate_turns_traveled(). Carved out for the same reason as the commands
+# above, so the coverage check can still account for it.
+_COMPUTED_CHANNELS = {"turns_traveled"}
+
 
 def _validate_channel_coverage() -> None:
     """Runs once at import time. TELEMETRY_CHANNELS/COMMAND_CHANNELS (the
@@ -273,7 +279,7 @@ def _validate_channel_coverage() -> None:
     for a *live* backend - applied here to this module's own internal
     tables instead of a running process."""
     declared_telemetry = set(TELEMETRY_CHANNELS)
-    implemented_telemetry = set(_TELEMETRY_PATHS)
+    implemented_telemetry = set(_TELEMETRY_PATHS) | _COMPUTED_CHANNELS
     if declared_telemetry != implemented_telemetry:
         raise AssertionError(
             "_TELEMETRY_PATHS is out of sync with TELEMETRY_CHANNELS - "
@@ -333,6 +339,11 @@ class OdriveBackend(HardwareBackend):
         self._last_watched: Dict[str, Any] = {}
         """Last seen value of each channel in odrive_errors.WATCHED_CHANNELS, so
         error logging can fire on change rather than on every frame."""
+        self._turns_traveled: float = 0.0
+        self._position_last_frame: Optional[float] = None
+        self._pos_estimate_writes: int = 0
+        self._pos_estimate_writes_last_frame: int = 0
+        """State behind turns_traveled - see _accumulate_turns_traveled()."""
 
     async def connect(self) -> None:
         # Connecting twice is the normal path, not a caller error: runner.run()
@@ -473,6 +484,11 @@ class OdriveBackend(HardwareBackend):
         if action in _SETTERS:
             root, path = _SETTERS[action]
             obj = self._odrv.axis0 if root == "axis" else self._odrv
+            if action == "set_pos_estimate":
+                # The one write on this device that changes what a telemetry channel
+                # MEANS rather than what the hardware does, so the one that the travel
+                # accumulator has to be told about - see _accumulate_turns_traveled().
+                self._pos_estimate_writes += 1
             return await asyncio.to_thread(_set_path, obj, path, params["value"])
         if action in _METHODS:
             root, path, arg_names = _METHODS[action]
@@ -488,6 +504,7 @@ class OdriveBackend(HardwareBackend):
         while True:
             if self._odrv is not None:
                 frame = await asyncio.to_thread(self._read_all_channels)
+                self._accumulate_turns_traveled(frame)
                 self._log_error_transitions(frame)
                 yield frame
             await asyncio.sleep(SAMPLE_INTERVAL_S)
@@ -535,6 +552,45 @@ class OdriveBackend(HardwareBackend):
                     logger.info("ODrive %s", line)
         except Exception:
             logger.exception("failed to log an ODrive error transition, continuing to stream")
+
+    def _accumulate_turns_traveled(self, frame: Dict[str, Any]) -> None:
+        """Add this frame's change in pos_estimate to turns_traveled, as a magnitude.
+
+        THE PATH, NOT THE DISPLACEMENT. Summed frame to frame it counts every overshoot
+        and reversal the axis actually made, which no arithmetic on the endpoints of a
+        move can recover: a load that runs 17 turns past each end of its stroke covers
+        that ground twice per cycle and a caller comparing where it was told to go
+        against where it stopped never sees it.
+
+        Turns, not metres. What a turn moves is a property of the stand this board is
+        bolted to, not of the board - see the testbed.
+
+        WRITING pos_estimate IS NOT TRAVEL, which is the subtlety here. That command
+        changes what the number MEANS - the firmware shifts input_pos and pos_setpoint
+        with it, deliberately moving nothing - so the step across a write is not ground
+        covered. Unguarded, the write at setup alone books whatever the axis happened to
+        read at power-up: 125 turns, 10.5 m, in the 2026-08-25 14:23 run. So a write
+        makes the next frame start a fresh segment, at a cost of at most one frame of
+        real travel (1.45 turns at the velocity ceiling, and the axis is idle behind a
+        brake when setup writes).
+
+        The generation counter, rather than the setter clearing the reference directly,
+        is because that setter runs on the event loop while this runs in the worker
+        thread behind _read_all_channels. A write landing mid-accumulate would be missed
+        - the reference already loaded, the jump booked anyway - and the one write this
+        exists to catch is the largest one. Read once per frame here, so there is
+        nothing to interleave with and no lock to hold."""
+        position = frame.get("pos_estimate")
+        if not isinstance(position, (int, float)):
+            return
+        writes = self._pos_estimate_writes
+        if writes != self._pos_estimate_writes_last_frame:
+            self._pos_estimate_writes_last_frame = writes
+            self._position_last_frame = None
+        if self._position_last_frame is not None:
+            self._turns_traveled += abs(position - self._position_last_frame)
+        self._position_last_frame = position
+        frame["turns_traveled"] = self._turns_traveled
 
     def _read_all_channels(self) -> dict:
         axis = self._odrv.axis0

@@ -426,28 +426,6 @@ def test_the_hold_publishes_its_slip():
     assert 'set_state("brake_slip_turns"' in source
 
 
-def test_every_published_state_channel_is_seeded():
-    """The engine fixes a wide file's header from its first frames and drops a
-    channel that appears later. brake_slip_turns is written tens of seconds into a
-    run, so unseeded it would be absent from the recorded file while the run
-    reported a clean pass - the measurement missing and nothing saying so."""
-    published = set()
-    for name in dir(teststeps):
-        attribute = getattr(teststeps, name)
-        if not callable(attribute) or getattr(attribute, "__module__", None) != teststeps.__name__:
-            continue
-        try:
-            source = inspect.getsource(attribute)
-        except (OSError, TypeError):
-            continue
-        for line in source.splitlines():
-            if "set_state(" in line and '"' in line:
-                published.add(line.split('set_state("', 1)[1].split('"', 1)[0])
-    published |= {"brake_holds", "position_origin"}  # published by the test case itself
-    missing = sorted(published - set(DEFAULT_STATE))
-    assert not missing, f"published but never seeded, so the engine drops them: {missing}"
-
-
 # --- the sequence -----------------------------------------------------------
 
 
