@@ -40,7 +40,7 @@ import logging
 import signal
 from datetime import datetime
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Dict, Sequence, Set, Tuple
 
 from protocol import asyncio_compat, heartbeat
 from protocol.paths import DEFAULT_OUTPUT_DIR, ensure_output_dir
@@ -71,6 +71,41 @@ source of a stall in the first place."""
 RECONCILE_INTERVAL_S = 1.0
 
 
+def merge_state(
+    device: str,
+    channels: Dict[str, Any],
+    state: Dict[str, Any],
+    shadowed: Set[Tuple[str, str]],
+) -> None:
+    """Merge the open run's published state into one device's channels, in
+    place, without letting state overwrite a measured value.
+
+    A test publishes state by name (TestCase.set_state) and nothing declares
+    those names, so a name it picks can collide with a channel the device
+    actually measures. **The device's value wins.** A measurement is
+    irreplaceable and exists nowhere else, while the published value is still
+    on the run-state stream - so honouring the state here would destroy the
+    only copy of the more valuable number.
+
+    Logged once per device and name, not per frame: at frame rates a per-frame
+    warning would bury every other line in the log. A warning rather than a
+    raise, because the engine is the process a run's recording depends on -
+    aborting it to report a naming mistake would abort the run that reported
+    it, and every declared device's rows with it.
+    """
+    for name, value in state.items():
+        if name in channels:
+            if (device, name) not in shadowed:
+                shadowed.add((device, name))
+                logger.warning(
+                    "%s: run published state channel %r, which this device already measures - "
+                    "keeping the measured value, dropping the published one from this run's rows",
+                    device, name,
+                )
+            continue
+        channels[name] = value
+
+
 async def _consume(aggregator: Aggregator, queue: "asyncio.Queue[WriteItem]", recorder: RunRecorder) -> None:
     """Read the merged stream, decide where each frame belongs, and hand it
     to the writer.
@@ -88,6 +123,7 @@ async def _consume(aggregator: Aggregator, queue: "asyncio.Queue[WriteItem]", re
     """
     dropped_unattributed = 0
     next_warning = 1
+    shadowed: Set[Tuple[str, str]] = set()
     async for item in aggregator.merged_stream():
         if isinstance(item, RunStateFrame):
             recorder.observe_state(item)
@@ -100,7 +136,7 @@ async def _consume(aggregator: Aggregator, queue: "asyncio.Queue[WriteItem]", re
             # The open run's published state rides along on every row it
             # claims, alongside the device's own channels.
             test_id, state = routed
-            channels.update(state)
+            merge_state(item.device, channels, state, shadowed)
             recorder.observe(item, test_id)
 
         write_item = WriteItem(
