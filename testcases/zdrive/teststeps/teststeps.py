@@ -62,11 +62,12 @@ from typing import Dict, NamedTuple, Optional, Sequence, Tuple
 from hardware.odrive import odrive_errors
 from testbeds.zdrive_testbed.zdrive_testbed import (
     BRAKE_SETTLE_S,
-    MM_PER_TURN,
+    METERS_PER_TURN,
     Motion,
     ZdriveTestbed,
 )
 from testcases.step import step
+from testcases.zdrive.rulebooks.zdrive_rulebook import MAX_TEMPERATURE_C
 from testcases.utils import Stopwatch, spawn_operator_prompt
 from testcases.zdrive.testcases.base_zdrive_test import BaseZdriveTest
 
@@ -650,7 +651,7 @@ def brake_from_speed(
     before it bites, the deceleration, and any creep across `rest_s`. It is
     baselined on the first frame after the rail is dropped, which still precedes
     physical engagement - that is up to BRAKE_SETTLE_S later and unobservable
-    from here. `brake_speed_turns_s` comes off that same frame, so the speed
+    from here. `brake_speed_m_s` comes off that same frame, so the speed
     recorded is the one the brake saw."""
     testbed: ZdriveTestbed = test_case.testbed
 
@@ -689,11 +690,11 @@ def brake_from_speed(
         travelled = abs(fell_to - started_at)
         logger.warning(
             "test %s: the load reached the %.1f-turn backstop without ever doing "
-            "%.2f turns/s - it peaked at %.2f turns/s over %.1f turns (%.0f mm). The brake "
+            "%.2f turns/s - it peaked at %.2f turns/s over %.1f turns (%.3f m). The brake "
             "was dropped on position instead, so this cycle's engagement speed is not the "
             "one that was asked for",
             test_case.test_id, backstop_turns, trigger_speed, peak_speed,
-            travelled, travelled * MM_PER_TURN,
+            travelled, travelled * METERS_PER_TURN,
         )
 
     # The baseline for everything below, taken as one frame so the speed recorded
@@ -711,7 +712,7 @@ def brake_from_speed(
                 f"test {test_case.test_id}: the load was still moving "
                 f"{abs(motion.velocity):.2f} turns/s {stop_timeout_s}s after the brake was "
                 f"commanded, having travelled "
-                f"{abs(motion.position - braked_from.position) * MM_PER_TURN:.0f} mm"
+                f"{abs(motion.position - braked_from.position) * METERS_PER_TURN:.3f} m"
             )
 
     # The brake keeps what it stopped, and only then is the distance taken - see
@@ -720,24 +721,28 @@ def brake_from_speed(
     test_case.wait_for(rest_s)
     rested_at = testbed.get_motion().position
 
-    stopping_distance_mm = abs(rested_at - braked_from.position) * MM_PER_TURN
-    test_case.set_state("brake_speed_turns_s", abs(braked_from.velocity))
-    test_case.set_state("stopping_distance_mm", stopping_distance_mm)
-    return stopping_distance_mm
+    stopping_distance_m = abs(rested_at - braked_from.position) * METERS_PER_TURN
+    test_case.set_state("brake_speed_m_s", abs(braked_from.velocity) * METERS_PER_TURN)
+    test_case.set_state("stopping_distance_m", stopping_distance_m)
+    return stopping_distance_m
 
 
 @step
 def hold_on_brake(test_case: BaseZdriveTest, hold_s: float, origin: float = 0.0) -> float:
-    """Hold the load on the brake alone for `hold_s`, and report how far it moved.
+    """Hold the load on the brake alone for `hold_s`, and report how far it moved, in metres.
 
     The measurement this stand exists to take. The axis is idled, so for the whole
     dwell the only thing opposing the load's weight is the brake, and any movement
     is the brake giving way rather than the controller yielding.
 
-    Returns the slip in turns, signed the way the stroke is: on this drive up is
-    negative, so a load that descends slips POSITIVE. Published as
-    `brake_slip_turns` so it lands in the recorded run rather than only in a log
-    line.
+    Returns the slip in metres, signed the way the stroke is: on this drive up is
+    negative, so a load that descends slips POSITIVE. Published as `brake_slip_m` so
+    it lands in the recorded run rather than only in a log line.
+
+    A MICRON IS THE FLOOR, NOT THE MEASUREMENT. Over 73 holds of 5 s at 1000 lb the
+    recorded slip was +/-0.000001 m, which is one encoder count: this brake did not
+    measurably give way. A bound on this catches a brake that has let go, not one
+    that is wearing.
 
     THE LOG LINE IS RELATIVE TO `origin`, the value establish_origin_at_bottom()
     returned. Positions on this stand are only meaningful against that origin,
@@ -754,13 +759,104 @@ def hold_on_brake(test_case: BaseZdriveTest, hold_s: float, origin: float = 0.0)
     test_case.wait_for(hold_s)
     held_to = testbed.get_pos_estimate()
 
-    slip = held_to - held_from
-    test_case.set_state("brake_slip_turns", slip)
+    slip_m = (held_to - held_from) * METERS_PER_TURN
+    test_case.set_state("brake_slip_m", slip_m)
     logger.info(
-        "test %s: brake held %.1fs at %.3f turns, slipped %+.3f turns to %.3f",
-        test_case.test_id, hold_s, held_from - origin, slip, held_to - origin,
+        "test %s: brake held %.1fs at %.3f turns, slipped %+.6f m to %.3f turns",
+        test_case.test_id, hold_s, held_from - origin, slip_m, held_to - origin,
     )
-    return slip
+    return slip_m
+
+
+FET_WAIT_C = 70.0
+"""FET temperature at or above which a cycle waits instead of lifting.
+
+Fourteen degrees below the 83.96 C at which this board starts derating its own current
+limit - measured off the drive, not a datasheet figure. A derate would reduce the
+current available to a lift without announcing it, which changes what the test does
+while the test goes on believing it did the same thing every cycle.
+
+The ER-64 run peaked at 32.0 C, but it was armed 2.6% of the time behind a 300 s dwell.
+A cycling hold is armed nearer half the time on the same 1000 lb load, so this threshold
+is expected to do real work rather than sit unused."""
+
+TC_HEADROOM_C = 5.0
+"""How close a thermocouple may get to its own fatal bound before a cycle waits.
+
+Against zdrive_rulebook's MAX_TEMPERATURE_C, so the wait tracks the bound rather than
+restating it: move the bound and this moves with it. Five degrees is enough to stop a
+cycle rather than the run - the alternative is a fatal bound firing on a stand that
+would have cooled if anything had asked it to."""
+
+THERMAL_WAIT_S = 60.0
+"""How long to wait before re-reading, when anything is too hot to lift."""
+
+
+def temperatures_need_a_wait(test_case: BaseZdriveTest) -> Optional[str]:
+    """Whether anything on this stand is too hot to start another lift, and which thing.
+
+    ONE PLACE THAT DECIDES, over all three sensors: the drive's own FET thermistor and
+    both wired thermocouples. Returns a description of the hottest objection, or None to
+    proceed. A caller waits and asks again.
+
+    The two limits are expressed differently on purpose. The FET has its own absolute
+    threshold, because what it is protecting against is the board silently derating. The
+    thermocouples are compared against their own fatal bound less a margin, because what
+    they are protecting against is that bound firing and ending the run - so the number
+    that matters is the one already declared, not a second copy of it."""
+    testbed: ZdriveTestbed = test_case.testbed
+    fet = testbed.get_fet_temperature_c()
+    test_case.set_state("fet_temperature_c", fet)
+    if fet >= FET_WAIT_C:
+        return f"the inverter FET is at {fet:.1f} C, at or above the {FET_WAIT_C:.0f} C ceiling"
+
+    tc_ceiling = MAX_TEMPERATURE_C - TC_HEADROOM_C
+    hot = {n: t for n, t in testbed.get_tc_temperatures_c().items() if t >= tc_ceiling}
+    if hot:
+        worst = max(hot, key=hot.get)
+        return (
+            f"thermocouple {worst} is at {hot[worst]:.1f} C, within {TC_HEADROOM_C:.0f} C "
+            f"of its {MAX_TEMPERATURE_C:.0f} C fatal bound"
+        )
+    return None
+
+
+@step
+def wait_for_thermal_headroom(test_case: BaseZdriveTest) -> int:
+    """Block until nothing on the stand is too hot to lift, and report how long it took.
+
+    Returns the number of THERMAL_WAIT_S waits, so a caller can record it. Unbounded,
+    deliberately: a stand that cannot cool is one whose cycle rate has collapsed, and
+    stopping the run over that would be worse than continuing slowly. What makes that
+    survivable rather than silent is that the count is published - a run quietly
+    producing a tenth of the cycles anyone expected looks exactly like a healthy run
+    otherwise.
+
+    Called with the load on its bottom stop, the brake engaged and the axis idle, which
+    is the only state in this cycle where waiting an arbitrary length of time costs
+    nothing and risks nothing. Nothing, precisely: the load is on its hard stop so
+    neither the brake nor the controller is carrying it, and this brake is
+    magnet-applied - engaged is the rail UNPOWERED, so a wait of any length draws no
+    coil current at all (see ZdriveTestbed's BRAKE_BUS).
+
+    A step, so a stand sitting still for minutes is not reported as whatever move ran
+    last. It contains no other step, so it can be one."""
+    waits = 0
+    while True:
+        objection = temperatures_need_a_wait(test_case)
+        if objection is None:
+            test_case.set_state("thermal_waits", waits)
+            if waits:
+                logger.info("test %s: cool enough to lift after %d wait(s)",
+                            test_case.test_id, waits)
+            return waits
+        waits += 1
+        test_case.set_state("thermal_waits", waits)
+        logger.warning(
+            "test %s: %s - holding at the bottom for %.0f s (wait %d)",
+            test_case.test_id, objection, THERMAL_WAIT_S, waits,
+        )
+        test_case.wait_for(THERMAL_WAIT_S)
 
 
 ARM_SETTLE_S = 0.5

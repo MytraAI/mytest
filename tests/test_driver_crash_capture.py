@@ -14,8 +14,10 @@ thread it did not start, and really takes a segmentation fault.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -63,11 +65,48 @@ def test_an_unhandled_exception_on_another_thread_lands_in_the_log(tmp_path):
     assert "RuntimeError: raised off the main thread" in written
 
 
-def test_a_native_fault_leaves_a_stack_in_the_log(tmp_path):
+def test_faulthandler_is_pointed_at_the_log_not_at_stderr():
     """A C library reached through ctypes can take the interpreter down with no Python
-    exception to catch. faulthandler is the only thing that leaves anything behind -
-    and it is what distinguishes a crash from a hang, which the recorded artifacts of
-    the zdrive failure could not."""
+    exception to catch. faulthandler is the only thing that leaves a stack behind when it
+    does - and it is what distinguishes a crash from a hang, which the recorded artifacts
+    of the zdrive failure could not.
+
+    Proven without crashing, by writing a stack through the descriptor faulthandler was
+    handed and checking it lands in the driver's log. That descriptor is the whole of the
+    wiring: dump_traceback() defaults to stderr and does NOT use it, so the only way to
+    show where a fault would go is to write through it. The real fault is exercised by
+    the test below, opt-in because a genuine segmentation fault raises the OS crash
+    reporter on a developer's machine."""
+    import faulthandler
+
+    from hardware import driver_logging
+
+    log = Path(tempfile.mkdtemp()) / "logs.txt"
+    log.write_text("")
+    try:
+        driver_logging.capture_crashes(log)
+        assert faulthandler.is_enabled(), "a native fault would leave nothing behind"
+        registered = driver_logging._faulthandler_file
+        assert registered is not None and registered.name == str(log)
+        faulthandler.dump_traceback(file=registered)
+        registered.flush()
+    finally:
+        driver_logging.restore_crash_capture()
+
+    written = log.read_text()
+    assert "most recent call first" in written, written
+    assert "test_driver_crash_capture.py" in written, (
+        "the stack went somewhere, but not into the driver's log"
+    )
+
+
+@pytest.mark.skipif(
+    os.environ.get("MYTEST_CRASH_TESTS") != "1",
+    reason="a real segmentation fault raises the OS crash reporter; set MYTEST_CRASH_TESTS=1",
+)
+def test_a_real_native_fault_leaves_a_stack_in_the_log(tmp_path):
+    """The genuine article, opt-in. Everything above tests the wiring; this tests that a
+    process actually dying of a native fault still says so in the driver's own log."""
     written = _run(tmp_path, (
         "import faulthandler\n"
         "faulthandler._sigsegv()\n"

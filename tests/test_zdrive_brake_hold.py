@@ -205,7 +205,7 @@ def test_the_load_is_held_at_the_top_until_the_operator_acknowledges():
 
 def test_the_brake_only_hold_stays_a_fixed_dwell():
     """The operator pause is under the controller. The brake-only dwell is the
-    measurement, and stays HOLD_S so brake_slip_turns is comparable between
+    measurement, and stays HOLD_S so brake_slip_m is comparable between
     runs."""
     source = _code_of(BrakeHoldTest.main_execution)
     assert re.search(r"hold_on_brake\(self, self\.HOLD_S[,)]", source), (
@@ -423,7 +423,7 @@ def test_the_hold_measures_between_engaging_and_releasing():
 
 def test_the_hold_publishes_its_slip():
     source = inspect.getsource(teststeps.hold_on_brake)
-    assert 'set_state("brake_slip_turns"' in source
+    assert 'set_state("brake_slip_m"' in source
 
 
 # --- the sequence -----------------------------------------------------------
@@ -490,7 +490,7 @@ def test_the_run_is_attributable_in_the_verdict():
     # to say how high it went, since that is now a per-test choice.
     assert metadata["top_position_turns"] == BrakeHoldTest.TOP_POSITION
     assert metadata["hold_s"] == BrakeHoldTest.HOLD_S
-    assert metadata["brake_holds"] == 0
+    assert metadata["loaded_brake_holds"] == 0
 
 
 # --- tuning -----------------------------------------------------------------

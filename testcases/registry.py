@@ -30,6 +30,7 @@ from .zdrive.testcases.base_zdrive_test import BaseZdriveTest
 from .zdrive.testcases.testcases import (
     BrakeEnduranceTest as ZdriveBrakeEnduranceTest,
     BrakeHoldTest,
+    CycleBrakeHoldTest,
     ManualTest as ZdriveManualTest,
 )
 
@@ -44,5 +45,6 @@ REGISTERED_TESTS: Dict[str, Callable[[Optional[str], bool], TestCase]] = {
     "zdrive.base": lambda test_id, use_mock: BaseZdriveTest(test_id=test_id, use_mock=use_mock),
     "zdrive.manual": lambda test_id, use_mock: ZdriveManualTest(test_id=test_id, use_mock=use_mock),
     "zdrive.brake_hold": lambda test_id, use_mock: BrakeHoldTest(test_id=test_id, use_mock=use_mock),
+    "zdrive.cycle_brake_hold": lambda test_id, use_mock: CycleBrakeHoldTest(test_id=test_id, use_mock=use_mock),
     "zdrive.brake_endurance": lambda test_id, use_mock: ZdriveBrakeEnduranceTest(test_id=test_id, use_mock=use_mock),
 }
