@@ -57,6 +57,24 @@ DEFAULT_STATE: Dict[str, Any] = {
     # unevaluable, and unevaluable stops a run - so None here aborted every run on
     # its first frame, before anything moved. The cost is that rows before the
     # first brake event read as a stop in no distance rather than as no stop yet.
+    "distance_since_correction_m": 0.0,
+    # How far the load has gone since the camera last re-referenced the axis. Rises
+    # and keeps rising when a camera is bumped or the turnaround stops reaching the
+    # marker, which stops corrections dead - and with nothing bounding drift, nothing
+    # else would say so. Metres because that is the unit the brake's clearance is in.
+    "camera_selected_by": None,
+    # Whether the camera was identified by recognising the committed reference view
+    # or taken from configuration. Those are different claims about the marker
+    # position: recognised means the fixture was verified to be there, configured
+    # means an operator said so. A run that corrected against the wrong reference
+    # is only interpretable if the record says which.
+    "marker_match_score": 0.0,
+    "marker_reference_turns": None,
+    # What the camera saw and what was taken out because of it. The correction is
+    # the load's slip past the motor over one cycle, which no other channel on
+    # this stand can see: the encoder is on the motor. Seeded 0.0 rather than
+    # None because a run records these from frame 1 and a numeric channel
+    # carrying no value is unevaluable.
     "total_distance_m": 0.0,
     "distance_since_brake_m": 0.0,
     # How far the load has travelled in all, and how far since the last brake

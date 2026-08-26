@@ -18,6 +18,15 @@ without moving it.
 establish_origin_by_hand: hands the load to a person, and makes where
 they leave it position 0.
 
+establish_reference_by_camera: hands the load to a person to park at the
+marker, picks the camera that can see it, and makes that position
+absolute.
+
+MarkerWatch: watches for the marker through one leg and re-references the
+axis to it - the one thing on this stand that can see the load slip past
+the motor. Watches rather than reads, because the fixture crosses the
+camera's view in flight and does not stop there.
+
 move_to: commands one target position, blocks until arrived and
 settled, and returns the furthest position reached along the way - which
 past an overshoot is not the position arrival was accepted at, and is
@@ -51,8 +60,11 @@ from hardware.odrive import odrive_errors
 from testbeds.ydrive_testbed.ydrive_testbed import (
     BRAKE_SETTLE_S,
     METERS_PER_TURN,
+    Motion,
     YdriveTestbed,
 )
+from hardware.clients.telemetry_client import TelemetryTimeout
+from hardware.clients.command_client import CommandClientError
 from testcases.step import step
 from testcases.utils import Stopwatch, spawn_operator_prompt
 from testcases.ydrive.testcases.base_ydrive_test import BaseYdriveTest
@@ -396,15 +408,176 @@ def establish_origin_by_hand(test_case: BaseYdriveTest) -> float:
 
 
 @step
+def establish_reference_by_camera(test_case: BaseYdriveTest, marker_position: float) -> None:
+    """Have a person park the load where the camera sees the marker, pick the camera that
+    can, write `marker_position` there, and re-teach. The park is what makes all three possible."""
+    testbed: YdriveTestbed = test_case.testbed
+    release_brake(test_case)
+    testbed.command.set_axis_state("IDLE")
+    await_operator(
+        test_case,
+        "move the load by hand until the CAMERA can see the marker on the fixture, "
+        "then acknowledge",
+    )
+
+    # Selection recognises the camera AND confirms the fixture is at the marker, so
+    # when it works both are verified. When it does not - a camera that has been
+    # moved since the view was committed is the ordinary cause, and it invalidates
+    # the view without invalidating the mount - the run proceeds on the configured
+    # camera with the marker position taken on the operator's word, which is what
+    # every hand-set origin on this stand has always rested on. Recorded either way,
+    # because "verified" and "asserted" are different claims about the same number.
+    try:
+        chosen = testbed.vision.select_best_camera()
+    except CommandClientError as exc:
+        test_case.set_state("camera_selected_by", "configuration")
+        logger.warning(
+            "test %s: no camera recognised the committed reference view (%s). Proceeding "
+            "on the configured camera, with the marker position taken on trust - re-teach "
+            "the committed view with `--teach-default` if the camera has moved",
+            test_case.test_id, exc,
+        )
+    else:
+        test_case.set_state("camera_selected_by", "reference view")
+        test_case.set_state("camera_source", chosen["camera_source"])
+        test_case.set_state("marker_match_score", chosen["match_score"])
+        logger.info(
+            "test %s: camera %s sees the marker at %.4f - candidates %s",
+            test_case.test_id, chosen["camera_source"], chosen["match_score"],
+            chosen["considered"],
+        )
+
+    testbed.command.set_pos_estimate(marker_position)
+    test_case.set_state("marker_reference_turns", marker_position)
+    logger.info(
+        "test %s: the marker is position %.1f turns, and every position is now absolute",
+        test_case.test_id, marker_position,
+    )
+
+    # Re-taught here, with the fixture parked and the camera chosen: this run's
+    # corrections are measured against today's light rather than a picture taken
+    # whenever the committed view was captured.
+    taught = testbed.vision.teach()
+    logger.info("test %s: re-taught the reference view here - %s", test_case.test_id, taught)
+
+
+MARKER_SEARCH_WINDOW_TURNS = 10.0
+"""How far from the marker the axis may read and an alignment still be believed.
+
+A SANITY GATE ON WHERE, not a measurement of drift. The tape is periodic and the
+search runs over the whole frame, so a match somewhere else in the stroke is
+possible; nothing outside this window is a place the marker can be. Ten turns
+either side is 0.84 m, which covers the foot or two of drift the camera was sited
+to catch and still excludes the rest of a 110-turn stroke.
+
+Centred on the marker rather than on the top of the stroke, which are 15 turns
+apart - a window around the top would not contain the marker at all, and the
+correction could never fire."""
+
+
+class MarkerWatch:
+    """Watches for the marker through one leg of the stroke, then re-references the axis.
+
+    THE FIXTURE DOES NOT STOP AT THE MARKER. It crosses the camera's view during the
+    turnaround at about 7.7 turns/s and is gone: measured, 0.58 s inside 2 turns of the
+    marker, and by the time the leg's arrival is accepted the load has been pulled back
+    to roughly 8 turns short of the commanded end - some 23 turns from the marker. A
+    single read after arrival never sees it, which is why this watches instead.
+
+    Two phases, on purpose. Watching happens per frame and only records; the correction
+    is applied between legs, because writing pos_estimate shifts input_pos and
+    pos_setpoint with it, and doing that mid-leg moves the target out from under the
+    arrival test that commanded it."""
+
+    def __init__(self, test_case: BaseYdriveTest) -> None:
+        self.test_case = test_case
+        self.seen_at: Optional[float] = None
+        self.best_score: float = 0.0
+        self.taught: bool = True
+
+    def __call__(self, motion: Motion) -> None:
+        """One frame of the leg. Records where the axis read when the marker was FIRST seen -
+        first, so it is always the same crossing of the same view at the same sign of speed,
+        and whatever lag there is between the two streams biases every correction alike."""
+        if self.seen_at is not None:
+            return
+        if abs(motion.position - self.test_case.marker_reference_turns) > MARKER_SEARCH_WINDOW_TURNS:
+            return
+        try:
+            marker = self.test_case.testbed.get_marker_alignment()
+        except TelemetryTimeout:
+            # A camera that has stopped publishing must not stop the stroke. It shows up
+            # as distance_since_correction_m climbing, which is where it belongs.
+            return
+        self.best_score = max(self.best_score, marker.score)
+        self.taught = marker.taught
+        if marker.aligned:
+            self.seen_at = motion.position
+
+    def apply(self) -> None:
+        """Re-reference the axis if the marker was seen, and publish either way. Called between
+        legs, with the load stopped and the leg's own bookkeeping already closed."""
+        test_case = self.test_case
+        test_case.set_state("marker_match_score", self.best_score)
+
+        if not self.taught:
+            logger.warning(
+                "test %s: the camera has no reference view, so nothing can be corrected - "
+                "teach one with `python -m hardware.vision_home.main --teach-default`",
+                test_case.test_id,
+            )
+            return
+
+        if self.seen_at is None:
+            # A bumped camera, or a turnaround that stops reaching the marker, stops
+            # corrections dead - and with nothing bounding drift the load then walks
+            # exactly as it did before. This counter rising and staying up is that.
+            since = test_case.total_distance_m - test_case.distance_at_last_correction_m
+            test_case.set_state("distance_since_correction_m", since)
+            logger.info(
+                "test %s: no marker alignment this leg (best score %.3f) - nothing "
+                "corrected, %.0f m since the last one",
+                test_case.test_id, self.best_score, since,
+            )
+            return
+
+        # What the axis reads NOW, less what it read at the sighting, is how far the load
+        # has moved since - so the marker's number plus that gap is what here should be
+        # called, and the correction is the rest.
+        here = test_case.testbed.get_pos_estimate()
+        should_read = test_case.marker_reference_turns + (here - self.seen_at)
+        correction = should_read - here
+        # Impulse-free: the firmware shifts input_pos and pos_setpoint by the same amount,
+        # so this changes what positions MEAN rather than moving the load.
+        test_case.testbed.command.set_pos_estimate(should_read)
+        # Which is exactly why the travel counter's mark has to move with them, or the
+        # next leg's distance is measured across a change of coordinates.
+        test_case._last_position += correction
+        test_case.distance_at_last_correction_m = test_case.total_distance_m
+        test_case.set_state("distance_since_correction_m", 0.0)
+        logger.info(
+            "test %s: re-referenced %+.4f turns (%+.1f mm) - marker seen at %.3f, "
+            "score %.3f",
+            test_case.test_id, correction, correction * METERS_PER_TURN * 1000,
+            self.seen_at, self.best_score,
+        )
+
+
+@step
 def move_to(
     test_case: BaseYdriveTest,
     target: float,
     position_tolerance: float = DEFAULT_POSITION_TOLERANCE,
     velocity_tolerance: float = DEFAULT_VELOCITY_TOLERANCE,
     arrival_timeout_s: float = DEFAULT_ARRIVAL_TIMEOUT_S,
+    each_frame: Optional[Callable[[Motion], None]] = None,
 ) -> float:
     """Command one target, block until arrived and settled, and return the FURTHEST position
-    reached - past an overshoot that is not where arrival was accepted, which is the point."""
+    reached - past an overshoot that is not where arrival was accepted, which is the point.
+
+    `each_frame` sees every frame of the move, for what has to be watched WHILE the load is
+    moving rather than after it stops. It runs at the stream's rate, so it must be cheap, and
+    it must not move the axis - this loop's arrival test is judging the target it commanded."""
     testbed: YdriveTestbed = test_case.testbed
     testbed.command.set_position(target)
     test_case.set_state("position_target", target)
@@ -423,6 +596,8 @@ def move_to(
         # moment rather than from instants a frame apart - see Motion.
         motion = testbed.get_motion()
         _require_still_driving(test_case, motion, f"moving to {target}")
+        if each_frame is not None:
+            each_frame(motion)
         if furthest is None:
             furthest = motion.position
             outward = 1.0 if target >= motion.position else -1.0

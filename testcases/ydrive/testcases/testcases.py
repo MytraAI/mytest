@@ -42,6 +42,8 @@ from ..teststeps.teststeps import (
     RunDetail,
     prompt_for_SN_ER_load,
     brake_from_speed,
+    establish_reference_by_camera,
+    MarkerWatch,
     cycle_position,
     dwell_braked,
     establish_origin_by_hand,
@@ -104,13 +106,13 @@ class _BrakingYdriveTest(BaseYdriveTest):
     Not runnable, and holds no sequence: each subclass's main_execution states its own."""
 
     START_POSITION = 110.0
-    """Where each braking run begins, in turns from the origin. The axis is driven
-    here under position control; what the controller does between braking runs is
-    each subclass's own."""
+    """THE BOTTOM OF THE STROKE, where each braking run begins. The axis is driven here
+    under position control; what the controller does between runs is each subclass's own."""
 
     BRAKE_TARGET_POSITION = 0.0
-    """Where each braking run is aimed; the brake stops the axis short of it. Travel is
-    110 -> 0, so a late stop's overshoot eats into the clearance below 0."""
+    """THE TOP OF THE STROKE, where each braking run is aimed; the brake stops the axis
+    short of it. Travel is 110 -> 0, so position DECREASES going up and a late stop's
+    overshoot carries past the top into negative turns, where the clearance is."""
 
     TRIGGER_SPEED_M_S = 1.75
     """A floor, not the speed the brake sees - unloaded, the axis crosses it within one
@@ -278,6 +280,27 @@ class CycleBrakeEnduranceTest(_BrakingYdriveTest):
 
     A floor rather than an assertion about the default, which clears it by 20x."""
 
+    MARKER_POSITION = -15.0
+    """Where the marker is, in the stroke's own coordinates: 15 turns ABOVE THE TOP, so
+    NEGATIVE - BRAKE_TARGET_POSITION - 15, not START_POSITION + 15.
+
+    THE SIGN IS THE WHOLE POINT. The camera looks at the top of the stroke, the top is
+    0, and position decreases going up, so the parked fixture is at a negative number.
+    Asserting a positive one told the axis it was a full stroke below where it was: the
+    2026-08-25 14:23 run wrote 125, was commanded to 110, drove UP into the mechanical
+    stop 7.9 turns later and sat there at the 18 A limit for 19 s. Nothing caught it,
+    because 116 is within CYCLE_POSITION_TOLERANCE of 110.
+
+    A PHYSICAL PLACE, and the reason this test's positions are absolute where
+    BrakeEnduranceTest's are relative to a hand-set origin. The operator parks the
+    fixture here at setup and pos_estimate is written to this number, so the same turn
+    count means the same place in every run and stored positions compare across them.
+
+    Also the clearance the brake needs. Measured turnarounds at 1800 lb reach 17.4 to
+    18.5 turns past the commanded end, and that same run put the mechanical stop about
+    8 turns above the park - so the whole excursion past the top fits in roughly 23
+    turns, and this number is not free to grow."""
+
     CYCLE_VELOCITY_LIMIT = MAX_LOAD_VELOCITY_LIMIT
     """What the cycling runs at - the qualified duty tuning, not VELOCITY_LIMIT.
 
@@ -338,6 +361,15 @@ class CycleBrakeEnduranceTest(_BrakingYdriveTest):
                 f"a run-down ({self.MIN_BRAKE_INTERVAL_M} m), so a brake event would start from "
                 "wherever the last one left the load instead of from the top of the stroke"
             )
+        self.distance_at_last_correction_m = 0.0
+        """Where total_distance_m stood when the camera last re-referenced the axis.
+
+        Distance rather than cycles because metres are the unit the brake's clearance
+        is in - "300 m since a correction landed" says how much has been eaten, where
+        a cycle count does not."""
+        self.marker_reference_turns: float = self.MARKER_POSITION
+        """What the axis reads at the marker. A known number rather than something
+        learned, because setup writes pos_estimate there - see MARKER_POSITION."""
         self._last_position = 0.0
         """The furthest point the last move reached, in turns. total_distance_m is the
         sum of the gaps between successive values; main_execution overwrites this with
@@ -366,7 +398,7 @@ class CycleBrakeEnduranceTest(_BrakingYdriveTest):
             self.total_distance_m - self.brake_cycles * self._brake_interval_m,
         )
 
-    def _cycle_leg(self, target: float) -> float:
+    def _cycle_leg(self, target: float, each_frame=None) -> float:
         """One end-to-end leg of a normal stroke under the cycling tolerances, and the furthest point
         it reached. The brake is not touched and the axis stays armed."""
         return move_to(
@@ -375,6 +407,7 @@ class CycleBrakeEnduranceTest(_BrakingYdriveTest):
             position_tolerance=self.CYCLE_POSITION_TOLERANCE,
             velocity_tolerance=self.CYCLE_VELOCITY_TOLERANCE,
             arrival_timeout_s=self.MOVE_TIMEOUT_S,
+            each_frame=each_frame,
         )
 
     def main_execution(self) -> None:
@@ -395,19 +428,23 @@ class CycleBrakeEnduranceTest(_BrakingYdriveTest):
             self.testbed.telemetry, self.testbed.supply_telemetry, self.testbed.tc_daq_telemetry
         )
 
-        origin = establish_origin_by_hand(self)
+        # The operator parks the fixture at the marker and pos_estimate is written
+        # there, so every position below is absolute and the same turn count means
+        # the same place in every run - see MARKER_POSITION. It also picks the
+        # camera, which is only identifiable while the marker is in view.
+        establish_reference_by_camera(self, marker_position=self.MARKER_POSITION)
         release_brake_in_place(self)
 
-        start_line = origin + self.START_POSITION
-        brake_target = origin + self.BRAKE_TARGET_POSITION
+        start_line = self.START_POSITION
+        brake_target = self.BRAKE_TARGET_POSITION
 
-        # The load is at the origin - the operator left it there and
-        # release_brake_in_place() took it back without moving it - so the one move
-        # up to the start line is travel like any other rather than a gap in the
+        # The load is at the marker - the operator left it there and
+        # release_brake_in_place() took it back without moving it - so the move back
+        # to the start line is travel like any other rather than a gap in the
         # record. Through _cycle_leg like every other leg of this stroke: holding the
         # first arrival to a tighter gate than the thousands after it would make it
         # the one leg that waits out a pullback.
-        self._last_position = origin
+        self._last_position = self.MARKER_POSITION
         self._count_travel_to(self._cycle_leg(start_line))
 
         while True:
@@ -417,7 +454,16 @@ class CycleBrakeEnduranceTest(_BrakingYdriveTest):
             # start line, which is where a brake event has to begin.
             brake_owed_at_m = (self.brake_cycles + 1) * self._brake_interval_m
             while self.total_distance_m < brake_owed_at_m:
-                self._count_travel_to(self._cycle_leg(brake_target))
+                # The leg to the top is the one the camera watches - see
+                # MARKER_POSITION. Watched all the way rather than read at the end,
+                # because the fixture crosses the view during the turnaround and is
+                # gone. One leg per cycle, so nothing has to arm and fire to avoid
+                # correcting twice; the correction lands between legs.
+                watch = MarkerWatch(self)
+                self._count_travel_to(self._cycle_leg(brake_target, each_frame=watch))
+                watch.apply()
+                # The body still ENDS at the start line, which is where a brake
+                # event has to begin.
                 self._count_travel_to(self._cycle_leg(start_line))
                 logger.info(
                     "test %s: %.1f m travelled, brake event %d owed at %.0f m",

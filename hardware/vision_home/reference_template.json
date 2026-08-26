@@ -1,0 +1,9 @@
+{
+  "taught_from_camera_source": "0",
+  "taught_on_backend": "AVFOUNDATION",
+  "roi_frac": 0.5,
+  "template_shape": [
+    540,
+    960
+  ]
+}

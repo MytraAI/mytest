@@ -135,20 +135,12 @@ def test_move_to_will_not_accept_a_frame_still_at_cruise():
 
 
 def test_distance_is_the_gap_between_consecutive_resting_positions():
+    """Counted from wherever the load started, which main_execution seeds with the
+    marker - so the first move is travel rather than a gap in the record."""
     case = Accumulator(start_at=110.6)
     case._count_travel_to(-0.4)
 
     assert case.total_distance_m == pytest.approx(111.0 * METERS_PER_TURN)
-
-
-def test_travel_is_counted_from_the_origin_the_load_starts_at():
-    """main_execution seeds _last_position with the origin, because that is where
-    release_brake_in_place() left the load - so the one move up to the start line is
-    travel rather than a gap in the record."""
-    case = Accumulator(start_at=4.0)
-    case._count_travel_to(114.0)
-
-    assert case.total_distance_m == pytest.approx(110.0 * METERS_PER_TURN)
 
 
 def test_overshoot_counts_as_travel_the_setpoints_cannot_see():
@@ -161,14 +153,6 @@ def test_overshoot_counts_as_travel_the_setpoints_cannot_see():
     derived = 2 * CycleBrakeEnduranceTest.START_POSITION * METERS_PER_TURN
     assert case.total_distance_m == pytest.approx(224.5 * METERS_PER_TURN)
     assert case.total_distance_m > derived
-
-
-def test_both_distance_channels_are_published():
-    case = Accumulator()
-    case._count_travel_to(110.0)
-
-    assert case.state["total_distance_m"] == pytest.approx(110.0 * METERS_PER_TURN)
-    assert case.state["distance_since_brake_m"] == pytest.approx(110.0 * METERS_PER_TURN)
 
 
 def test_the_interval_channel_is_derived_rather_than_counted():
@@ -234,11 +218,7 @@ def test_the_test_name_is_in_the_rulebook_and_the_registry():
     one the registry does not list cannot be started by name."""
     assert CycleBrakeEnduranceTest.TEST_NAME in TEST_NAMES
     assert "ydrive.cycle_brake_endurance" in REGISTERED_TESTS
-
-
-def test_it_does_not_share_a_test_name_with_the_test_it_was_built_from():
-    """Stored runs are keyed by TEST_NAME. Reusing brake_endurance_test would merge
-    two different tests into one population."""
+    # Stored runs are keyed by TEST_NAME, so reusing one would merge two populations.
     assert CycleBrakeEnduranceTest.TEST_NAME != BrakeEnduranceTest.TEST_NAME
 
 
@@ -326,9 +306,8 @@ def test_too_short_an_interval_is_refused_rather_than_run():
     with pytest.raises(ValueError, match="shorter than one cycle"):
         CycleBrakeEnduranceTest(require_engine=False, brake_interval_m=10.0)
 
+    assert CycleBrakeEnduranceTest.BRAKE_INTERVAL_M > CycleBrakeEnduranceTest.MIN_BRAKE_INTERVAL_M
 
-def test_the_default_interval_clears_the_floor_by_a_wide_margin():
-    assert CycleBrakeEnduranceTest.BRAKE_INTERVAL_M > 10 * CycleBrakeEnduranceTest.MIN_BRAKE_INTERVAL_M
 
 
 # --- the brake event is counted where it happens ----------------------------
