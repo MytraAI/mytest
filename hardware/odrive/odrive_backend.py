@@ -45,17 +45,21 @@ logger = logging.getLogger(__name__)
 
 SAMPLE_INTERVAL_S = 0.05
 """Sleep *between* frames, not a frame period - and against real hardware
-the difference matters. Each frame reads its declared channels as that many
-sequential USB round-trips, which measured ~29 ms on a real ODrive Pro
-(fw 0.6.11), so the achieved rate is ~12.6 Hz, not the 20 Hz this interval
-alone implies. Measured over a 60 s ManualTest run: 749 frames in 59.9 s.
+the difference matters. Each frame reads its live channels as that many
+sequential USB round-trips, at ~250 us each measured on a real ODrive Pro
+(fw 0.6.12), so the interval alone never determines the rate.
 
-Left at 0.05 deliberately rather than retuned: dropping it to ~0.021 would
-get closer to a true 20 Hz, but the right value depends on what the tests
-actually need from the sample rate, which is a test-engineering decision,
-not a driver one. Whatever it's set to, the publisher's high-water mark is
-sized from it (see protocol/wire.py's hwm_for_interval), so the buffer stays
-proportional to the intended rate."""
+IT IS NOW THE LARGER TERM, which it was not before _CACHED_CHANNELS. Measured
+end to end on one host: 39 live reads cost 13.5 ms against this 50 ms sleep, for
+15.75 Hz. Reading all 100 cost 29.8 ms and gave 12.54 Hz. On the slower of the
+two test machines, where a read costs ~650 us, the same change takes a frame from
+115 ms to 75 ms - 8.7 Hz to 13.3 Hz.
+
+Left at 0.05 deliberately rather than retuned: the right value depends on what
+the tests actually need from the sample rate, which is a test-engineering
+decision, not a driver one. Whatever it is set to, the publisher's high-water
+mark is sized from it (see protocol/wire.py's hwm_for_interval), so the buffer
+stays proportional to the intended rate."""
 DEFAULT_DISCOVERY_TIMEOUT_S = 10.0  # how long connect() waits for odrive.find_any() to see a matching device
 
 _UNSET = object()
@@ -265,6 +269,35 @@ _SPECIAL_COMMANDS = {"set_axis_state", "set_control_mode"}
 # above, so the coverage check can still account for it.
 _COMPUTED_CHANNELS = {"turns_traveled"}
 
+_CACHED_CHANNELS = frozenset(
+    [name for name, (_root, path) in _TELEMETRY_PATHS.items() if "config." in path]
+    + ["board_serial_number"]
+)
+"""Channels read once and republished from cache rather than fetched every frame.
+
+A FRAME IS ITS CHANNEL COUNT IN USB ROUND-TRIPS, and they are not free: measured at
+290 us each on one host and 650 us on another, so 100 channels cost 29 ms and 65 ms
+respectively. Nothing about that is the board's doing - it is one request-response per
+attribute, and the only way to make a frame faster is to ask for fewer things.
+
+Sixty of the hundred are under .config. They are device CONFIGURATION: they cannot
+change unless something writes them, and this driver owns every setter. So they are
+read at connect, re-read when written, and otherwise served from the last value - which
+is the same tier the cpx400dp driver keeps its setpoints in, for the same reason.
+
+board_serial_number joins them for being a constant.
+
+WHAT THIS GIVES UP is an out-of-band change: odrivetool on the same board, or a
+firmware action that rewrites its own configuration, would not appear until the next
+refresh. CACHED_REFRESH_FRAMES bounds how long that can last."""
+
+CACHED_REFRESH_FRAMES = 200
+"""How many frames between full re-reads of the cached tier.
+
+Insurance against an out-of-band change, not correctness: a write through this driver
+refreshes its own channel immediately. About 15 s at the rates this driver achieves,
+against a one-off cost of the tier's own read."""
+
 
 def _validate_channel_coverage() -> None:
     """Runs once at import time. TELEMETRY_CHANNELS/COMMAND_CHANNELS (the
@@ -339,6 +372,10 @@ class OdriveBackend(HardwareBackend):
         self._last_watched: Dict[str, Any] = {}
         """Last seen value of each channel in odrive_errors.WATCHED_CHANNELS, so
         error logging can fire on change rather than on every frame."""
+        self._cached_channels: Dict[str, Any] = {}
+        """Last read of every channel in _CACHED_CHANNELS. Replaced wholesale rather
+        than mutated, so the streaming thread's view is always a complete one."""
+        self._frames_since_cache_refresh: int = 0
         self._turns_traveled: float = 0.0
         self._position_last_frame: Optional[float] = None
         self._pos_estimate_writes: int = 0
@@ -393,6 +430,10 @@ class OdriveBackend(HardwareBackend):
             ) from exc
         logger.info("connected to ODrive serial_number=%s", getattr(self._odrv, "serial_number", None))
         await asyncio.to_thread(self._verify_declared_channels_exist)
+        # Before the first frame: a cached channel with no value yet would be missing
+        # from it, and verify_channels() on the other end treats that as a driver that
+        # does not implement what it declared.
+        await asyncio.to_thread(self._refresh_cached_channels)
 
     def _verify_declared_channels_exist(self) -> None:
         """Confirm every declared channel resolves on this device, raising
@@ -489,7 +530,13 @@ class OdriveBackend(HardwareBackend):
                 # MEANS rather than what the hardware does, so the one that the travel
                 # accumulator has to be told about - see _accumulate_turns_traveled().
                 self._pos_estimate_writes += 1
-            return await asyncio.to_thread(_set_path, obj, path, params["value"])
+            result = await asyncio.to_thread(_set_path, obj, path, params["value"])
+            # Every setter's path is also a telemetry channel, so a write to the cached
+            # tier can refresh exactly the one channel it changed rather than the tier.
+            # Read back rather than assumed: the board is free to clamp or reject a
+            # value, and a cache holding what we asked for would then say so forever.
+            await asyncio.to_thread(self._refresh_one_cached, root, path)
+            return result
         if action in _METHODS:
             root, path, arg_names = _METHODS[action]
             obj = self._odrv.axis0 if root == "axis" else self._odrv
@@ -553,6 +600,15 @@ class OdriveBackend(HardwareBackend):
         except Exception:
             logger.exception("failed to log an ODrive error transition, continuing to stream")
 
+    def _refresh_one_cached(self, root: str, path: str) -> None:
+        """Re-read one cached channel after a write to it. A no-op for a live channel,
+        which the next frame fetches anyway."""
+        name = next(
+            (n for n in _CACHED_CHANNELS if _TELEMETRY_PATHS[n] == (root, path)), None
+        )
+        if name is not None:
+            self._cached_channels = {**self._cached_channels, name: self._read_one(root, path)}
+
     def _accumulate_turns_traveled(self, frame: Dict[str, Any]) -> None:
         """Add this frame's change in pos_estimate to turns_traveled, as a magnitude.
 
@@ -592,17 +648,37 @@ class OdriveBackend(HardwareBackend):
         self._position_last_frame = position
         frame["turns_traveled"] = self._turns_traveled
 
+    def _read_one(self, root: str, path: str):
+        # AttributeError is deliberately not caught: connect() has already probed
+        # every declared path, so absence is a setup-time error. If one appears here
+        # the device's attribute graph changed mid-run, and runner.py treating a
+        # raising stream_samples() as fatal is correct.
+        obj = self._odrv.axis0 if root == "axis" else self._odrv
+        return to_jsonable(_get_path(obj, path))
+
+    def _refresh_cached_channels(self) -> None:
+        """Re-read the whole cached tier - see _CACHED_CHANNELS.
+
+        Built into a new dict and assigned, never mutated in place: the streaming
+        thread reads this without a lock, and a dict it is iterating must not change
+        size underneath it."""
+        self._cached_channels = {
+            name: self._read_one(*_TELEMETRY_PATHS[name]) for name in sorted(_CACHED_CHANNELS)
+        }
+        self._frames_since_cache_refresh = 0
+
     def _read_all_channels(self) -> dict:
-        axis = self._odrv.axis0
-        odrv = self._odrv
-        result = {}
+        """One frame: the live channels off the board, the cached tier from memory.
+
+        Thirty-nine USB round-trips instead of a hundred - see _CACHED_CHANNELS for why
+        the other sixty-one do not need asking about."""
+        if self._frames_since_cache_refresh >= CACHED_REFRESH_FRAMES:
+            self._refresh_cached_channels()
+        self._frames_since_cache_refresh += 1
+        result = dict(self._cached_channels)
         for name, (root, path) in _TELEMETRY_PATHS.items():
-            obj = axis if root == "axis" else odrv
-            # AttributeError is deliberately not caught: connect() has already
-            # probed every declared path, so absence is a setup-time error. If
-            # one appears here the device's attribute graph changed mid-run, and
-            # runner.py treating a raising stream_samples() as fatal is correct.
-            result[name] = to_jsonable(_get_path(obj, path))
+            if name not in _CACHED_CHANNELS:
+                result[name] = self._read_one(root, path)
         return result
 
     async def _set_axis_state(self, state: str) -> None:
