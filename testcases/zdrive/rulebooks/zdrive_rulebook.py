@@ -133,7 +133,7 @@ see ManualTest.
   on a channel carrying no value is unevaluable, and the runner treats unevaluable
   as a stop, so None would end every run on its first frame.
 
-  A GROSS-FAULT NET, NOT A PERFORMANCE FIGURE. 0.25 m is 26 turns, and a healthy
+  A GROSS-FAULT NET, NOT A PERFORMANCE FIGURE. 0.25 m is 23.6 turns, and a healthy
   stop from this test's trigger speed is a fraction of a turn - the axis is
   effectively self-locking, so the screw stops the load about as much as the brake
   does. A stop that ran to 0.25 m would mean the brake and the screw had both let
@@ -194,10 +194,10 @@ MAX_STOPPING_DISTANCE_M = 0.25
 command rather than from when the brake bites - so it includes the coast through
 BRAKE_SETTLE_S.
 
-Metres, matching ZdriveTestbed.METERS_PER_TURN: 0.25 m is 26 turns of this drive.
-Measured stops on a 1000 lb load ran 0.060 to 0.073 m, and that figure is known to
-UNDER-report - the baseline is taken a telemetry frame after the brake was
-commanded, which at the speeds involved omits 0.043 to 0.083 m."""
+Metres, matching ZdriveTestbed.METERS_PER_TURN: 0.25 m is 23.6 turns of this
+drive. Measured stops on a 1000 lb load ran 0.066 to 0.080 m, and that figure is
+known to UNDER-report - the baseline is taken a telemetry frame after the brake
+was commanded, which at the speeds involved omits 0.047 to 0.091 m."""
 
 MAX_BRAKE_SLIP_M = 0.010
 """How far the load may slip while the brake alone is holding it.
@@ -240,7 +240,7 @@ MAX_AXIS_SPEED_TURNS_S = 40.0
 control of anything that commands a velocity.
 
 Turns/s, matching the control path rather than METERS_PER_TURN - 40 turns/s is
-0.384 m/s - because what this is compared against is the controller's vel_limit,
+0.423 m/s - because what this is compared against is the controller's vel_limit,
 which is set in turns/s.
 
 Placed to separate a runaway from a stroke, with room on both sides: measured
