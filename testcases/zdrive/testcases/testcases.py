@@ -217,7 +217,7 @@ class BrakeHoldTest(_LiftingZdriveTest):
 
 
 class CycleBrakeHoldTest(_LiftingZdriveTest):
-    """Repeats the brake hold indefinitely: lift to the top, hand the load to the brake for a hold, lower it back onto its stop and dwell - recording how far it slipped each time, how far the drive has travelled in all, and waiting at the bottom whenever the stand is too hot to lift again."""
+    """Cycles the load up and down indefinitely, handing it to the brake at the top for a hold once every HOLD_INTERVAL_CYCLES cycles - recording how far it slipped each time, how far the drive has travelled in all, and waiting at the bottom whenever the stand is too hot to lift again."""
 
     TEST_NAME = CYCLE_BRAKE_HOLD_TEST_NAME
 
@@ -234,13 +234,77 @@ class CycleBrakeHoldTest(_LiftingZdriveTest):
     """How long the brake holds the load at the top with the axis idle. The measurement:
     nothing but the brake opposes the load's weight for this long."""
 
+    HOLD_INTERVAL_CYCLES = 10
+    """How many cycles each loaded hold is worth: the hold happens on cycle 10, 20, 30
+    and so on, and the nine between them lift and lower under the controller with the
+    brake released from bottom to top and back.
+
+    THE BRAKE'S LOADED WEAR AND THE DRIVE'S DUTY ARE DIFFERENT COUNTS, which is why the
+    run publishes `lift_cycles` beside `loaded_brake_holds`. Only every tenth cycle hands
+    the load to the brake; the brake still engages at the bottom of every cycle, where the
+    load is on its hard stop and it is holding nothing.
+
+    Each hold is earned by the nine cycles before it, so every one measures a brake that
+    has just done nine lifts rather than one that has been sitting. What that costs is a
+    run ending inside its first ten cycles, which records no slip at all.
+
+    A COUNT OF CYCLES RATHER THAN A DISTANCE, unlike ydrive's BRAKE_INTERVAL_M: move_to
+    on this stand blocks until arrived AND settled inside half a turn, so a cycle here is
+    an exact 100 turns and counting them needs no telemetry frame to have arrived.
+    Ydrive's arrivals overshoot by more than its own tolerance, where metres of measured
+    track are the only honest unit.
+
+    Dropping the hold from nine cycles in ten removes IDLE time rather than armed time -
+    the axis is idled for a hold and the brake carries the load - so a larger fraction of
+    each cycle is spent armed than on a run that holds every time. What absorbs that is
+    wait_for_thermal_headroom at the bottom, and `thermal_waits` is why the run slowing
+    down is visible rather than silent."""
+
     DWELL_S = 2.0
     """How long the load sits on its bottom stop between cycles, brake engaged and axis
     idle, before the temperatures are checked."""
 
-    def __init__(self, test_id: Optional[str] = None, use_mock: bool = False, require_engine: bool = True):
+    def __init__(
+        self,
+        test_id: Optional[str] = None,
+        use_mock: bool = False,
+        require_engine: bool = True,
+        hold_interval_cycles: Optional[int] = None,
+    ):
+        """hold_interval_cycles overrides HOLD_INTERVAL_CYCLES, so a shakedown needs no
+        edit to the class - as BrakeEnduranceTest takes a slower trigger speed.
+
+        Refused here rather than at the first modulo, which would raise partway through a
+        cycle: after the operator has answered the prompt and gone, with the load already
+        lifted. Both an interval below 1 and one that is not a whole number of cycles are
+        refused - True is an int to isinstance and would silently mean "hold every cycle",
+        and a float survives the modulo only to be recorded through an integer format."""
         super().__init__(test_id, use_mock, require_engine=require_engine)
         self.loaded_brake_holds = 0
+        self.lift_cycles = 0
+        """How many cycles this run has COMPLETED - the drive's duty, where
+        loaded_brake_holds is the brake's. See HOLD_INTERVAL_CYCLES for why they are two
+        counts rather than one.
+
+        Completed rather than begun, so it describes the same population as the distance
+        beside it: a run that dies partway up does not report a cycle whose travel
+        total_distance_m only partly contains."""
+        self._hold_interval_cycles = (
+            hold_interval_cycles if hold_interval_cycles is not None
+            else self.HOLD_INTERVAL_CYCLES
+        )
+        if isinstance(self._hold_interval_cycles, bool) or not isinstance(
+            self._hold_interval_cycles, int
+        ):
+            raise TypeError(
+                "hold_interval_cycles must be an int, got "
+                f"{type(self._hold_interval_cycles).__name__}"
+            )
+        if self._hold_interval_cycles < 1:
+            raise ValueError(
+                "hold_interval_cycles must be at least 1, got "
+                f"{self._hold_interval_cycles}"
+            )
         self._distance_at_run_start_m: Optional[float] = None
         """What the driver's travel counter read when this run's cycling began. None until
         main_execution seeds it, which is what holds the derived channels back until there
@@ -248,10 +312,16 @@ class CycleBrakeHoldTest(_LiftingZdriveTest):
         a person hand-moving the load onto its stop."""
 
     def result_metadata(self) -> dict:
-        """What this run was, for the verdict."""
+        """What this run was, for the verdict.
+
+        hold_interval_cycles is what tells one run's schedule from another's: the test
+        name says which test ran, and this says how much duty each of its holds stood
+        for. Without it a count of holds cannot be compared across runs."""
         return {
             **self.run_details,
             "loaded_brake_holds": self.loaded_brake_holds,
+            "lift_cycles": self.lift_cycles,
+            "hold_interval_cycles": self._hold_interval_cycles,
             "total_distance_m": self.total_distance_m,
             "top_position_turns": self.TOP_POSITION,
             "hold_s": self.HOLD_S,
@@ -279,6 +349,30 @@ class CycleBrakeHoldTest(_LiftingZdriveTest):
         """This run's travel in metres, read back from the state the derivation publishes,
         so there is one computation of it and the verdict cannot disagree with the record."""
         return float(self.state_snapshot().get("total_distance_m", 0.0))
+
+    def hold_is_due(self, cycle: int) -> bool:
+        """Whether the cycle about to run hands the load to the brake at the top.
+
+        Every HOLD_INTERVAL_CYCLES'th cycle, counted from the start of the run, so the
+        holds land on 10, 20, 30 and each is earned by nine cycles of duty behind it. An
+        interval of 1 holds on every cycle.
+
+        A method rather than an expression in the loop so the schedule can be asserted
+        without a stand, a telemetry stream or a fake: what decides how often 1000 lb is
+        handed to the brake should be checkable by reading it, not by reading the source
+        of the loop it sits in."""
+        return cycle % self._hold_interval_cycles == 0
+
+    def next_hold_number(self) -> int:
+        """Which loaded hold falls next: the one after however many whole intervals the
+        run has completed. It falls on this many times HOLD_INTERVAL_CYCLES.
+
+        Taken from lift_cycles rather than from loaded_brake_holds, so the counter that
+        decides the schedule is also the counter everything reported about the schedule
+        comes from. The two agree today; deriving what the log claims from the other one
+        would mean any future path that declines a due hold - the thermal gate is right
+        there - leaves every later line naming a cycle already past, silently."""
+        return self.lift_cycles // self._hold_interval_cycles + 1
 
     def main_execution(self) -> None:
         # Asked first, while nothing is energized and the brake is still holding: it
@@ -311,15 +405,30 @@ class CycleBrakeHoldTest(_LiftingZdriveTest):
         release_brake_in_place(self)
 
         while True:
+            # The cycle about to run, which is one past the last COMPLETED one -
+            # lift_cycles is only advanced once this cycle is back at the bottom and the
+            # temperatures have been read.
+            cycle = self.lift_cycles + 1
+            hold_due = self.hold_is_due(cycle)
+
             move_to(self, origin + self.TOP_POSITION)
 
-            slip_m = hold_on_brake(self, self.HOLD_S, origin)
-            self.loaded_brake_holds += 1
-            self.set_state("loaded_brake_holds", self.loaded_brake_holds)
+            # On the cycles that do not hold, the top of the stroke is a turnaround and
+            # nothing else: the axis stays armed and the brake stays released from the
+            # bottom, through the top and back. The brake takes 1000 lb only on the
+            # cycles that measure it - see HOLD_INTERVAL_CYCLES.
+            slip_m: Optional[float] = None
+            if hold_due:
+                slip_m = hold_on_brake(self, self.HOLD_S, origin)
+                self.loaded_brake_holds += 1
+                self.set_state("loaded_brake_holds", self.loaded_brake_holds)
 
-            # In place, deliberately: if the brake slipped, the axis is no longer
-            # where the move left the setpoint.
-            release_brake_in_place(self)
+                # In place, deliberately: if the brake slipped, the axis is no longer
+                # where the move left the setpoint. Inside this branch because only a
+                # brake that took the load can have crept away from it - on the other
+                # cycles the controller never let go, and there is nothing to park.
+                release_brake_in_place(self)
+
             move_to(self, origin + self.BOTTOM_POSITION)
 
             # Brake on and axis idle for the dwell. The load is on its hard stop, so
@@ -328,20 +437,40 @@ class CycleBrakeHoldTest(_LiftingZdriveTest):
             dwell_from = time.monotonic()
             self.wait_for(self.DWELL_S)
 
-            # Then the temperatures, in the one state where waiting is free. Measured
-            # rather than computed from DWELL_S and the wait count: each temperature
-            # check blocks for a frame from two devices, so the arithmetic would be
-            # close and not true. What it is for is telling a cycle that cooled down
-            # first from one that did not - the brake enters the next hold at a
-            # different temperature, and slip is compared across them.
+            # Then the temperatures, in the one state where waiting is free. On every
+            # cycle rather than only the ones that hold: what the check stands in front
+            # of is the lift, and every cycle lifts. Measured rather than computed from
+            # DWELL_S and the wait count: each temperature check blocks for a frame from
+            # two devices, so the arithmetic would be close and not true. What it is for
+            # is telling a cycle that cooled down first from one that did not - the
+            # brake enters the next hold at a different temperature, and slip is
+            # compared across them.
             waits = wait_for_thermal_headroom(self)
             self.set_state("bottom_dwell_s", time.monotonic() - dwell_from)
 
-            logger.info(
-                "test %s: hold %d complete, slipped %+.6f m, %.1f m travelled in all%s",
-                self.test_id, self.loaded_brake_holds, slip_m, self.total_distance_m,
-                f", after {waits} thermal wait(s)" if waits else "",
-            )
+            # The cycle is done: back on its stop, braked, and read. Published here so
+            # the count and the travel behind it describe the same finished work.
+            self.lift_cycles = cycle
+            self.set_state("lift_cycles", self.lift_cycles)
+
+            # One line per cycle whether or not it held, so the cadence someone watches
+            # an unattended stand by does not drop to one line per ten cycles - and the
+            # cycle the next hold falls on is readable from the log without the source.
+            waited = f", after {waits} thermal wait(s)" if waits else ""
+            if slip_m is not None:
+                logger.info(
+                    "test %s: cycle %d: hold %d complete, slipped %+.6f m, "
+                    "%.1f m travelled in all%s",
+                    self.test_id, cycle, self.loaded_brake_holds, slip_m,
+                    self.total_distance_m, waited,
+                )
+            else:
+                owed = self.next_hold_number()
+                logger.info(
+                    "test %s: cycle %d: %.1f m travelled, hold %d owed at cycle %d%s",
+                    self.test_id, cycle, self.total_distance_m,
+                    owed, owed * self._hold_interval_cycles, waited,
+                )
 
             # Handed back only now, after the temperatures said yes.
             release_brake_in_place(self)

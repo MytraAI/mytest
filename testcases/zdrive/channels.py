@@ -42,12 +42,19 @@ DEFAULT_STATE: Dict[str, Any] = {
     # under a channel name rather than a label, so rewording the prompt cannot
     # rename the channel stored runs are keyed by.
     "loaded_brake_holds": 0,
+    "lift_cycles": 0,
     # Holds where the brake was actually carrying the load, which is the count that
-    # means anything for wear. CycleBrakeHoldTest engages the brake twice per cycle -
-    # once at the top, where it holds 1000 lb, and once at the bottom, where the load
-    # is already resting on its hard stop and the brake is holding nothing. Only the
-    # first is counted, and the name says so rather than leaving a reader to work out
-    # which of the two a bare "brake_holds" meant.
+    # means anything for wear, and cycles of the stroke, which is the drive's duty.
+    # They are different numbers. CycleBrakeHoldTest engages the brake at the bottom of
+    # every cycle, where the load is already resting on its hard stop and the brake is
+    # holding nothing, and at the top only once every HOLD_INTERVAL_CYCLES cycles, where
+    # it holds 1000 lb. Only the second is counted here, and the name says so rather
+    # than leaving a reader to work out which of the two a bare "brake_holds" meant.
+    #
+    # Both are published because neither recovers the other: a reader with only the
+    # holds cannot say how far the drive worked, and recovering the cycles from
+    # total_distance_m means dividing by a stroke constant they would have to go and
+    # look up. The interval that relates them is in the run's result_metadata.
     "brake_slip_m": 0.0,
     "total_distance_m": 0.0,
     "bottom_dwell_s": 0.0,
