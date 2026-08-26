@@ -283,6 +283,7 @@ class YdriveTestbed:
         self._sync_telemetry: Optional[TelemetryClient] = None
         self._supply: Optional[Cpx400dpCommandClient] = None
         self._supply_telemetry: Optional[TelemetryClient] = None
+        self._sync_supply_telemetry: Optional[TelemetryClient] = None
         self._tc_daq_telemetry: Optional[TelemetryClient] = None
         self._vision: Optional[VisionHomeCommandClient] = None
         self._vision_telemetry: Optional[TelemetryClient] = None
@@ -357,6 +358,14 @@ class YdriveTestbed:
         self._sync_telemetry = TelemetryClient(endpoint=DEFAULT_ODRIVE_TELEMETRY_ENDPOINT)
         self._supply = Cpx400dpCommandClient(endpoint=DEFAULT_CPX400DP_COMMAND_ENDPOINT)
         self._supply_telemetry = TelemetryClient(endpoint=DEFAULT_CPX400DP_TELEMETRY_ENDPOINT)
+        self._sync_supply_telemetry = TelemetryClient(endpoint=DEFAULT_CPX400DP_TELEMETRY_ENDPOINT)
+        """A second subscription on the same endpoint, for this process's own reads.
+
+        The one above goes to LiveRulebookRunner, which reads it on a thread of its
+        own for the whole run. A SUB socket is not thread-safe and a subscription
+        delivers each frame once, so a testbed reading the runner's client would
+        both tear messages and take frames the bounds were meant to see - see
+        ConcurrentTelemetryRead. One client per consumer is what keeps them apart."""
         self._tc_daq_telemetry = TelemetryClient(
             endpoint=DEFAULT_TC_DAQ_TELEMETRY_ENDPOINT, timeout_s=TC_DAQ_STALENESS_S
         )
@@ -493,12 +502,14 @@ class YdriveTestbed:
         self._safe("disconnect the supply backend", lambda: self.supply.disconnect_backend())
 
         for client in (self._command, self._telemetry, self._sync_telemetry,
-                       self._supply, self._supply_telemetry, self._tc_daq_telemetry,
+                       self._supply, self._supply_telemetry, self._sync_supply_telemetry,
+                       self._tc_daq_telemetry,
                        self._vision, self._vision_telemetry):
             if client is not None:
                 self._safe(f"close {type(client).__name__}", client.close)
         self._command = self._telemetry = self._sync_telemetry = None
         self._supply = self._supply_telemetry = self._tc_daq_telemetry = None
+        self._sync_supply_telemetry = None
         self._vision = self._vision_telemetry = None
 
         for process in self._processes:
@@ -560,7 +571,7 @@ class YdriveTestbed:
     def _supply_channels(self) -> Dict[str, object]:
         """Block for the next supply telemetry frame and return its channels. Private: callers ask a
         named question instead, so this stand's channel names live in one place."""
-        return self.supply_telemetry.latest_frame().channels
+        return self.sync_supply_telemetry.latest_frame().channels
 
 
     @property
@@ -568,6 +579,13 @@ class YdriveTestbed:
         if self._supply is None:
             raise RuntimeError("YdriveTestbed.supply accessed before start()")
         return self._supply
+
+    @property
+    def sync_supply_telemetry(self) -> TelemetryClient:
+        """This process's own supply subscription - see the constructor."""
+        if self._sync_supply_telemetry is None:
+            raise RuntimeError("YdriveTestbed.sync_supply_telemetry accessed before start()")
+        return self._sync_supply_telemetry
 
     @property
     def supply_telemetry(self) -> TelemetryClient:
