@@ -253,3 +253,112 @@ def test_the_device_has_its_own_name_and_endpoint():
     assert TELEMETRY_ENDPOINTS[DEVICE_TC_DAQ] not in [
         endpoint for device, endpoint in TELEMETRY_ENDPOINTS.items() if device != DEVICE_TC_DAQ
     ]
+
+
+# --- a lone terminator is not a frame ---------------------------------------
+
+
+class TerminatorFirstPort:
+    """A port opened between the CR and the LF of a CRLF terminator.
+
+    What the device is actually doing when a driver connects: streaming without
+    pause, so there is no frame boundary to open on. pyserial's readline splits on
+    LF, so the leftover LF comes back as a complete - and empty - line.
+    """
+
+    def __init__(self, leading_blanks=1):
+        self.queue = [b"\n"] * leading_blanks + [GOOD_LINE.encode() + b"\r\n"] * 10
+
+    def readline(self):
+        return self.queue.pop(0) if self.queue else b""
+
+    def close(self):
+        pass
+
+
+class TerminatorOnlyPort:
+    """A live link that only ever delivers terminators - a framing or baud fault,
+    not a dead cable."""
+
+    def readline(self):
+        return b"\r\n"
+
+    def close(self):
+        pass
+
+
+@sync
+async def test_a_lone_terminator_is_skipped_rather_than_returned_as_a_line():
+    """The bug this fixes. It came back as the empty string, connect() parsed it as a
+    frame with one field instead of eight, and the driver refused to start - which on
+    2026-08-26 took down two runs before anything moved."""
+    transport = SerialLineTransport(read_timeout_s=0.01, silence_timeout_s=0.5)
+    transport._serial = TerminatorFirstPort()
+
+    assert await transport.read_line() == GOOD_LINE
+
+
+@sync
+async def test_several_leading_terminators_are_all_skipped():
+    transport = SerialLineTransport(read_timeout_s=0.01, silence_timeout_s=0.5)
+    transport._serial = TerminatorFirstPort(leading_blanks=5)
+
+    assert await transport.read_line() == GOOD_LINE
+
+
+@sync
+async def test_discarding_a_partial_line_discards_the_fragment_not_a_terminator():
+    """What discard_partial_line() exists for. Discarding the stray terminator instead
+    left the fragment in place and handed connect() the thing it exists to prevent."""
+    transport = SerialLineTransport(read_timeout_s=0.01, silence_timeout_s=0.5)
+    transport._serial = TerminatorFirstPort()
+    transport._serial.queue = [b"\n", b"383,FAULT\r\n"] + [GOOD_LINE.encode() + b"\r\n"] * 5
+
+    await transport.discard_partial_line()
+
+    assert await transport.read_line() == GOOD_LINE, "the fragment should have been eaten"
+
+
+@sync
+async def test_a_stream_of_only_terminators_is_still_a_dead_link():
+    """Skipping blanks must not become an unbounded loop: a device sending nothing but
+    terminators is as useless as one sending nothing, and the driver has to say so
+    rather than hang at connect."""
+    transport = SerialLineTransport(read_timeout_s=0.01, silence_timeout_s=0.05)
+    transport._serial = TerminatorOnlyPort()
+
+    with pytest.raises(HardwareError, match="framing or baud"):
+        await transport.read_line()
+
+
+@sync
+async def test_a_terminator_before_the_first_frame_does_not_stop_a_run_starting():
+    """End to end through connect(), which is where this actually bit.
+
+    TWO leading terminators, not one: with a single one the old code survived, because
+    discard_partial_line() ate it and the probe lines that followed were clean. The
+    failure needed a blank still queued when the probe began - which is exactly what
+    made it intermittent, and why a test has to reproduce that ordering rather than
+    merely a leading blank.
+
+    open() is stubbed out. Left real it enumerates and opens an actual CP210x, so on a
+    machine that happens to have the DAQ attached this test quietly passes by reading
+    the device instead of the fixture - which is how the first draft of it passed
+    against the very bug it was written for."""
+    from hardware.tc_daq.tc_daq_backend import TcDaqBackend
+
+    transport = SerialLineTransport(read_timeout_s=0.01, silence_timeout_s=0.5)
+    port = TerminatorFirstPort(leading_blanks=2)
+
+    # Installed BY the stubbed open(), not before it: is_open reports whether _serial
+    # is set, so pre-injecting it makes connect() see an already-open transport and
+    # return without probing at all - passing without executing the code under test.
+    async def fake_open():
+        transport._serial = port
+
+    transport.open = fake_open
+
+    backend = TcDaqBackend(transport=transport)
+    await backend.connect()
+
+    assert backend.is_connected, "connect() should not have closed the port"

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Optional
 
 from ..backend import HardwareError
@@ -144,29 +145,58 @@ class SerialLineTransport:
             logger.warning("closing %s failed, continuing", self.address, exc_info=True)
 
     async def read_line(self) -> str:
-        """The next line, without its terminator.
+        """The next line with something in it, without its terminator.
 
-        Retries a timed-out read until SILENCE_TIMEOUT_S has passed with
-        nothing arriving, then raises: on a device that only streams, silence is
-        the one symptom a dead link has."""
+        BLANK LINES ARE SKIPPED, NOT RETURNED, and that is the whole of a bug this
+        cost a run to find. The device terminates with CRLF, and pyserial's readline
+        splits on LF - so a port that opens between the two bytes leaves a lone LF in
+        the buffer, which readline returns as a complete line. It is truthy, so it used
+        to come back from here as the empty string, and connect() parsed it as a frame
+        with one field instead of eight and refused to start. On a device that streams
+        continuously there is no frame boundary to open on, so this is a race a driver
+        loses at whatever rate the timing happens to collide.
+
+        It also makes discard_partial_line() do what it says: it discards the fragment
+        rather than a stray terminator, leaving the fragment for the caller.
+
+        Bounded by SILENCE_TIMEOUT_S of elapsed time rather than by counting timed-out
+        reads, because there are now two ways to get nothing usable - a link that is
+        silent, and one delivering only terminators. Wall clock covers both, and a
+        device that never sends a parseable line is as dead as one sending nothing."""
         if self._serial is None:
             raise HardwareError(f"{self.address} is not open")
-        waited = 0.0
+        deadline = time.monotonic() + self._silence_timeout_s
+        saw_bytes = False
         while True:
             raw = await asyncio.to_thread(self._serial.readline)
-            if raw:
-                return raw.decode("ascii", errors="replace").strip()
-            waited += self._read_timeout_s
-            if waited >= self._silence_timeout_s:
+            saw_bytes = saw_bytes or bool(raw)
+            line = raw.decode("ascii", errors="replace").strip()
+            if line:
+                return line
+            if time.monotonic() >= deadline:
+                # Two different faults, and the difference is worth stating: nothing at
+                # all is a cable or a powered-down device, while bytes that are only
+                # ever terminators is a framing or baud problem on a live link.
+                detail = (
+                    "it is delivering line terminators and nothing else, which is a "
+                    "framing or baud-rate problem rather than a dead cable"
+                    if saw_bytes else
+                    "it has been silent - this device streams continuously, so nothing "
+                    "arriving means the link is down"
+                )
                 raise HardwareError(
-                    f"{self.address} has been silent for {waited:.0f}s - this device streams "
-                    "continuously, so nothing arriving means the link is down"
+                    f"{self.address} has produced no readable line for "
+                    f"{self._silence_timeout_s:.0f}s: {detail}"
                 )
 
     async def discard_partial_line(self) -> None:
         """Read and throw away whatever is mid-flight.
 
-        The device is mid-sentence when the port opens, so the first line is
-        very likely a fragment - and a fragment parses as the wrong number of
-        fields, which would otherwise look exactly like the wrong baud rate."""
+        The device is mid-sentence when the port opens, so the first line is very
+        likely a fragment - and a fragment parses as the wrong number of fields, which
+        would otherwise look exactly like the wrong baud rate.
+
+        Relies on read_line() skipping blanks: without that this discarded a lone
+        terminator instead, left the fragment in place, and handed connect() the very
+        thing it exists to prevent."""
         await self.read_line()
