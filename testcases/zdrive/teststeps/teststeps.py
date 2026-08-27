@@ -83,32 +83,50 @@ origin: every target is relative to wherever the operator leaves the load."""
 
 DEFAULT_POSITION_TOLERANCE = 0.5  # turns
 DEFAULT_VELOCITY_TOLERANCE = 0.05  # turns/s
-DEFAULT_ARRIVAL_TIMEOUT_S = 30.0
-"""How long a move may take. 55 turns at the 18 turns/s velocity limit is 3.1 s,
-so this is generous enough for a slow load and short enough that a stalled axis
-reports rather than hanging the run."""
+DEFAULT_ARRIVAL_TIMEOUT_S = 12.0
+"""How long a move may take, before a stalled axis is reported rather than
+waited on.
+
+TWICE THE SLOWEST MOVE THIS STAND HAS MADE, which is the lift: across 882
+full-stroke moves on a 1000 lb load the slowest took 5.59 s, and the median 4.48.
+Descents are quicker and less variable, 2.8 to 3.1 s.
+
+SIZED FROM THE LIFT RATHER THAN FROM VELOCITY_LIMIT, because the two disagree.
+55 turns at 18 turns/s is 3.1 s, and a descent does run close to that - but a
+loaded lift is current-limited rather than velocity-limited, so it takes nearer
+5 s and raising the velocity ceiling would not move it. Sizing this off the
+arithmetic alone would be sizing it off the wrong move."""
 
 TEARDOWN_POSITION_TOLERANCE = 1.0  # turns
 """How close to the bottom a teardown descent has to get before it is called
 done. Looser than a move's tolerance: the point is that the load is resting on
 its stop rather than suspended, not that it is precisely placed."""
 
-TEARDOWN_DESCENT_TIMEOUT_S = 10.0
+TEARDOWN_DESCENT_TIMEOUT_S = 7.0
 """How long the teardown descent is attempted before everything is switched off
 regardless of where the load got to.
 
-An attempt, not a guarantee. The full stroke takes 3.1 s at the velocity limit,
-so a healthy descent finishes well inside this; a descent that does not is one
-where something is already wrong, and waiting longer on a stand nobody is
-watching buys less than shutting it down does. However it ends, the brake is
-engaged and the bus dropped - so a load that did not make it to the bottom is
-left held by the brake, which is where it would have been anyway."""
+An attempt, not a guarantee. Clears twice the slowest descent measured here:
+624 full-stroke descents on a 1000 lb load ran 2.81 to 3.13 s, which is close to
+the 3.1 s the arithmetic gives, because a descent really is velocity-limited.
+A descent that does not finish inside this is one where something is already
+wrong, and waiting longer on a stand nobody is watching buys less than shutting
+it down does. However it ends, the brake is engaged and the bus dropped - so a
+load that did not make it to the bottom is left held by the brake, which is
+where it would have been anyway."""
 
-DEFAULT_STOP_TIMEOUT_S = 10.0
+DEFAULT_STOP_TIMEOUT_S = 2.0
 """How long the load may still be moving after the brake was commanded before the
-run gives up on it stopping. Generous against BRAKE_SETTLE_S plus a decelerating
-load, and short enough that a brake which never bit is reported rather than
-waited on."""
+run gives up on it stopping.
+
+A healthy stop is far quicker than this and always has been: across 95
+brake-from-speed events on a 1000 lb load, from speeds up to 69.8 turns/s, the
+slowest took 0.554 s and the median 0.237. With BRAKE_SETTLE_S ahead of it that
+is 0.8 s of real worst case, so this is about twice what the stand does.
+
+Short deliberately. What this catches is a brake that never bit, and on a
+gravity-loaded axis every extra second spent waiting on that is a second the
+load spends accelerating."""
 
 DEFAULT_BRAKE_BACKSTOP_TURNS = 20.0
 """How close to the target the load may get before the brake is dropped whatever
