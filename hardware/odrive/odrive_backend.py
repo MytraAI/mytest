@@ -44,23 +44,29 @@ from .odrive_channels import COMMAND_CHANNELS, TELEMETRY_CHANNELS
 
 logger = logging.getLogger(__name__)
 
-SAMPLE_INTERVAL_S = 0.05
+SAMPLE_INTERVAL_S = 0.02
 """Sleep *between* frames, not a frame period - and against real hardware
-the difference matters. Each frame reads its live channels as that many
-sequential USB round-trips, at ~250 us each measured on a real ODrive Pro
-(fw 0.6.12), so the interval alone never determines the rate.
+the difference matters. Each frame reads its 39 live channels (see
+_CACHED_CHANNELS) as that many sequential USB round-trips, so the interval alone
+never determines the rate.
 
-IT IS NOW THE LARGER TERM, which it was not before _CACHED_CHANNELS. Measured
-end to end on one host: 39 live reads cost 13.5 ms against this 50 ms sleep, for
-15.75 Hz. Reading all 100 cost 29.8 ms and gave 12.54 Hz. On the slower of the
-two test machines, where a read costs ~650 us, the same change takes a frame from
-115 ms to 75 ms - 8.7 Hz to 13.3 Hz.
+THE TWO TERMS ARE THE SAME ORDER, so lowering this does not scale the rate with
+it. A round-trip costs ~250 us on a real ODrive Pro (fw 0.6.12) on the fastest
+host measured and ~1 ms on the zdrive stand, putting the read half of a frame at
+13.5 ms and ~40 ms respectively. Against this 20 ms sleep that is about 30 Hz on
+the fast host and about 17 Hz on zdrive.
 
-Left at 0.05 deliberately rather than retuned: the right value depends on what
-the tests actually need from the sample rate, which is a test-engineering
-decision, not a driver one. Whatever it is set to, the publisher's high-water
-mark is sized from it (see protocol/wire.py's hwm_for_interval), so the buffer
-stays proportional to the intended rate."""
+THE SAME INTERVAL THE N6974A AND CPX400DP BACKENDS USE, so the three streams a
+zdrive run merges are sampled comparably rather than one lagging the others by
+design.
+
+IT DOES NOTHING FOR THE TAIL. On zdrive the median frame really is reads plus
+this sleep, but the slowest 5% run past 200 ms on USB stalls that no value here
+influences - so this raises the typical rate and leaves the worst case where it
+is. A run's mean rate sits below its median for that reason.
+
+The publisher's high-water mark is sized from this (see protocol/wire.py's
+hwm_for_interval), so the buffer stays proportional to the intended rate."""
 DEFAULT_DISCOVERY_TIMEOUT_S = 10.0  # how long connect() waits for odrive.find_any() to see a matching device
 
 _UNSET = object()
