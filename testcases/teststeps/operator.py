@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Dict, NamedTuple, Optional, Sequence, Tuple
 
@@ -39,16 +40,43 @@ because the wait is answered by a human clicking, and a slow poll shows up as
 the window taking a moment to close after they did."""
 
 
+ER_TICKET_PATTERN = r"^ER-[0-9]+$"
+"""The shape of an ER ticket, which is the Linear issue a run belongs to.
+
+[0-9] rather than \\d, which also matches digits outside ASCII - a ticket
+number in Devanagari would pass and become a directory nobody can type.
+
+Enforced because the ticket is a directory name wherever runs are filed by it,
+and free text becomes as many sibling pseudo-tickets as there are ways to type
+one. ER-00 satisfies it like any other and is what an exploratory run with no
+ticket is filed under - a named bucket, so untracked work is countable instead
+of hidden inside a real ticket somebody half-remembered."""
+
+ER_TICKET_HINT = "ER-1234, or ER-00 for a run with no ticket"
+"""What the operator is shown when the ticket does not match. Says what a good
+answer looks like, and where a run that genuinely has no ticket goes."""
+
+
 class RunDetail(NamedTuple):
     """One thing the operator is asked for before a run.
 
     `label` is read, `channel` is stored, and they are separate so rewording a
     prompt cannot rename a channel that stored runs are keyed by. `choices` makes
-    the prompt a dropdown, and is enforced on the answer however it arrives."""
+    the prompt a dropdown, and is enforced on the answer however it arrives.
+
+    `pattern` is a regular expression the answer has to match, for a field that
+    is free text but not arbitrary. An answer to a patterned field is stripped
+    and upper-cased before it is matched: a pattern says the field has one
+    canonical spelling, and two spellings of one ticket are two places a run
+    can be filed under. `hint` is what the operator is shown when it does not
+    match, since a regex is not an instruction; the pattern itself is shown if
+    there is no hint."""
 
     label: str
     channel: str
     choices: Tuple[str, ...] = ()
+    pattern: str = ""
+    hint: str = ""
 
 
 def run_detail_fields(dut: str) -> Tuple[RunDetail, ...]:
@@ -61,7 +89,7 @@ def run_detail_fields(dut: str) -> Tuple[RunDetail, ...]:
     run against one."""
     return (
         RunDetail("DUT SN", "dut_serial_number", serials_for(dut)),
-        RunDetail("ER Ticket", "er_ticket"),
+        RunDetail("ER Ticket", "er_ticket", pattern=ER_TICKET_PATTERN, hint=ER_TICKET_HINT),
         RunDetail("Load (lb)", "load_lb"),
     )
 
@@ -71,6 +99,8 @@ def _await_ack(
     instruction: str,
     fields: Sequence[str] = (),
     choices: Optional[Dict[str, Sequence[str]]] = None,
+    patterns: Optional[Dict[str, str]] = None,
+    hints: Optional[Dict[str, str]] = None,
 ) -> str:
     """Publish an instruction, wait for the operator's marker, and return its
     contents - empty for a plain acknowledgement, JSON when values were asked for.
@@ -90,7 +120,9 @@ def _await_ack(
     logger.warning("test %s: WAITING FOR OPERATOR - %s", test_case.test_id, instruction)
     logger.warning("test %s: click the window, or `python -m tools.operator_ack`", test_case.test_id)
 
-    window = spawn_operator_prompt(test_case.test_id, instruction, fields, choices)
+    window = spawn_operator_prompt(
+        test_case.test_id, instruction, fields, choices, patterns, hints,
+    )
     clock = Stopwatch()
     try:
         while not path.exists():
@@ -124,8 +156,11 @@ def prompt_for_run_details(
 ) -> Dict[str, str]:
     """Ask the operator for the details that identify this run, and publish them.
 
-    A field with choices is a dropdown and its answer is checked against them - the
-    window cannot produce anything else, but `tools.operator_ack --answer` can.
+    A field with choices is a dropdown and its answer is checked against them, and
+    a field with a pattern has to match it. Both are checked here and not only in
+    the window: the window cannot produce a bad answer, but
+    `tools.operator_ack --answer` can, and that is how a stand with no display
+    answers.
 
     Published as run state, so the engine merges them into every recorded row. The
     channels have to be seeded (each DUT's channels.py) or the engine fixes its
@@ -136,6 +171,8 @@ def prompt_for_run_details(
         "enter this run's details",
         [field.label for field in fields],
         {field.label: field.choices for field in fields if field.choices},
+        {field.label: field.pattern for field in fields if field.pattern},
+        {field.label: field.hint for field in fields if field.hint},
     )
     try:
         answers = json.loads(answered) if answered else {}
@@ -151,6 +188,19 @@ def prompt_for_run_details(
                 "attributed to a DUT is not worth the hours it takes. Acknowledge with the "
                 "window, or `python -m tools.operator_ack --answer "
                 f"'{field.label}=...'` for a stand with no display"
+            )
+        if field.pattern:
+            # Canonical before checked, and it is the canonical form that is
+            # stored: SMB is case-insensitive but case-preserving, so er-64 and
+            # ER-64 are one directory whose name depends on who typed first.
+            value = value.strip().upper()
+        else:
+            value = value.strip()
+        if field.pattern and not re.match(field.pattern, value):
+            raise RuntimeError(
+                f"test {test_case.test_id}: {value!r} is not a usable {field.label!r} - "
+                f"expected {field.hint or field.pattern}. This is where the run's results are "
+                "filed, so an answer that cannot be filed is refused rather than stored"
             )
         if field.choices and value not in field.choices:
             raise RuntimeError(

@@ -66,7 +66,7 @@ class BaseYdriveTest(TestCase):
 
     def __init__(self, test_id: Optional[str] = None, use_mock: bool = False, require_engine: bool = True):
         super().__init__(test_id, require_engine=require_engine)
-        self._use_mock = use_mock
+        self.used_mock = use_mock
         self.testbed: Optional[YdriveTestbed] = None
 
     def pre_test_setup(self) -> None:
@@ -80,7 +80,7 @@ class BaseYdriveTest(TestCase):
         self._seed_channels()
 
         self.testbed = YdriveTestbed(
-            use_mock=self._use_mock, output_dir=self._output_dir, test_id=self.test_id
+            use_mock=self.used_mock, output_dir=self._output_dir, test_id=self.test_id
         )
 
         # Setup energizes nothing. The stand comes up with both rails off - see

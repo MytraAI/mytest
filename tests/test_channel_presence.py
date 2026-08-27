@@ -324,7 +324,7 @@ def _seed_order(monkeypatch):
 
     case = object.__new__(base_ydrive_test.BaseYdriveTest)
     case.test_id = "test-seed-order"
-    case._use_mock = True
+    case.used_mock = True
     case._output_dir = None
     case._publisher = _RecordingPublisher(log)
 

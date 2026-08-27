@@ -149,6 +149,14 @@ class TestCase(ABC):
         from this test's name and the current time unless the caller supplies
         one (see protocol/paths.py)."""
         self.runner: Optional[LiveRulebookRunner] = None
+        self.used_mock = False
+        """Whether this run drove a simulated backend instead of the hardware.
+
+        Set by a DUT base test case that has a mock to choose; left False by one
+        with no such choice to make. Recorded in the verdict because a mock run
+        answers the same prompt with a real serial and a real ticket, and
+        produces telemetry at the same rate - so without this, numbers nobody
+        measured are indistinguishable from numbers somebody did."""
         self.require_engine = require_engine
         """Whether this run needs the telemetry engine to be recording:
         refuse to start without it, and abort if it stops mid-run (see
@@ -391,6 +399,7 @@ class TestCase(ABC):
                 test_id=self.test_id,
                 test_name=getattr(self, "TEST_NAME", "unknown"),
                 dut=self.DUT,
+                used_mock=self.used_mock,
                 lifecycle=lifecycle,
                 bounds_result=bounds_result,
                 started_at=started_at,

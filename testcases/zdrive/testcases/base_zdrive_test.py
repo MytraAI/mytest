@@ -69,7 +69,7 @@ class BaseZdriveTest(TestCase):
 
     def __init__(self, test_id: Optional[str] = None, use_mock: bool = False, require_engine: bool = True):
         super().__init__(test_id, require_engine=require_engine)
-        self._use_mock = use_mock
+        self.used_mock = use_mock
         self.testbed: Optional[ZdriveTestbed] = None
 
     def pre_test_setup(self) -> None:
@@ -85,7 +85,7 @@ class BaseZdriveTest(TestCase):
         self._seed_channels()
 
         self.testbed = ZdriveTestbed(
-            use_mock_odrive=self._use_mock, output_dir=self._output_dir, test_id=self.test_id
+            use_mock_odrive=self.used_mock, output_dir=self._output_dir, test_id=self.test_id
         )
         self.testbed.start()
 

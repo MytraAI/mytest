@@ -11,7 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from testcases.teststeps.operator import RunDetail, await_operator
+from testcases.teststeps.operator import (
+    ER_TICKET_HINT,
+    ER_TICKET_PATTERN,
+    RunDetail,
+    await_operator,
+)
 from tools import operator_ack, operator_prompt
 
 
@@ -63,9 +68,9 @@ def test_a_stale_acknowledgement_does_not_skip_the_wait(tmp_path, monkeypatch):
     ack = tmp_path / "mytest-ack-test-prompt"
     ack.touch()
     case = FakeTestCase(ack)
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None: FakeWindow())
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
+    monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
+                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: FakeWindow())
+    monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
 
     await_operator(case, "do the thing")
 
@@ -77,9 +82,9 @@ def test_the_prompt_is_published_while_waiting_and_cleared_after(tmp_path, monke
     otherwise indistinguishable from a hang."""
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     windows = []
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None: windows.append(FakeWindow()) or windows[-1])
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
+    monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
+                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: windows.append(FakeWindow()) or windows[-1])
+    monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
 
     await_operator(case, "move the load")
 
@@ -92,8 +97,8 @@ def test_the_window_is_closed_even_when_the_wait_is_aborted(tmp_path, monkeypatc
     for something nobody is waiting for is worse than none."""
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     window = FakeWindow()
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None: window)
+    monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
+                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: window)
 
     # Not on the first call: @step checks at its own entry, before the window is
     # spawned, and an abort there has no window to close. The case worth pinning
@@ -172,9 +177,9 @@ def test_the_answers_are_published_as_run_state(tmp_path, monkeypatch):
     from testcases.teststeps.operator import RunDetail, prompt_for_run_details
 
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None: FakeWindow())
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
+    monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
+                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: FakeWindow())
+    monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
     _answer_with(case, {"DUT SN": "YD-014", "Load (lb)": "250"})
 
     details = prompt_for_run_details(case, FIELDS)
@@ -192,9 +197,9 @@ def test_the_prompt_labels_are_what_the_window_is_asked_for(tmp_path, monkeypatc
 
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     asked = []
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None: asked.extend(fields) or FakeWindow())
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
+    monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
+                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: asked.extend(fields) or FakeWindow())
+    monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
     _answer_with(case, {"DUT SN": "YD-014", "Load (lb)": "250"})
 
     prompt_for_run_details(case, FIELDS)
@@ -209,9 +214,9 @@ def test_a_run_without_its_details_does_not_start(tmp_path, monkeypatch):
     from testcases.teststeps.operator import RunDetail, prompt_for_run_details
 
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None: FakeWindow())
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
+    monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
+                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: FakeWindow())
+    monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
     _answer_with(case, None)  # a plain acknowledgement, no values
 
     with pytest.raises(RuntimeError, match="no answer for 'DUT SN'"):
@@ -227,10 +232,10 @@ def test_the_serial_is_picked_from_a_list_and_a_typo_is_refused(tmp_path, monkey
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     offered = {}
     monkeypatch.setattr(
-        "testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-        lambda test_id, message, fields=(), choices=None: offered.update(choices or {}) or FakeWindow(),
+        "testcases.teststeps.operator.spawn_operator_prompt",
+        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: offered.update(choices or {}) or FakeWindow(),
     )
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
+    monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
     _answer_with(case, {"DUT SN": "YD-O14", "Load (lb)": "250"})  # letter O, not zero
 
     with pytest.raises(RuntimeError, match="is not one of the values"):
@@ -273,3 +278,90 @@ def test_every_asked_field_is_seeded_so_the_engine_keeps_it():
 
     for field in BrakeEnduranceTest.RUN_DETAIL_FIELDS:
         assert field.channel in DEFAULT_STATE, f"{field.channel} is not seeded"
+
+
+# --- a ticket the results can be filed under -----------------------------------
+
+
+TICKET_FIELDS = (
+    RunDetail("ER Ticket", "er_ticket", pattern=ER_TICKET_PATTERN, hint=ER_TICKET_HINT),
+)
+
+
+def _prompt_with_answer(tmp_path, monkeypatch, answers, captured=None):
+    """Run the details prompt against a canned answer, as the CLI path delivers it."""
+    from testcases.teststeps.operator import prompt_for_run_details
+
+    case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
+
+    def spawn(test_id, message, fields=(), choices=None, patterns=None, hints=None):
+        if captured is not None:
+            captured.update({"patterns": patterns or {}, "hints": hints or {}})
+        return FakeWindow()
+
+    monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt", spawn)
+    monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
+    _answer_with(case, answers)
+    return case, prompt_for_run_details
+
+
+@pytest.mark.parametrize("typed", ["ER 64", "64", "er_64", "ER-", "ER-64-2", "bringup"])
+def test_a_ticket_that_is_not_a_ticket_is_refused(tmp_path, monkeypatch, typed):
+    """The window will not submit these, but `tools.operator_ack --answer` will.
+
+    The ticket is a directory name wherever runs are filed by it, so free text
+    becomes as many sibling pseudo-tickets as there are ways to type one."""
+    case, prompt = _prompt_with_answer(tmp_path, monkeypatch, {"ER Ticket": typed})
+    with pytest.raises(RuntimeError, match="is not a usable 'ER Ticket'"):
+        prompt(case, TICKET_FIELDS)
+
+
+@pytest.mark.parametrize("typed,stored", [
+    ("ER-64", "ER-64"),
+    ("er-64", "ER-64"),
+    ("  ER-64  ", "ER-64"),
+    ("Er-00", "ER-00"),
+])
+def test_the_ticket_is_stored_in_one_spelling(tmp_path, monkeypatch, typed, stored):
+    """Upper-cased and stripped before it is stored.
+
+    SMB is case-insensitive but case-preserving, so er-64 and ER-64 are one
+    directory whose name depends on who typed first."""
+    case, prompt = _prompt_with_answer(tmp_path, monkeypatch, {"ER Ticket": typed})
+    assert prompt(case, TICKET_FIELDS) == {"er_ticket": stored}
+    assert case.state["er_ticket"] == stored
+
+
+def test_the_no_ticket_bucket_is_a_valid_ticket(tmp_path, monkeypatch):
+    """ER-00 satisfies the pattern like any other, so an exploratory run has an
+    answer that is not somebody else's ticket number."""
+    case, prompt = _prompt_with_answer(tmp_path, monkeypatch, {"ER Ticket": "ER-00"})
+    assert prompt(case, TICKET_FIELDS) == {"er_ticket": "ER-00"}
+
+
+def test_a_ticket_number_outside_ascii_is_refused(tmp_path, monkeypatch):
+    """[0-9], not \\d - which also matches digits outside ASCII, and a ticket
+    number in Devanagari would become a directory nobody can type."""
+    case, prompt = _prompt_with_answer(tmp_path, monkeypatch, {"ER Ticket": "ER-٦٤"})
+    with pytest.raises(RuntimeError, match="is not a usable 'ER Ticket'"):
+        prompt(case, TICKET_FIELDS)
+
+
+def test_the_window_is_told_what_to_enforce(tmp_path, monkeypatch):
+    """The pattern and its hint reach the window, so a typo is corrected in front
+    of the person who made it rather than ending the run they were starting."""
+    captured = {}
+    case, prompt = _prompt_with_answer(
+        tmp_path, monkeypatch, {"ER Ticket": "ER-64"}, captured=captured
+    )
+    prompt(case, TICKET_FIELDS)
+    assert captured["patterns"] == {"ER Ticket": ER_TICKET_PATTERN}
+    assert captured["hints"] == {"ER Ticket": ER_TICKET_HINT}
+
+
+def test_an_unpatterned_field_is_stored_as_typed(tmp_path, monkeypatch):
+    """Only a patterned field is upper-cased: a pattern is what says the field has
+    one canonical spelling. Whitespace is stripped either way."""
+    fields = (RunDetail("Note", "note"),)
+    case, prompt = _prompt_with_answer(tmp_path, monkeypatch, {"Note": "  slow leg  "})
+    assert prompt(case, fields) == {"note": "slow leg"}
