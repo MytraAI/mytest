@@ -157,8 +157,9 @@ def describe_for_operator(
         )
     if not status.is_fresh():
         # What is known is when it last finished a pass, which is not the same as
-        # "it is not running" - a task registered without its repeating trigger
-        # runs at logon and no more, and saying it had stopped would be wrong.
+        # "it is not running" - a mirror that is merely slow, or a box that was
+        # asleep, has not stopped, and saying so would send somebody after the
+        # wrong thing.
         return (
             f"The results mirror last completed a pass {status.age_s() / 60:.0f} min ago.\n\n"
             f"It is not keeping up, or it has stopped. Finished runs are not reliably "

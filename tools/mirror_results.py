@@ -257,10 +257,14 @@ def pending_runs(
     the order somebody looking for them expects them to appear.
 
     `check_destination=False` skips asking the share what it already has, and
-    reports every finished mirrorable run instead. For a share that is known to
-    be down: a stat against a dead SMB server does not fail fast, it blocks for
-    the session timeout, and doing that once per run is how counting a backlog
-    turns into a pass that never finishes."""
+    reports every finished mirrorable run instead - for a share already known to
+    be down.
+
+    Measured on a stand box: first contact with an unreachable server costs ~21 s
+    before it gives up. Windows then negative-caches that, so the runs behind the
+    first are free, and the cost is per pass rather than per run. Skipped anyway,
+    because relying on a cache to make a pointless question cheap is not the same
+    as not asking it - and check_reachable has already answered it."""
     found: List[Tuple[float, Path, Path]] = []
     root = runs_dir(output_dir)
     if not root.is_dir():

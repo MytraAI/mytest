@@ -473,6 +473,7 @@ function Install-ResultsMirror {
     # the existing mapping first, and if the new credential turns out to be wrong the
     # box ends up worse off than before the "repair". It also stops a full provisioning
     # run prompting for share credentials every time.
+    Write-Host "  checking $ResultsShareUnc (up to ~20s if it is unreachable)..." -ForegroundColor DarkGray
     if (-not $ResultsShareCredential -and (Test-Path $ResultsShareUnc -ErrorAction SilentlyContinue)) {
         Write-Ok "$ResultsShareUnc already reachable"
     } else {
@@ -491,12 +492,25 @@ function Install-ResultsShareMapping {
     # including a service, so the mirror keeps working whoever ends up running it.
     $cred = $ResultsShareCredential
     if (-not $cred) {
-        # Prompted, never stored in this file or in the repo. Needs a console: over SSH
-        # there is nothing to prompt with, so pass -ResultsShareCredential instead.
+        # -WhatIf is documented as a true dry run, and a prompt is not nothing: it
+        # stops the run dead waiting for a person who only asked what would happen.
+        if ($WhatIfPreference) {
+            Write-Skip "would prompt for credentials and map $ResultsShareUnc"
+            return
+        }
+        # Get-Credential over SSH does not fail, it blocks forever - there is a console
+        # to write to and nothing to read from. Refused up front with the same advice
+        # this would otherwise never get to give. $env:SSH_CONNECTION is how the sshd
+        # section decides the same thing.
+        if ($env:SSH_CONNECTION -or $env:SSH_CLIENT) {
+            Write-Note "over SSH with no -ResultsShareCredential - cannot prompt for one here without hanging. Run this at the console, or pass -ResultsShareCredential."
+            return
+        }
+        # Prompted, never stored in this file or in the repo.
         try {
             $cred = Get-Credential -Message "Credentials for $ResultsShareUnc"
         } catch {
-            Write-Note "no credential for $ResultsShareUnc - pass -ResultsShareCredential when running over SSH"
+            Write-Note "could not prompt for credentials for $ResultsShareUnc ($($_.Exception.Message)) - pass -ResultsShareCredential"
             return
         }
     }
@@ -538,7 +552,9 @@ function Install-ResultsMirrorTask {
     # lives in, which is the checkout somebody just pulled onto the box.
     $repo = if ($RepoPath) { $RepoPath } else { Split-Path -Parent $PSScriptRoot }
     if (-not (Test-Path (Join-Path $repo 'tools\mirror_results.py'))) {
-        Write-Note "no mytest checkout at $repo - pass -RepoPath; mirror task not registered"
+        # Says what was actually looked for. "No checkout here" is wrong and
+        # misleading when there is one, on a branch that predates the mirror.
+        Write-Note "$repo has no tools\mirror_results.py - wrong path, or a checkout that predates the mirror. Task not registered."
         return
     }
     # pythonw, so a pass every few minutes does not flash a console window on a stand's
@@ -556,17 +572,16 @@ function Install-ResultsMirrorTask {
         # Two triggers rather than one with a repetition attached: at logon so a rebooted
         # box starts mirroring as soon as somebody is on it, and a repeating one so it
         # keeps looking. Overlap between them is harmless - see IgnoreNew below.
-        $triggers = @(New-ScheduledTaskTrigger -AtLogOn -User $TargetUser)
-        try {
-            $triggers += New-ScheduledTaskTrigger -Once -At (Get-Date) `
-                           -RepetitionInterval (New-TimeSpan -Minutes $MirrorIntervalMinutes) `
-                           -RepetitionDuration ([TimeSpan]::MaxValue)
-        } catch {
-            # Some builds reject an indefinite RepetitionDuration. A task that only runs
-            # at logon still mirrors - a box that has been up for days without one is the
-            # gap - so register what works rather than registering nothing.
-            Write-Note "repeating trigger rejected ($($_.Exception.Message)) - the mirror will run at logon only"
-        }
+        # No -RepetitionDuration: omitting it is what means "repeat indefinitely".
+        # The documented-looking alternatives do not survive registration - measured on
+        # a stand box, both [TimeSpan]::MaxValue and ::Zero build a trigger object
+        # happily and are then rejected by Register-ScheduledTask with "value ...
+        # incorrectly formatted or out of range", taking the whole task with them.
+        $triggers = @(
+            New-ScheduledTaskTrigger -AtLogOn -User $TargetUser
+            New-ScheduledTaskTrigger -Once -At (Get-Date) `
+              -RepetitionInterval (New-TimeSpan -Minutes $MirrorIntervalMinutes)
+        )
 
         # Interactive, as the stand account: the mirror reads the engine's heartbeat to
         # find where runs are being written, and that file lives in the running user's
@@ -588,8 +603,7 @@ function Install-ResultsMirrorTask {
         Register-ScheduledTask -TaskName $MirrorTaskName -Action $act `
             -Trigger $triggers -Principal $pri -Settings $set -Force | Out-Null
         Start-ScheduledTask -TaskName $MirrorTaskName -ErrorAction SilentlyContinue
-        $cadence = if ($triggers.Count -gt 1) { "every $MirrorIntervalMinutes min" } else { "at logon" }
-        Write-Fix "task '$MirrorTaskName' registered $cadence as $TargetUser, and started now"
+        Write-Fix "task '$MirrorTaskName' registered every $MirrorIntervalMinutes min as $TargetUser, and started now"
         $script:MirrorTask = $true
     } catch {
         Write-Note "results mirror task: $($_.Exception.Message)"
