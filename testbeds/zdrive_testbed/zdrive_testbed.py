@@ -304,18 +304,25 @@ Sized for a 1000 lb load. Measured on this stand, phase current runs
 limit clamps rather than being delivered, so a load heavier than the stand is
 sized for stalls instead of drawing whatever it takes."""
 
-ODRIVE_MOTOR_HARD_MAX_A = 60.0
+ODRIVE_MOTOR_HARD_MAX_A = 71.0
 """The measured motor phase current that trips CURRENT_LIMIT_VIOLATION in
 firmware. zdrive_rulebook bounds `motor_foc_iq_measured` at this value, in both
 directions.
 
-15% above the 52 A a 1000 lb load is expected to draw, so the gap above the soft
-limit is transient headroom: measured current may overshoot what the controller
-commands without the firmware tripping, but not by more than that.
+THE MOTOR'S RATED CURRENT, so this is a device limit rather than a stand
+preference: past it the trip is protecting the motor itself, and there is nothing
+above it worth reaching for.
 
-Both sit well inside the board's own inverter ceiling, which this hardware
-reports as 100 A soft / 150 A hard - so what these express is what the stand asks
-of the motor, not what the ODrive can deliver."""
+The gap above ODRIVE_MOTOR_SOFT_MAX_A is transient headroom, and it is wide
+because the crossing is not gradual at any rate this stand can observe. Measured
+current has gone from under the soft limit to 60 A inside a single 86 ms
+telemetry frame while the controller was still commanding 55 A - so what the gap
+buys is that a normal overshoot does not disarm a run, not warning time before
+one does.
+
+Both sit inside the board's own inverter ceiling, which this hardware reports as
+100 A soft / 150 A hard - so what these express is what the motor is rated for,
+not what the ODrive can deliver."""
 
 BRAKE_BUS = Rail(name="zdrive brake", output=1, voltage_v=24.0, current_limit_a=5.0)
 """The zdrive brake, on CPX400DP output 1.

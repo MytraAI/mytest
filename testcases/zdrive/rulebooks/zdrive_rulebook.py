@@ -45,16 +45,22 @@ see ManualTest.
   Debounced, because energizing the bus charges the ODrive's capacitance and the
   inrush is a spike, not a fault.
 
-- motor_current_bound: motor_foc_iq_measured beyond +/-60A, fatal, no
+- motor_current_bound: motor_foc_iq_measured beyond +/-71A, fatal, no
   persistence.
 
-  60 A is the ODrive's own current_hard_max, which ZdriveTestbed writes; firmware
-  trips CURRENT_LIMIT_VIOLATION there within a control-loop period, far faster
-  than telemetry samples. So this bound usually catches the aftermath rather than
-  the excursion - which is the point. The known failure on this stand is the
-  ODrive disarming itself while the run continues, the load coasting, and nothing
-  raising. Bounded in both directions: braking torque loads a motor exactly as
-  driving torque does.
+  71 A is the motor's rated current, and the ODrive's own current_hard_max, which
+  ZdriveTestbed writes; firmware trips CURRENT_LIMIT_VIOLATION there within a
+  control-loop period, far faster than telemetry samples. So this bound usually
+  catches the aftermath rather than the excursion - which is the point. The known
+  failure on this stand is the ODrive disarming itself while the run continues,
+  the load coasting, and nothing raising. Bounded in both directions: braking
+  torque loads a motor exactly as driving torque does.
+
+  IT DOES NOT BOUND WHAT A LIFT MAY DRAW. What the controller is allowed to
+  command is ODRIVE_MOTOR_SOFT_MAX_A, 16 A below this, and a demand above that
+  clamps rather than being delivered. A lift that needs more torque than the soft
+  limit allows therefore falls behind its trajectory - it does not arrive here.
+  This is the motor's rating being protected, not the stand's duty being graded.
 
 - undervoltage_bound: board_vbus_voltage < 10.5V, fatal, no persistence -
   trusted instantaneously rather than debounced. Mirrors the ODrive's own
@@ -165,9 +171,10 @@ BUS_CURRENT_PERSISTENCE_S = 1.0
 """How long bus current must stay outside its bounds before the run stops.
 Covers the inrush as the ODrive's bus capacitance charges on energize."""
 
-MAX_MOTOR_CURRENT_A = 60.0
+MAX_MOTOR_CURRENT_A = 71.0
 """Fatal ceiling on measured motor phase current, in both directions - the
-ODrive's own current_hard_max, which ZdriveTestbed writes to the board."""
+ODrive's own current_hard_max, which ZdriveTestbed writes to the board, and the
+zdrive motor's rated current."""
 
 MAX_TEMPERATURE_C = 70.0
 """Fatal ceiling on every live thermocouple channel."""
