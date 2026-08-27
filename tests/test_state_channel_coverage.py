@@ -97,18 +97,46 @@ def framework_published() -> set:
     return names
 
 
-def published_names(package: str) -> set:
-    """Channel names this DUT's own modules publish, pushed or derived."""
+SHARED_STEP_PACKAGE = "testcases.teststeps"
+"""Steps any DUT can call, which publish channels on behalf of whoever called them.
+
+A DUT that calls one publishes those channels as surely as if it named them itself,
+and has to seed them - so they count as that DUT's, but only for a DUT that actually
+imports from here. Counting them for every DUT would demand a stand with no operator
+prompt seed columns it never writes."""
+
+
+def _package_source_names(dotted: str) -> set:
+    """Every channel name published anywhere in a package's modules."""
     names = set()
     for module in pkgutil.walk_packages(
-        importlib.import_module(f"testcases.{package}").__path__,
-        prefix=f"testcases.{package}.",
+        importlib.import_module(dotted).__path__, prefix=f"{dotted}.",
     ):
         try:
-            source = inspect.getsource(importlib.import_module(module.name))
+            names |= _names_in(inspect.getsource(importlib.import_module(module.name)))
         except (OSError, TypeError, ModuleNotFoundError):
             continue
-        names |= _names_in(source)
+    return names
+
+
+def _package_sources(dotted: str):
+    """Each module's source in a package, for asking what it imports."""
+    for module in pkgutil.walk_packages(
+        importlib.import_module(dotted).__path__, prefix=f"{dotted}.",
+    ):
+        try:
+            yield inspect.getsource(importlib.import_module(module.name))
+        except (OSError, TypeError, ModuleNotFoundError):
+            continue
+
+
+def published_names(package: str) -> set:
+    """Channel names this DUT publishes, pushed or derived - including through any
+    shared step it calls."""
+    dotted = f"testcases.{package}"
+    names = _package_source_names(dotted)
+    if any(SHARED_STEP_PACKAGE in source for source in _package_sources(dotted)):
+        names |= _package_source_names(SHARED_STEP_PACKAGE)
     return {name for name in names if not RULEBOOK_DERIVED.search(name)}
 
 

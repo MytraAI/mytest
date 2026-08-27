@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from testcases.teststeps.duts import serials_for
 from testcases.teststeps.operator import (
     ER_TICKET_HINT,
     ER_TICKET_PATTERN,
@@ -249,7 +250,7 @@ def test_the_stands_serials_are_the_ones_offered():
 
     serial = BrakeEnduranceTest.RUN_DETAIL_FIELDS[0]
     assert serial.channel == "dut_serial_number"
-    assert serial.choices == BrakeEnduranceTest.DUT_SERIAL_NUMBERS
+    assert serial.choices == serials_for(BrakeEnduranceTest.DUT)
     assert "YDRIVE1" in serial.choices
     others = [f for f in BrakeEnduranceTest.RUN_DETAIL_FIELDS if f is not serial]
     assert all(f.choices == () for f in others), "the ticket and the load are free text"

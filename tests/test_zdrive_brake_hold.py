@@ -41,6 +41,7 @@ from testcases.zdrive.rulebooks.zdrive_rulebook import (
 )
 from testcases.zdrive.testcases.testcases import BrakeHoldTest
 from testcases.teststeps import operator as operator_steps
+from testcases.teststeps.duts import serials_for
 from testcases.zdrive.teststeps import teststeps
 
 
@@ -106,13 +107,13 @@ def _answering(tmp_path, monkeypatch, answers):
     test_case = _FakeTestCase(ack)
     captured = {}
 
-    def fake_spawn(test_id, message, fields=(), choices=None):
+    def fake_spawn(test_id, message, fields=(), choices=None, patterns=None, hints=None):
         captured["fields"] = list(fields)
         captured["choices"] = dict(choices or {})
         ack.write_text(_json.dumps(answers) if answers is not None else "")
         return None
 
-    monkeypatch.setattr(teststeps, "spawn_operator_prompt", fake_spawn)
+    monkeypatch.setattr(operator_steps, "spawn_operator_prompt", fake_spawn)
     return test_case, captured
 
 
@@ -167,7 +168,7 @@ def test_the_serial_is_a_dropdown_of_this_stand_s_one_dut():
     DUT by. This stand has a single DUT, so the prompt offers exactly it."""
     serial = next(f for f in BrakeHoldTest.RUN_DETAIL_FIELDS if f.channel == "dut_serial_number")
     assert serial.choices == ("ZDRIVE2IN",)
-    assert BrakeHoldTest.DUT_SERIAL_NUMBERS == ("ZDRIVE2IN",)
+    assert serials_for(BrakeHoldTest.DUT) == ("ZDRIVE2IN",)
 
     # The ticket and the load are answers nobody can enumerate in advance.
     for field in BrakeHoldTest.RUN_DETAIL_FIELDS:
@@ -272,8 +273,8 @@ def test_awaiting_the_operator_returns_when_the_marker_appears(tmp_path, monkeyp
         ack.write_text("")  # the operator clicks the moment the window is up
         return window
 
-    monkeypatch.setattr(teststeps, "spawn_operator_prompt", fake_spawn)
-    teststeps.await_operator(test_case, "do the thing")
+    monkeypatch.setattr(operator_steps, "spawn_operator_prompt", fake_spawn)
+    operator_steps.await_operator(test_case, "do the thing")
 
     assert spawned == {"test_id": "fake-run", "message": "do the thing"}
     assert window.terminated
@@ -295,8 +296,8 @@ def test_awaiting_the_operator_ignores_a_stale_ack_from_an_earlier_run(tmp_path,
         ack.write_text("")
         return None
 
-    monkeypatch.setattr(teststeps, "spawn_operator_prompt", fake_spawn)
-    teststeps.await_operator(test_case, "do the thing")
+    monkeypatch.setattr(operator_steps, "spawn_operator_prompt", fake_spawn)
+    operator_steps.await_operator(test_case, "do the thing")
 
     assert seen["stale_cleared"]
 
@@ -313,8 +314,8 @@ def test_awaiting_the_operator_publishes_the_prompt_while_it_waits(monkeypatch, 
         ack.write_text("")
         return None
 
-    monkeypatch.setattr(teststeps, "spawn_operator_prompt", fake_spawn)
-    teststeps.await_operator(test_case, "move the drive")
+    monkeypatch.setattr(operator_steps, "spawn_operator_prompt", fake_spawn)
+    operator_steps.await_operator(test_case, "move the drive")
 
     assert published == ["move the drive"]
 
@@ -340,11 +341,11 @@ def test_awaiting_the_operator_clears_the_prompt_when_the_run_is_ending(tmp_path
         if len(checks) > 1:
             raise RuntimeError("fatal bound")
 
-    monkeypatch.setattr(teststeps, "spawn_operator_prompt", lambda *a, **k: _FakeWindow())
+    monkeypatch.setattr(operator_steps, "spawn_operator_prompt", lambda *a, **k: _FakeWindow())
     test_case.check_should_continue = exploding_check
 
     with pytest.raises(RuntimeError, match="fatal bound"):
-        teststeps.await_operator(test_case, "move the drive")
+        operator_steps.await_operator(test_case, "move the drive")
 
     assert _FakeWindow.terminated
     assert test_case.state["operator_prompt"] is None
