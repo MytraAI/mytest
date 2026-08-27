@@ -146,7 +146,6 @@ $script:KeyOk    = $false
 $script:MdnsOk   = $false
 $script:WakeTask   = $false
 $script:MirrorTask = $false
-$script:ShareOk    = $false
 
 $WakeDir      = Join-Path $env:ProgramData 'StandBox'
 $WakeScript   = Join-Path $WakeDir 'Hold-Wake.ps1'
@@ -210,6 +209,12 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     }
     # Without these two, `.\Setup-StandBox.ps1 -WhatIf` run unelevated would relaunch
     # without -WhatIf and make every change for real.
+    # A pscredential cannot be passed on a command line, so it does not survive this.
+    # Said out loud, because otherwise the elevated window just asks again and the
+    # person who already supplied it has no idea why.
+    if ($PSBoundParameters.ContainsKey('ResultsShareCredential')) {
+        Write-Host '  -ResultsShareCredential cannot cross elevation - the elevated window will prompt.' -ForegroundColor Yellow
+    }
     if ($WhatIfPreference)                   { $argList += '-WhatIf' }
     if ($PSBoundParameters.ContainsKey('Verbose')) { $argList += '-Verbose' }
 
@@ -463,6 +468,22 @@ while ($true) {
 function Install-ResultsMirror {
     Write-Step 'Results share and mirror task'
 
+    # Idempotent, like the rest of this script: a box where the share already works
+    # is left alone. That matters more here than elsewhere - remapping means removing
+    # the existing mapping first, and if the new credential turns out to be wrong the
+    # box ends up worse off than before the "repair". It also stops a full provisioning
+    # run prompting for share credentials every time.
+    if (-not $ResultsShareCredential -and (Test-Path $ResultsShareUnc -ErrorAction SilentlyContinue)) {
+        Write-Ok "$ResultsShareUnc already reachable"
+    } else {
+        Install-ResultsShareMapping
+    }
+
+    Install-ResultsMirrorTask
+}
+
+
+function Install-ResultsShareMapping {
     # A machine-wide SMB mapping, not `net use` and not `cmdkey`. Both of those are
     # per-user: a credential stored by whoever ran this script is invisible to any other
     # account, and this box's operator account is not necessarily the account that
@@ -490,7 +511,6 @@ function Install-ResultsMirror {
             New-SmbGlobalMapping -RemotePath $ResultsShareUnc -Credential $cred `
                 -Persistent $true -ErrorAction Stop | Out-Null
             Write-Fix "$ResultsShareUnc mapped for every session"
-            $script:ShareOk = $true
         } catch {
             # Older builds have no SmbGlobalMapping at all. cmdkey is the fallback and is
             # per-user, so it only serves a mirror running as this same account - which is
@@ -505,13 +525,15 @@ function Install-ResultsMirror {
                                                    "/pass:$($cred.GetNetworkCredential().Password)")
             if ($fallback.ExitCode -eq 0) {
                 Write-Fix "credential for $server stored for $env:USERNAME"
-                $script:ShareOk = $true
             } else {
                 Write-Note "cmdkey also failed: $($fallback.Output.Trim())"
             }
         }
     }
+}
 
+
+function Install-ResultsMirrorTask {
     # Where the mirror runs from, and with what. Defaults to the checkout this script
     # lives in, which is the checkout somebody just pulled onto the box.
     $repo = if ($RepoPath) { $RepoPath } else { Split-Path -Parent $PSScriptRoot }
@@ -534,10 +556,17 @@ function Install-ResultsMirror {
         # Two triggers rather than one with a repetition attached: at logon so a rebooted
         # box starts mirroring as soon as somebody is on it, and a repeating one so it
         # keeps looking. Overlap between them is harmless - see IgnoreNew below.
-        $trgLogon  = New-ScheduledTaskTrigger -AtLogOn -User $TargetUser
-        $trgRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
-                       -RepetitionInterval (New-TimeSpan -Minutes $MirrorIntervalMinutes) `
-                       -RepetitionDuration ([TimeSpan]::MaxValue)
+        $triggers = @(New-ScheduledTaskTrigger -AtLogOn -User $TargetUser)
+        try {
+            $triggers += New-ScheduledTaskTrigger -Once -At (Get-Date) `
+                           -RepetitionInterval (New-TimeSpan -Minutes $MirrorIntervalMinutes) `
+                           -RepetitionDuration ([TimeSpan]::MaxValue)
+        } catch {
+            # Some builds reject an indefinite RepetitionDuration. A task that only runs
+            # at logon still mirrors - a box that has been up for days without one is the
+            # gap - so register what works rather than registering nothing.
+            Write-Note "repeating trigger rejected ($($_.Exception.Message)) - the mirror will run at logon only"
+        }
 
         # Interactive, as the stand account: the mirror reads the engine's heartbeat to
         # find where runs are being written, and that file lives in the running user's
@@ -557,9 +586,10 @@ function Install-ResultsMirror {
                  -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)
 
         Register-ScheduledTask -TaskName $MirrorTaskName -Action $act `
-            -Trigger @($trgLogon, $trgRepeat) -Principal $pri -Settings $set -Force | Out-Null
+            -Trigger $triggers -Principal $pri -Settings $set -Force | Out-Null
         Start-ScheduledTask -TaskName $MirrorTaskName -ErrorAction SilentlyContinue
-        Write-Fix "task '$MirrorTaskName' registered every $MirrorIntervalMinutes min as $TargetUser, and started now"
+        $cadence = if ($triggers.Count -gt 1) { "every $MirrorIntervalMinutes min" } else { "at logon" }
+        Write-Fix "task '$MirrorTaskName' registered $cadence as $TargetUser, and started now"
         $script:MirrorTask = $true
     } catch {
         Write-Note "results mirror task: $($_.Exception.Message)"
@@ -1205,6 +1235,11 @@ if (-not $PowerOnly) {
     Open-SshFirewall
     Open-MdnsFirewall
     Register-ComputerDnsName
+}
+
+# Neither half's job, so it is gated on both: -PowerOnly and -SshOnly each say they
+# leave the other half alone, and neither of them mentions the results share.
+if (-not $PowerOnly -and -not $SshOnly) {
     Install-ResultsMirror
 }
 
@@ -1267,6 +1302,18 @@ try {
     $mirrorState = "every $MirrorIntervalMinutes min as $TargetUser ($($mt.State))"
 } catch { }
 Write-Host ("  mirror     {0}" -f $mirrorState)
+
+# Only on a run that did the share work. Test-Path against an unreachable UNC does
+# not fail fast - it blocks for the SMB session timeout - so asking on every run
+# would hang the summary of a -PowerOnly run that never touched the share.
+if (-not $PowerOnly -and -not $SshOnly) {
+    $shareState = if (Test-Path $ResultsShareUnc -ErrorAction SilentlyContinue) {
+        "$ResultsShareUnc reachable"
+    } else {
+        "$ResultsShareUnc NOT REACHABLE"
+    }
+    Write-Host ("  results    {0}" -f $shareState)
+}
 
 if (-not $PowerOnly) {
     Write-Host ("  sshd       {0}" -f $(if ($script:SshdOk) { 'installed and running' } else { 'NOT VERIFIED' }))
