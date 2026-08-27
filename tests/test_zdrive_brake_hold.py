@@ -65,17 +65,30 @@ def test_the_hold_position_sits_inside_the_stroke():
 
 def test_the_move_timeout_covers_the_hold_position_at_the_velocity_limit():
     """The move that matters is the one this test actually commands. 20 turns at
-    10 turns/s is 2 s, and a loaded axis climbs slower than an empty one."""
+    18 turns/s is 1.1 s, and a loaded axis climbs slower than an empty one."""
     lift_s = abs(BrakeHoldTest.TOP_POSITION) / teststeps.VELOCITY_LIMIT
     assert teststeps.DEFAULT_ARRIVAL_TIMEOUT_S > lift_s * 3
 
 
 def test_the_move_timeout_covers_the_stroke_at_the_configured_velocity_limit():
-    """55 turns at 10 turns/s is 5.5 s. A timeout under that would abort a
+    """55 turns at 18 turns/s is 3.1 s. A timeout under that would abort a
     healthy move; far over it and a stalled axis hangs the run."""
     stroke_s = abs(teststeps.TOP_OF_STROKE) / teststeps.VELOCITY_LIMIT
     assert teststeps.DEFAULT_ARRIVAL_TIMEOUT_S > stroke_s * 2
     assert teststeps.DEFAULT_ARRIVAL_TIMEOUT_S < stroke_s * 10
+
+
+def test_the_move_timeout_is_sized_from_the_lift_not_the_arithmetic():
+    """A loaded lift is current-limited, not velocity-limited, so it takes longer
+    than TOP_OF_STROKE / VELOCITY_LIMIT suggests: the slowest of 882 measured
+    full-stroke lifts on a 1000 lb load took 5.59 s against an arithmetic 3.1 s.
+    Sizing this off the arithmetic alone would size it off the wrong move."""
+    slowest_measured_lift_s = 5.59
+    arithmetic_s = abs(teststeps.TOP_OF_STROKE) / teststeps.VELOCITY_LIMIT
+    assert slowest_measured_lift_s > arithmetic_s, "the lift is the slower move"
+    assert teststeps.DEFAULT_ARRIVAL_TIMEOUT_S >= slowest_measured_lift_s * 2, (
+        "a healthy lift would be aborted"
+    )
 
 
 # --- the streams evaluation runs against ------------------------------------
@@ -595,10 +608,15 @@ def test_teardown_lowers_relative_to_the_operator_s_origin():
     assert "self._origin + self.BOTTOM_POSITION" in source
 
 
-def test_the_descent_is_given_ten_seconds_and_then_abandoned():
+def test_the_descent_is_given_twice_its_measured_time_and_then_abandoned():
     """An attempt, not a guarantee: the caller's next move is to switch
-    everything off, and a stand nobody is watching is not improved by waiting."""
-    assert teststeps.TEARDOWN_DESCENT_TIMEOUT_S == 10.0
+    everything off, and a stand nobody is watching is not improved by waiting.
+
+    Seven seconds clears twice the slowest of 624 measured full-stroke descents
+    (2.81 to 3.13 s), and a descent is genuinely velocity-limited, so the
+    arithmetic below and the measurement agree for this move."""
+    assert teststeps.TEARDOWN_DESCENT_TIMEOUT_S == 7.0
+    assert teststeps.TEARDOWN_DESCENT_TIMEOUT_S >= 3.13 * 2, "under twice a measured descent"
     stroke_s = abs(teststeps.TOP_OF_STROKE) / teststeps.VELOCITY_LIMIT
     assert teststeps.TEARDOWN_DESCENT_TIMEOUT_S > stroke_s, (
         "a healthy full-stroke descent must fit inside the attempt"
