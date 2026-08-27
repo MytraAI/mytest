@@ -366,3 +366,75 @@ def test_an_unpatterned_field_is_stored_as_typed(tmp_path, monkeypatch):
     fields = (RunDetail("Note", "note"),)
     case, prompt = _prompt_with_answer(tmp_path, monkeypatch, {"Note": "  slow leg  "})
     assert prompt(case, fields) == {"note": "slow leg"}
+
+
+# --- telling the operator their results are not being copied anywhere ------------
+
+
+class RecordingTestCase(FakeTestCase):
+    """A test case that answers every wait, and remembers what it was asked."""
+
+    def __init__(self, ack_path, require_engine=True):
+        super().__init__(ack_path)
+        self.require_engine = require_engine
+        self.prompts = []
+
+    def set_state(self, name, value):
+        super().set_state(name, value)
+        if name == "operator_prompt" and value is not None:
+            self.prompts.append(value)
+
+    def check_should_continue(self):
+        import json as _json
+
+        self._ack_path.write_text(_json.dumps({"ER Ticket": "ER-64"}))
+
+
+def _run_prompt(tmp_path, monkeypatch, status, require_engine=True):
+    from testcases.teststeps.operator import prompt_for_run_details
+
+    case = RecordingTestCase(tmp_path / "mytest-ack-test-prompt", require_engine)
+    monkeypatch.setattr("testcases.teststeps.operator.read_status", lambda: status)
+    monkeypatch.setattr(
+        "testcases.teststeps.operator.spawn_operator_prompt",
+        lambda *a, **k: FakeWindow(),
+    )
+    monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
+    prompt_for_run_details(case, TICKET_FIELDS)
+    return case
+
+
+def test_a_stand_that_is_not_mirroring_says_so_before_it_asks_anything(tmp_path, monkeypatch):
+    """The one moment somebody is guaranteed to be looking. Its own dialog rather
+    than a line above the fields, which is a line people stop reading by Thursday."""
+    case = _run_prompt(tmp_path, monkeypatch, None)
+
+    assert len(case.prompts) == 2, "the warning and the details should be two dialogs"
+    assert "not running on this machine" in case.prompts[0]
+    assert case.prompts[1] == "enter this run's details"
+
+
+def test_the_warning_does_not_stop_the_run(tmp_path, monkeypatch):
+    """The record is safe locally and the mirror backfills, so refusing to start
+    would spend stand time on a problem that no longer threatens the record."""
+    case = _run_prompt(tmp_path, monkeypatch, None)
+
+    assert case.state["er_ticket"] == "ER-64", "the run went ahead and was attributed"
+
+
+def test_a_healthy_mirror_says_nothing(tmp_path, monkeypatch):
+    import time as _time
+
+    from protocol.mirror_status import MirrorStatus
+
+    case = _run_prompt(tmp_path, monkeypatch, MirrorStatus(_time.time(), "//nas/x", True))
+
+    assert case.prompts == ["enter this run's details"]
+
+
+def test_a_run_that_records_nothing_is_not_warned_about_mirroring(tmp_path, monkeypatch):
+    """A demo or a unit test declares require_engine=False. Nothing about those is
+    being recorded, so nothing about them is being mirrored either."""
+    case = _run_prompt(tmp_path, monkeypatch, None, require_engine=False)
+
+    assert case.prompts == ["enter this run's details"]

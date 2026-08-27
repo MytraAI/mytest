@@ -27,6 +27,7 @@ import re
 import time
 from typing import Dict, NamedTuple, Optional, Sequence, Tuple
 
+from protocol.mirror_status import describe_for_operator, read_status
 from testcases.base import TestCase
 from testcases.step import step
 from testcases.teststeps.duts import serials_for
@@ -150,6 +151,38 @@ def await_operator(test_case: TestCase, instruction: str) -> None:
     _await_ack(test_case, instruction)
 
 
+def _warn_if_results_are_not_reaching_the_share(test_case: TestCase) -> None:
+    """Tell the operator, before they are asked for anything else, if this run's
+    results are not going to reach the results share.
+
+    Read from the mirror's own status file rather than checked live. A stat
+    against a dead SMB server blocks for tens of seconds, and this runs at the
+    one point in a test where a person is standing there waiting - but the
+    stronger reason is that a live check cannot see the failure that matters
+    most after a box is reimaged, where the share is perfectly reachable and
+    nothing is copying to it.
+
+    A warning, not a refusal. The run is recorded locally whatever the share is
+    doing, and the mirror copies it whenever the share comes back, so stopping
+    the run would spend a person's stand time on a problem that no longer
+    threatens the record. It is said here, and not left to a log, because this
+    is the only moment somebody is guaranteed to be looking.
+
+    Silent for a run that is not recording at all - a demo or a unit test, which
+    declare require_engine=False - since nothing about those is being mirrored
+    either.
+
+    Not a @step: it is part of asking, and a step inside a step reports over its
+    caller's current_step."""
+    if not getattr(test_case, "require_engine", False):
+        return
+    complaint = describe_for_operator(read_status())
+    if complaint is None:
+        return
+    logger.warning("test %s: %s", test_case.test_id, complaint.replace("\n", " "))
+    _await_ack(test_case, complaint)
+
+
 @step
 def prompt_for_run_details(
     test_case: TestCase, fields: Sequence[RunDetail]
@@ -165,7 +198,11 @@ def prompt_for_run_details(
     Published as run state, so the engine merges them into every recorded row. The
     channels have to be seeded (each DUT's channels.py) or the engine fixes its
     header before they exist and drops them. Called before anything is energized:
-    it needs a person and does not need the stand."""
+    it needs a person and does not need the stand.
+
+    Preceded by its own dialog if this run's results are not going to reach the
+    results share - see _warn_if_results_are_not_reaching_the_share."""
+    _warn_if_results_are_not_reaching_the_share(test_case)
     answered = _await_ack(
         test_case,
         "enter this run's details",

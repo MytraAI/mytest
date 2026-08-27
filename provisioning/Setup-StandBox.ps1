@@ -45,6 +45,26 @@
     Opt-in: it leaves the box logged in and unattended, and the stand account is a local
     administrator.
 
+.PARAMETER ResultsShareOnly
+    Establish access to the results share and register the mirror task, and do nothing
+    else. This is the repair an operator is told to run when a run's prompt reports that
+    finished runs are not reaching the share - after a reimage, most likely.
+
+.PARAMETER ResultsShareCredential
+    Credentials for the results share. Prompted for if omitted. Never stored in this
+    file: it goes into the machine's SMB credential store and nowhere else.
+
+.PARAMETER ResultsShareUnc
+    The server share holding the results tree. The mirror writes under
+    <share>\TestResults\MytestResults.
+
+.PARAMETER RepoPath
+    The mytest checkout the mirror task runs from. Defaults to the checkout this script
+    is in.
+
+.PARAMETER MirrorIntervalMinutes
+    How often the mirror looks for finished runs to copy.
+
 .PARAMETER PowerOnly
     Apply the power and wake-lock work only; leave SSH, firewall and mDNS alone.
 
@@ -97,6 +117,11 @@ param(
     [switch]$PowerOnly,
     [switch]$SshOnly,
     [switch]$InstallWakeLockTaskOnly,
+    [switch]$ResultsShareOnly,
+    [pscredential]$ResultsShareCredential,
+    [string]$ResultsShareUnc        = '\\nas.mytra.co\SEIT',
+    [string]$RepoPath,
+    [int]   $MirrorIntervalMinutes  = 5,
     [switch]$InstallBonjour,
     [switch]$DisableAutoLock,
     [switch]$DisableHibernation,
@@ -119,11 +144,14 @@ $script:Notes    = [System.Collections.Generic.List[string]]::new()
 $script:SshdOk   = $false
 $script:KeyOk    = $false
 $script:MdnsOk   = $false
-$script:WakeTask = $false
+$script:WakeTask   = $false
+$script:MirrorTask = $false
+$script:ShareOk    = $false
 
 $WakeDir      = Join-Path $env:ProgramData 'StandBox'
 $WakeScript   = Join-Path $WakeDir 'Hold-Wake.ps1'
 $WakeTaskName = 'StandBox-WakeLock'
+$MirrorTaskName = 'StandBox-ResultsMirror'
 
 #region output helpers -------------------------------------------------------
 
@@ -172,11 +200,12 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     Write-Host 'Elevation required - relaunching as administrator...' -ForegroundColor Yellow
     $psExe   = (Get-Process -Id $PID).Path
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
-    foreach ($sw in 'PowerOnly','SshOnly','InstallWakeLockTaskOnly','InstallBonjour',
+    foreach ($sw in 'PowerOnly','SshOnly','InstallWakeLockTaskOnly','ResultsShareOnly','InstallBonjour',
                     'DisableAutoLock','DisableHibernation','MaxProcessor','AllDevices','KeepAwake') {
         if ($PSBoundParameters[$sw]) { $argList += "-$sw" }
     }
-    foreach ($p in 'TargetUser','PublicKey','SshPort','InstallTimeoutMinutes','StallMinutes','PollSeconds') {
+    foreach ($p in 'TargetUser','PublicKey','SshPort','InstallTimeoutMinutes','StallMinutes','PollSeconds',
+                   'ResultsShareUnc','RepoPath','MirrorIntervalMinutes') {
         if ($PSBoundParameters.ContainsKey($p)) { $argList += @("-$p", "`"$($PSBoundParameters[$p])`"") }
     }
     # Without these two, `.\Setup-StandBox.ps1 -WhatIf` run unelevated would relaunch
@@ -430,6 +459,113 @@ while ($true) {
         Write-Note "wake lock task: $($_.Exception.Message)"
     }
 }
+
+function Install-ResultsMirror {
+    Write-Step 'Results share and mirror task'
+
+    # A machine-wide SMB mapping, not `net use` and not `cmdkey`. Both of those are
+    # per-user: a credential stored by whoever ran this script is invisible to any other
+    # account, and this box's operator account is not necessarily the account that
+    # provisioned it. A global mapping is visible to every session on the machine,
+    # including a service, so the mirror keeps working whoever ends up running it.
+    $cred = $ResultsShareCredential
+    if (-not $cred) {
+        # Prompted, never stored in this file or in the repo. Needs a console: over SSH
+        # there is nothing to prompt with, so pass -ResultsShareCredential instead.
+        try {
+            $cred = Get-Credential -Message "Credentials for $ResultsShareUnc"
+        } catch {
+            Write-Note "no credential for $ResultsShareUnc - pass -ResultsShareCredential when running over SSH"
+            return
+        }
+    }
+    if (-not $cred) { Write-Note "no credential given - $ResultsShareUnc not mapped"; return }
+
+    if ($PSCmdlet.ShouldProcess($ResultsShareUnc, 'map for every session on this machine')) {
+        try {
+            $existing = Get-SmbGlobalMapping -RemotePath $ResultsShareUnc -ErrorAction SilentlyContinue
+            if ($existing) {
+                Remove-SmbGlobalMapping -RemotePath $ResultsShareUnc -Force -ErrorAction Stop
+            }
+            New-SmbGlobalMapping -RemotePath $ResultsShareUnc -Credential $cred `
+                -Persistent $true -ErrorAction Stop | Out-Null
+            Write-Fix "$ResultsShareUnc mapped for every session"
+            $script:ShareOk = $true
+        } catch {
+            # Older builds have no SmbGlobalMapping at all. cmdkey is the fallback and is
+            # per-user, so it only serves a mirror running as this same account - which is
+            # how the task below is registered, so it is a real fallback and not a stub.
+            Write-Note "global mapping failed ($($_.Exception.Message)) - falling back to a per-user credential"
+            $server = ([uri]$ResultsShareUnc.Replace('\', '/')).Host
+            # cmdkey takes the password as an argument and offers nothing better, so it is
+            # briefly visible to anything listing processes on this box. Acceptable for a
+            # fallback on a stand box; it is why the global mapping is tried first.
+            $fallback = Invoke-Native cmdkey.exe @("/add:$server",
+                                                   "/user:$($cred.UserName)",
+                                                   "/pass:$($cred.GetNetworkCredential().Password)")
+            if ($fallback.ExitCode -eq 0) {
+                Write-Fix "credential for $server stored for $env:USERNAME"
+                $script:ShareOk = $true
+            } else {
+                Write-Note "cmdkey also failed: $($fallback.Output.Trim())"
+            }
+        }
+    }
+
+    # Where the mirror runs from, and with what. Defaults to the checkout this script
+    # lives in, which is the checkout somebody just pulled onto the box.
+    $repo = if ($RepoPath) { $RepoPath } else { Split-Path -Parent $PSScriptRoot }
+    if (-not (Test-Path (Join-Path $repo 'tools\mirror_results.py'))) {
+        Write-Note "no mytest checkout at $repo - pass -RepoPath; mirror task not registered"
+        return
+    }
+    # pythonw, so a pass every few minutes does not flash a console window on a stand's
+    # screen. The venv's copy if there is one, since that is where this project's
+    # dependencies are.
+    $python = Join-Path $repo '.venv\Scripts\pythonw.exe'
+    if (-not (Test-Path $python)) { $python = 'pythonw.exe' }
+
+    if (-not $PSCmdlet.ShouldProcess($MirrorTaskName, 'register scheduled task')) { return }
+
+    try {
+        $act = New-ScheduledTaskAction -Execute $python `
+                 -Argument '-m tools.mirror_results' -WorkingDirectory $repo
+
+        # Two triggers rather than one with a repetition attached: at logon so a rebooted
+        # box starts mirroring as soon as somebody is on it, and a repeating one so it
+        # keeps looking. Overlap between them is harmless - see IgnoreNew below.
+        $trgLogon  = New-ScheduledTaskTrigger -AtLogOn -User $TargetUser
+        $trgRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+                       -RepetitionInterval (New-TimeSpan -Minutes $MirrorIntervalMinutes) `
+                       -RepetitionDuration ([TimeSpan]::MaxValue)
+
+        # Interactive, as the stand account: the mirror reads the engine's heartbeat to
+        # find where runs are being written, and that file lives in the running user's
+        # temp directory. A SYSTEM task resolves a different temp directory, a different
+        # home, and would need the output directory hardcoded here instead - which is
+        # exactly the second copy of "where results live" that reading the heartbeat
+        # exists to avoid. Interactive also needs no stored password.
+        $pri = New-ScheduledTaskPrincipal -UserId $TargetUser -LogonType Interactive -RunLevel Limited
+
+        # IgnoreNew: a 24 h endurance run is gigabytes, and a copy can still be going when
+        # the next tick fires. ExecutionTimeLimit is hours and not zero, unlike the wake
+        # lock's: this is a short-lived pass, so one that is still alive after that long is
+        # blocked on a dead server and should be killed rather than left holding the slot.
+        $set = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
+                 -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
+                 -ExecutionTimeLimit (New-TimeSpan -Hours 4) `
+                 -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 5)
+
+        Register-ScheduledTask -TaskName $MirrorTaskName -Action $act `
+            -Trigger @($trgLogon, $trgRepeat) -Principal $pri -Settings $set -Force | Out-Null
+        Start-ScheduledTask -TaskName $MirrorTaskName -ErrorAction SilentlyContinue
+        Write-Fix "task '$MirrorTaskName' registered every $MirrorIntervalMinutes min as $TargetUser, and started now"
+        $script:MirrorTask = $true
+    } catch {
+        Write-Note "results mirror task: $($_.Exception.Message)"
+    }
+}
+
 
 function Invoke-HoldAwake {
     Write-Step 'Holding this session awake (Ctrl+C to release)'
@@ -1044,6 +1180,11 @@ if ($InstallWakeLockTaskOnly) {
     return
 }
 
+if ($ResultsShareOnly) {
+    Install-ResultsMirror
+    return
+}
+
 if (-not $SshOnly) {
     Set-NeverSleep
     Disable-DevicePowerSaving
@@ -1064,6 +1205,7 @@ if (-not $PowerOnly) {
     Open-SshFirewall
     Open-MdnsFirewall
     Register-ComputerDnsName
+    Install-ResultsMirror
 }
 
 #endregion
@@ -1116,6 +1258,15 @@ try {
     $wakeState = "registered at startup ($($wt.State))"
 } catch { }
 Write-Host ("  wake task  {0}" -f $wakeState)
+
+# Queried for the same reason the wake task is: with -PowerOnly the flag is false even
+# though an earlier run registered it.
+$mirrorState = 'not registered'
+try {
+    $mt = Get-ScheduledTask -TaskName $MirrorTaskName -ErrorAction Stop
+    $mirrorState = "every $MirrorIntervalMinutes min as $TargetUser ($($mt.State))"
+} catch { }
+Write-Host ("  mirror     {0}" -f $mirrorState)
 
 if (-not $PowerOnly) {
     Write-Host ("  sshd       {0}" -f $(if ($script:SshdOk) { 'installed and running' } else { 'NOT VERIFIED' }))
