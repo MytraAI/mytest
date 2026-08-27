@@ -40,6 +40,7 @@ from testbeds.zdrive_testbed.zdrive_testbed import ZdriveTestbed
 from asimov.live_rulebook_runner import LiveRulebookRunner
 from asimov.rulebook import Rulebook
 from testcases.base import TestCase
+from testcases.teststeps.operator import run_detail_fields
 
 from ..channels import DEFAULT_STATE
 from ..rulebooks.zdrive_rulebook import BASE_ZDRIVE_TEST_NAME, ZDRIVE_RULEBOOK
@@ -50,7 +51,16 @@ logger = logging.getLogger(__name__)
 class BaseZdriveTest(TestCase):
     """Base test case for zdrive: starts the testbed, tags its telemetry, constructs (but doesn't start) Rulebook evaluation - no test sequence logic."""
 
+    DUT = "zdrive"
     TEST_NAME = BASE_ZDRIVE_TEST_NAME
+    RUN_DETAIL_FIELDS = run_detail_fields(DUT)
+    """What the operator is asked for before a run, if a test chooses to ask.
+
+    Held here rather than on the tests that use it, so every test on this DUT
+    can prompt and each one decides whether to - a manual test that exists to
+    poke at hardware by hand has nothing to attribute. The serial dropdown is
+    whatever the catalogue says this DUT can run."""
+
     RULEBOOKS: List[Rulebook] = [ZDRIVE_RULEBOOK]
 
     DEVICES = ZdriveTestbed.DEVICES

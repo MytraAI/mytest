@@ -31,10 +31,9 @@ from ..rulebooks.zdrive_rulebook import (
     CYCLE_BRAKE_HOLD_TEST_NAME,
     MANUAL_TEST_NAME,
 )
+from testcases.teststeps.operator import await_operator, prompt_for_run_details
 from ..teststeps.teststeps import (
     BOTTOM_OF_STROKE,
-    RunDetail,
-    await_operator,
     brake_from_speed,
     engage_brake,
     establish_origin_at_bottom,
@@ -42,7 +41,6 @@ from ..teststeps.teststeps import (
     lower_to_bottom_for_teardown,
     move_to,
     prepare_for_operation,
-    prompt_for_SN_ER_load,
     release_brake_in_place,
     set_tuning_params,
     wait_for_thermal_headroom,
@@ -85,18 +83,6 @@ class _LiftingZdriveTest(BaseZdriveTest):
     """Where a run starts and ends. The load rests on its hard stop here, which is
     what makes the opening hand-positioning safe."""
 
-    DUT_SERIAL_NUMBERS = ("ZDRIVE2IN",)
-    """Every DUT these tests can run on, and the only answers their serial prompt
-    accepts: a stored run is matched to a DUT by this, and a typo attributes it to
-    nothing."""
-
-    RUN_DETAIL_FIELDS = (
-        RunDetail("DUT SN", "dut_serial_number", DUT_SERIAL_NUMBERS),
-        RunDetail("ER Ticket", "er_ticket"),
-        RunDetail("Load (lb)", "load_lb"),
-    )
-    """What the operator is asked for before a run starts. The serial is picked from
-    a list; the ticket and the load are free text."""
 
     def __init__(self, test_id=None, use_mock: bool = False, require_engine: bool = True):
         super().__init__(test_id, use_mock, require_engine=require_engine)
@@ -163,7 +149,7 @@ class BrakeHoldTest(_LiftingZdriveTest):
         # Asked first, while nothing is energized and the brake is still holding:
         # it needs a person and does not need the stand, and a run nobody can
         # attribute to a DUT is not worth the hours it takes.
-        self.run_details = prompt_for_SN_ER_load(self, self.RUN_DETAIL_FIELDS)
+        self.run_details = prompt_for_run_details(self, self.RUN_DETAIL_FIELDS)
 
         # Bus up, latched faults cleared, control and input mode set - and the
         # axis still idle behind an engaged brake.
@@ -378,7 +364,7 @@ class CycleBrakeHoldTest(_LiftingZdriveTest):
         # Asked first, while nothing is energized and the brake is still holding: it
         # needs a person and does not need the stand, and a run nobody can attribute
         # to a DUT is not worth the hours it takes.
-        self.run_details = prompt_for_SN_ER_load(self, self.RUN_DETAIL_FIELDS)
+        self.run_details = prompt_for_run_details(self, self.RUN_DETAIL_FIELDS)
 
         prepare_for_operation(self)
         set_tuning_params(self)
@@ -563,7 +549,7 @@ class BrakeEnduranceTest(_LiftingZdriveTest):
         # Asked first, while nothing is energized and the brake is still holding:
         # it needs a person and does not need the stand, and a run nobody can
         # attribute to a DUT is not worth the hours it takes.
-        self.run_details = prompt_for_SN_ER_load(self, self.RUN_DETAIL_FIELDS)
+        self.run_details = prompt_for_run_details(self, self.RUN_DETAIL_FIELDS)
 
         prepare_for_operation(self)
         set_tuning_params(self)

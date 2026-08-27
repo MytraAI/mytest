@@ -38,11 +38,10 @@ from ..rulebooks.ydrive_rulebook import (
     MANUAL_TEST_NAME,
 )
 from .base_ydrive_test import BaseYdriveTest
+from testcases.teststeps.operator import prompt_for_run_details
 from ..teststeps.teststeps import (
     MAX_LOAD_VELOCITY_LIMIT,
     BRAKE_TRIGGER_VELOCITY_LIMIT,
-    RunDetail,
-    prompt_for_SN_ER_load,
     brake_from_speed,
     establish_reference_by_camera,
     MarkerWatch,
@@ -71,8 +70,20 @@ class EnduranceCycleTest(BaseYdriveTest):
     def __init__(self, test_id: Optional[str] = None, use_mock: bool = False, require_engine: bool = True):
         super().__init__(test_id, use_mock, require_engine=require_engine)
         self.total_distance_m = 0.0
+        self.run_details: dict = {}
+        """What the operator said this run is, once they have been asked. Empty until
+        then, so a run that ends before the prompt still has a verdict."""
+
+    def result_metadata(self) -> dict:
+        """What this run was, for the verdict."""
+        return dict(self.run_details)
 
     def main_execution(self) -> None:
+        # Asked first, while nothing is energized: it needs a person and does not
+        # need the stand, and a run nobody can attribute to a DUT is not worth the
+        # hours it takes.
+        self.run_details = prompt_for_run_details(self, self.RUN_DETAIL_FIELDS)
+
         # Bus up, latched faults cleared, control mode and tuning set - and the
         # axis still idle behind an engaged brake.
         prepare_for_operation(self)
@@ -128,18 +139,6 @@ class _BrakingYdriveTest(BaseYdriveTest):
     Above what the default tuning allows, which is the whole reason it is named: a
     subclass that needs it only for the run-up has to write it and put it back."""
 
-    DUT_SERIAL_NUMBERS = ("YDRIVE1", "YDRIVE2", "ZDRIVE2IN")
-    """Every DUT these tests can run on, and the only answers their serial prompt
-    accepts: a stored run is matched to a DUT by this, and a typo attributes it to
-    nothing."""
-
-    RUN_DETAIL_FIELDS = (
-        RunDetail("DUT SN", "dut_serial_number", DUT_SERIAL_NUMBERS),
-        RunDetail("ER Ticket", "er_ticket"),
-        RunDetail("Load (lb)", "load_lb"),
-    )
-    """What the operator is asked for before the run starts. The serial is picked from a
-    list; the ticket and the load are free text."""
 
     POST_BRAKE_DWELL_S = 5.0
     """How long the brake holds what it stopped before the distance is taken, so creep
@@ -201,7 +200,7 @@ class BrakeEnduranceTest(_BrakingYdriveTest):
         # Asked first, while nothing is energized: it needs a person and does not
         # need the stand, and a run nobody can attribute to a DUT is not worth the
         # hours it takes.
-        self.run_details = prompt_for_SN_ER_load(self, self.RUN_DETAIL_FIELDS)
+        self.run_details = prompt_for_run_details(self, self.RUN_DETAIL_FIELDS)
 
         prepare_for_operation(self)
         # The trigger speed is above what the normal tuning allows, so the ceiling
@@ -399,7 +398,7 @@ class CycleBrakeEnduranceTest(_BrakingYdriveTest):
         # Asked first, while nothing is energized: it needs a person and does not
         # need the stand, and a run nobody can attribute to a DUT is not worth the
         # hours it takes.
-        self.run_details = prompt_for_SN_ER_load(self, self.RUN_DETAIL_FIELDS)
+        self.run_details = prompt_for_run_details(self, self.RUN_DETAIL_FIELDS)
 
         prepare_for_operation(self)
         # Opened at the cycling ceiling, not the raised one: all but a few seconds

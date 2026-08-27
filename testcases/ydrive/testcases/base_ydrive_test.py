@@ -36,6 +36,7 @@ from testbeds.ydrive_testbed.ydrive_testbed import YdriveTestbed
 from asimov.live_rulebook_runner import LiveRulebookRunner
 from asimov.rulebook import Rulebook
 from testcases.base import TestCase
+from testcases.teststeps.operator import run_detail_fields
 
 from ..channels import DEFAULT_STATE
 from ..rulebooks.ydrive_rulebook import YDRIVE_RULEBOOK
@@ -46,7 +47,16 @@ logger = logging.getLogger(__name__)
 class BaseYdriveTest(TestCase):
     """Base test case for ydrive: starts the ODrive testbed, tags its telemetry, constructs (but doesn't start) Rulebook evaluation - no test sequence logic."""
 
+    DUT = "ydrive"
     TEST_NAME = "base_ydrive_test"
+    RUN_DETAIL_FIELDS = run_detail_fields(DUT)
+    """What the operator is asked for before a run, if a test chooses to ask.
+
+    Held here rather than on the tests that use it, so every test on this DUT
+    can prompt and each one decides whether to - a manual test that exists to
+    poke at hardware by hand has nothing to attribute. The serial dropdown is
+    whatever the catalogue says this DUT can run."""
+
     RULEBOOKS: List[Rulebook] = [YDRIVE_RULEBOOK]
 
     DEVICES = YdriveTestbed.DEVICES

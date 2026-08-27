@@ -40,6 +40,7 @@ from testcases.zdrive.rulebooks.zdrive_rulebook import (
     ZDRIVE_RULEBOOK,
 )
 from testcases.zdrive.testcases.testcases import BrakeHoldTest
+from testcases.teststeps import operator as operator_steps
 from testcases.zdrive.teststeps import teststeps
 
 
@@ -123,7 +124,7 @@ def test_the_run_details_are_asked_for_and_published(tmp_path, monkeypatch):
     answers = {"DUT SN": "ZDRIVE2IN", "ER Ticket": "ER-4021", "Load (lb)": "20"}
     test_case, captured = _answering(tmp_path, monkeypatch, answers)
 
-    details = teststeps.prompt_for_SN_ER_load(test_case, fields)
+    details = operator_steps.prompt_for_run_details(test_case, fields)
 
     assert details == {"dut_serial_number": "ZDRIVE2IN", "er_ticket": "ER-4021", "load_lb": "20"}
     assert test_case.state["dut_serial_number"] == "ZDRIVE2IN"
@@ -139,7 +140,7 @@ def test_a_missing_answer_is_refused(tmp_path, monkeypatch):
         tmp_path, monkeypatch, {"DUT SN": "ZDRIVE2IN", "ER Ticket": "", "Load (lb)": "20"}
     )
     with pytest.raises(RuntimeError, match="no answer for 'ER Ticket'"):
-        teststeps.prompt_for_SN_ER_load(test_case, BrakeHoldTest.RUN_DETAIL_FIELDS)
+        operator_steps.prompt_for_run_details(test_case, BrakeHoldTest.RUN_DETAIL_FIELDS)
 
 
 def test_a_plain_acknowledgement_is_refused_when_values_were_asked_for(tmp_path, monkeypatch):
@@ -147,17 +148,17 @@ def test_a_plain_acknowledgement_is_refused_when_values_were_asked_for(tmp_path,
     plain acknowledgement elsewhere, and here it means nobody answered."""
     test_case, _ = _answering(tmp_path, monkeypatch, None)
     with pytest.raises(RuntimeError, match="no answer for"):
-        teststeps.prompt_for_SN_ER_load(test_case, BrakeHoldTest.RUN_DETAIL_FIELDS)
+        operator_steps.prompt_for_run_details(test_case, BrakeHoldTest.RUN_DETAIL_FIELDS)
 
 
 def test_a_serial_outside_its_choices_is_refused(tmp_path, monkeypatch):
     """The window cannot produce a value outside a dropdown, but
     `operator_ack --answer` can. A serial the record cannot match to a DUT is
     worse than no serial."""
-    fields = (teststeps.RunDetail("DUT SN", "dut_serial_number", ("ZDRIVE1", "ZDRIVE2")),)
+    fields = (operator_steps.RunDetail("DUT SN", "dut_serial_number", ("ZDRIVE1", "ZDRIVE2")),)
     test_case, captured = _answering(tmp_path, monkeypatch, {"DUT SN": "ZDRIVE9"})
     with pytest.raises(RuntimeError, match="not one of the values"):
-        teststeps.prompt_for_SN_ER_load(test_case, fields)
+        operator_steps.prompt_for_run_details(test_case, fields)
     assert captured["choices"] == {"DUT SN": ("ZDRIVE1", "ZDRIVE2")}
 
 
@@ -218,8 +219,8 @@ def test_the_details_are_asked_before_anything_is_energized_or_released():
     bus would be live while somebody types; asked after the release, the load
     would be held by nothing while they did."""
     source = _code_of(BrakeHoldTest.main_execution)
-    assert source.index("prompt_for_SN_ER_load") < source.index("prepare_for_operation")
-    assert source.index("prompt_for_SN_ER_load") < source.index("establish_origin_at_bottom")
+    assert source.index("prompt_for_run_details") < source.index("prepare_for_operation")
+    assert source.index("prompt_for_run_details") < source.index("establish_origin_at_bottom")
 
 
 # --- waiting for a person ---------------------------------------------------

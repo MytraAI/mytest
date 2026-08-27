@@ -110,6 +110,22 @@ class DeviceNotRecorded(Exception):
 class TestCase(ABC):
     """Abstract three-phase test case: PreTestSetup, MainExecution, PostTestTeardown."""
 
+    DUT: str = ""
+    """Which DUT package under testcases/ this test belongs to - "zdrive",
+    "ydrive", "example_dut".
+
+    Declared by each DUT's own base test case and inherited by every test on
+    it, including subclasses defined outside the package (a test module's
+    one-off subclass of a real test still reports the DUT it came from).
+    Deliberately not derived from __module__ at runtime, which would report
+    the module a subclass happens to be written in.
+
+    Recorded in the verdict, so a stored run says which stand produced it
+    without that having to be inferred from the test's name. The value is the
+    package's own directory name, and the same string the registry keys tests
+    by ("<dut>.<test>"); tests/test_dut_identifier.py holds those three in
+    agreement."""
+
     DEVICES: Tuple[str, ...] = ()
     """Which devices this test claims, as protocol/wire.py DEVICE_* names.
 
@@ -374,6 +390,7 @@ class TestCase(ABC):
             verdict = Verdict(
                 test_id=self.test_id,
                 test_name=getattr(self, "TEST_NAME", "unknown"),
+                dut=self.DUT,
                 lifecycle=lifecycle,
                 bounds_result=bounds_result,
                 started_at=started_at,
