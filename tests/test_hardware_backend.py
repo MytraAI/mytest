@@ -88,10 +88,21 @@ def test_every_backend_declares_device_and_interval(cls):
     assert cls.sample_interval_s > 0
 
 
-def test_real_and_mock_odrive_declare_different_intervals():
-    """The mock reads in-memory state; the real backend pays a USB round-trip
-    per channel, so the two intervals must differ while the device matches."""
-    assert OdriveBackend.sample_interval_s > MockOdriveBackend.sample_interval_s
+def test_the_mock_odrive_is_never_slower_than_the_real_one():
+    """Both stand for the same device, so a test written against the mock has to
+    see frames at least as often as hardware would produce them. A mock that
+    sampled more slowly would make a timing assumption look safer than it is.
+
+    Equal intervals satisfy that. This is the sleep between frames, not the frame
+    period: the real backend adds 39 USB round-trips on top of it while the mock
+    reads memory, so their actual rates differ by that cost whatever this is set
+    to.
+
+    Comparing the sleeps is the conservative form of that test rather than the
+    exact one, so lowering the real backend's interval below the mock's fails
+    here even though the mock would still be producing frames faster. The fix
+    when that happens is to lower the mock with it, not to relax this."""
+    assert MockOdriveBackend.sample_interval_s <= OdriveBackend.sample_interval_s
     assert OdriveBackend.device == MockOdriveBackend.device
 
 
