@@ -4,9 +4,9 @@ prepare_for_operation: cold stand to ready-to-arm - bus up, faults
 cleared, control and input mode set, tuning applied. Leaves the axis
 idle behind an engaged brake.
 
-await_operator / prompt_for_SN_ER_load: wait for a person, the second
-collecting the run's serial, ticket and load. Both keep polling for a
-fatal bound, a stop request and a lost recorder while they wait.
+Steps that wait for a person - await_operator, prompt_for_run_details -
+are not here: they are the same on every stand and live in
+testcases/teststeps/operator.py.
 
 brake_from_speed: runs up to a trigger speed, then idles the motor and
 drops the brake rail so the brake stops a moving load. Records the speed
@@ -48,11 +48,8 @@ limit, filter bandwidth, gains and spinout thresholds - in RAM, so a run
 leaves the board's saved configuration alone."""
 from __future__ import annotations
 
-import json
-
 import logging
-import time
-from typing import Callable, Dict, NamedTuple, Optional, Sequence, Tuple
+from typing import Callable, Optional
 
 from hardware.odrive import odrive_errors
 from testbeds.ydrive_testbed.ydrive_testbed import (
@@ -64,7 +61,8 @@ from testbeds.ydrive_testbed.ydrive_testbed import (
 from hardware.clients.telemetry_client import TelemetryTimeout
 from hardware.clients.command_client import CommandClientError
 from testcases.step import step
-from testcases.utils import Stopwatch, spawn_operator_prompt
+from testcases.teststeps.operator import await_operator
+from testcases.utils import Stopwatch
 from testcases.ydrive.testcases.base_ydrive_test import BaseYdriveTest
 
 logger = logging.getLogger(__name__)
@@ -97,10 +95,6 @@ is taken, so creep while it holds counts against that distance."""
 DEFAULT_STOP_TIMEOUT_S = 10.0
 """How long the load may take to come to rest after the brake closes. A brake that
 never stops it is a failure, not something to keep waiting on."""
-
-OPERATOR_POLL_INTERVAL_S = 0.1
-"""How often an operator-gated wait re-checks - slower than Stopwatch's tick because
-a person is what is being waited on. Every tick still runs the abort checks."""
 
 BRAKE_TRIGGER_VELOCITY_LIMIT = 24.0  # turns/s = 2.02 m/s at the stand's 0.084 m/turn
 """Velocity ceiling for a test needing a speed the normal tuning forbids, 15% above
@@ -201,98 +195,6 @@ def prepare_for_operation(
     # position is acted on at all - see INPUT_MODE_POS_FILTER.
     testbed.command.set_controller_config_input_mode(INPUT_MODE_POS_FILTER)
     _apply_tuning_params(test_case)
-
-
-def _await_ack(
-    test_case: BaseYdriveTest,
-    instruction: str,
-    fields: Sequence[str] = (),
-    choices: Optional[Dict[str, Sequence[str]]] = None,
-) -> str:
-    """Publish an instruction, wait for the operator's marker, and return its contents. Polls
-    check_should_continue() throughout, which is why it is a marker file and not input()."""
-    path = test_case.operator_ack_path()
-    path.unlink(missing_ok=True)  # a stale ack from an earlier run must not skip this
-    test_case.set_state("operator_prompt", instruction)
-    logger.warning("test %s: WAITING FOR OPERATOR - %s", test_case.test_id, instruction)
-    logger.warning("test %s: click the window, or `python -m tools.operator_ack`", test_case.test_id)
-
-    window = spawn_operator_prompt(test_case.test_id, instruction, fields, choices)
-    clock: Stopwatch = Stopwatch()
-    try:
-        while True:
-            test_case.check_should_continue()
-            if path.exists():
-                answered = path.read_text()
-                path.unlink(missing_ok=True)
-                test_case.set_state("operator_prompt", None)
-                logger.info(
-                    "test %s: operator acknowledged after %.0fs",
-                    test_case.test_id, clock.elapsed_s(),
-                )
-                return answered
-            time.sleep(OPERATOR_POLL_INTERVAL_S)
-    finally:
-        # However this ended - acknowledged, a fatal bound, an operator stop - the
-        # window is asking for something nobody is waiting for any more, and a
-        # stale one left on a stand's screen is worse than none.
-        if window is not None:
-            window.terminate()
-
-
-class RunDetail(NamedTuple):
-    """One thing the operator is asked for before a run. `label` is read and `channel` is stored,
-    so rewording a prompt cannot rename a channel that stored runs are keyed by."""
-
-    label: str
-    channel: str
-    choices: Tuple[str, ...] = ()
-
-
-@step
-def prompt_for_SN_ER_load(
-    test_case: BaseYdriveTest, fields: Sequence[RunDetail]
-) -> Dict[str, str]:
-    """Ask the operator for the details that identify this run, and publish them as run state.
-    A field with choices is a dropdown, and its answer is checked against them."""
-    answered = _await_ack(
-        test_case,
-        "enter this run's details",
-        [field.label for field in fields],
-        {field.label: field.choices for field in fields if field.choices},
-    )
-    try:
-        answers = json.loads(answered) if answered else {}
-    except ValueError:
-        answers = {}
-
-    details: Dict[str, str] = {}
-    for field in fields:
-        value = answers.get(field.label)
-        if not value:
-            raise RuntimeError(
-                f"test {test_case.test_id}: no answer for {field.label!r} - a run that cannot be "
-                "attributed to a DUT is not worth the hours it takes. Acknowledge with the "
-                "window, or `python -m tools.operator_ack --answer "
-                f"'{field.label}=...'` for a stand with no display"
-            )
-        if field.choices and value not in field.choices:
-            raise RuntimeError(
-                f"test {test_case.test_id}: {value!r} is not one of the values {field.label!r} "
-                f"accepts ({', '.join(field.choices)}). A serial the record cannot match to a DUT "
-                "is worse than no serial, so this is refused rather than stored"
-            )
-        details[field.channel] = value
-        test_case.set_state(field.channel, value)
-    logger.info("test %s: run details %s", test_case.test_id, details)
-    return details
-
-
-@step
-def await_operator(test_case: BaseYdriveTest, instruction: str) -> None:
-    """Publish an instruction for a person and wait until they acknowledge it. A window opens,
-    and `python -m tools.operator_ack` answers the same marker from a terminal."""
-    _await_ack(test_case, instruction)
 
 
 @step

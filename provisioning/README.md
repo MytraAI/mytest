@@ -47,6 +47,23 @@ Useful switches: `-PowerOnly` / `-SshOnly` to run one half, `-PublicKey <text|pa
 authorise a key, `-MaxProcessor` to pin the CPU (runs hot), `-DisableHibernation`.
 `Get-Help .\Setup-StandBox.ps1 -Full` documents the rest.
 
+### -ResultsShareOnly
+
+    .\Setup-StandBox.ps1 -ResultsShareOnly
+
+Maps the results share for every session on the box and registers
+`StandBox-ResultsMirror`, the scheduled task that copies finished runs to it (see
+`tools/README.md`). Prompts for the share credential, which is stored by Windows and
+never written into this repo; pass `-ResultsShareCredential` when running over SSH,
+where there is nothing to prompt with.
+
+This is the repair a run's operator prompt names when it reports that finished runs are
+not reaching the share - most likely because the box was reimaged. Nothing is urgent: the
+run is recorded locally either way and the mirror backfills whatever it missed, so this
+can be run during a run or after it.
+
+The full script also runs it, so a freshly provisioned box needs no separate step.
+
 ### Run it from the console for first-time setup
 
 Over SSH the script deliberately skips `Restart-Service sshd`, because stopping the

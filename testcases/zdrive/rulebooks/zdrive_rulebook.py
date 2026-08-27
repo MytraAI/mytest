@@ -152,7 +152,7 @@ avoid a circular import (see ydrive's rulebook for the same pattern).
 """
 from __future__ import annotations
 
-from testcases.asimov.rulebook import Bound, Rulebook
+from asimov.rulebook import Bound, Rulebook
 
 MAX_BUS_VOLTAGE_V = 52.0
 """Fatal ceiling on the N6974A's measured output voltage. See this module's

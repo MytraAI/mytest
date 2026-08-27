@@ -9,7 +9,7 @@ runs - so a fatal Rulebook violation, an external stop request (see
 tools/stop_test.py), or the telemetry engine having stopped recording is
 noticed at step boundaries even if the step never polls internally. This doesn't catch
 any of them mid-step for a step that runs long without polling on its own -
-see testcases/asimov/live_rulebook_runner.py's docstring for why, and
+see asimov/live_rulebook_runner.py's docstring for why, and
 for test_case.wait_for() to close that gap yourself in a long-running
 step.
 

@@ -10,6 +10,7 @@ blocking dialog inside the test process would have suspended.
     python -m tools.operator_prompt --test-id <test_id> --message "do the thing"
     python -m tools.operator_prompt --test-id <id> --message "..." --field "DUT SN" --field "Load (lb)"
     python -m tools.operator_prompt ... --field "DUT SN" --choice "DUT SN=YDRIVE1,YDRIVE2"
+    python -m tools.operator_prompt ... --field "ER Ticket" --pattern "ER Ticket=^ER-[0-9]+$"
 
 With --field, the window collects free text instead of just confirming: one entry
 per field, in the order given, and the answers are written into the marker file as
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 from typing import Dict, Optional, Sequence
 
@@ -44,11 +46,40 @@ logger = logging.getLogger(__name__)
 WRAP_WIDTH_PX = 420
 
 
+def normalise_and_check(
+    answers: Dict[str, str],
+    patterns: Dict[str, str],
+    hints: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    """Upper-case every patterned answer in place, and return the first complaint.
+
+    Upper-cased before it is checked, and it is the upper-cased value that gets
+    submitted: a patterned field has one canonical spelling, and the waiting step
+    applies the same rule to whatever arrives however it arrived.
+
+    A pattern naming a field that was not asked for is skipped rather than raising -
+    that is a typo on a command line, and an unhandled exception inside a Tk callback
+    is a button that silently does nothing.
+
+    Outside show() because it is the part worth testing: it is what stops a typo
+    ending a run somebody was in the middle of starting, and it needs no display."""
+    hints = hints or {}
+    for name, pattern in patterns.items():
+        if name not in answers:
+            continue
+        answers[name] = answers[name].upper()
+        if not re.match(pattern, answers[name]):
+            return f"{name} should look like {hints.get(name) or pattern}"
+    return None
+
+
 def show(
     test_id: str,
     message: str,
     fields: Sequence[str] = (),
     choices: Optional[Dict[str, Sequence[str]]] = None,
+    patterns: Optional[Dict[str, str]] = None,
+    hints: Optional[Dict[str, str]] = None,
 ) -> int:
     """Show the window and block until it is closed. Returns 0 if the operator
     acknowledged, 1 if they closed it without doing so, 2 if no window could be
@@ -58,7 +89,10 @@ def show(
     With `fields`, the window collects a value for each before it will submit. A
     field named in `choices` is a read-only dropdown of those values rather than an
     entry, so what lands in the record is one of a known set and not a typo of
-    one."""
+    one. A field named in `patterns` is free text that has to match that regular
+    expression, upper-cased first, and the window will not submit until it does -
+    `hints` is what the operator is told to type instead, since a regex is not an
+    instruction."""
     try:
         import tkinter as tk
     except ImportError:
@@ -68,6 +102,8 @@ def show(
     acknowledged = False
     entries: dict = {}
     choices = choices or {}
+    patterns = patterns or {}
+    hints = hints or {}
 
     def on_click() -> None:
         nonlocal acknowledged
@@ -77,6 +113,13 @@ def show(
             # Refused rather than accepted blank: an unattributable run is worse
             # than a run that waited for someone to type.
             complaint.config(text=f"still needed: {', '.join(missing)}")
+            return
+        # Refused here rather than by the test: this window is open with a person in
+        # front of it, so a typo is something they can fix. The same answer arriving
+        # from the CLI ends the run instead.
+        bad = normalise_and_check(answers, patterns, hints)
+        if bad:
+            complaint.config(text=bad)
             return
         acknowledged = True
         acknowledge(test_id, answers)
@@ -151,9 +194,19 @@ if __name__ == "__main__":
         "--choice", action="append", default=[], metavar="NAME=A,B,C",
         help="make that field a dropdown of these values instead of free text",
     )
+    parser.add_argument(
+        "--pattern", action="append", default=[], metavar="NAME=REGEX",
+        help="refuse to submit until that field matches this regular expression",
+    )
+    parser.add_argument(
+        "--hint", action="append", default=[], metavar="NAME=TEXT",
+        help="what to tell the operator when that field's --pattern does not match",
+    )
     args = parser.parse_args()
     choices = {}
     for spec in args.choice:
         name, _, values = spec.partition("=")
         choices[name] = [v for v in values.split(",") if v]
-    sys.exit(show(args.test_id, args.message, args.field, choices))
+    patterns = dict(spec.partition("=")[::2] for spec in args.pattern)
+    hints = dict(spec.partition("=")[::2] for spec in args.hint)
+    sys.exit(show(args.test_id, args.message, args.field, choices, patterns, hints))

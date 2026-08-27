@@ -239,6 +239,38 @@ per-device telemetry/command connections to work. When you're done, stop the
 test case with `python -m tools.stop_test` in a separate terminal rather than
 killing its process directly.
 
+## mirror_results.py
+
+Copies finished runs to the results share, filed by DUT, ticket and unit -
+`<share>/TestResults/MytestResults/<dut>/<ER ticket>/<serial>/runs/<test_id>/`.
+One pass per invocation; a scheduled task registered by
+`provisioning/Setup-StandBox.ps1 -ResultsShareOnly` runs it every few minutes.
+
+```
+python -m tools.mirror_results
+python -m tools.mirror_results --dry-run
+python -m tools.mirror_results --share-root /Volumes/SEIT/TestResults/MytestResults
+```
+
+A run is copied once its `verdict.json` carries `completeness`, which the
+telemetry engine writes when the run's stream goes quiet - so this needs no
+handshake with the engine or the test process, and picks up a run whose test
+process died. `raw/` is never copied: it belongs to no run, and it is most of
+the tree.
+
+It never deletes or overwrites a run, on either side. A run is already
+mirrored if its destination directory exists, so the share is the state and
+there is nothing to lose when a box is reimaged. Copies land in a `_partial_`
+sibling and are renamed into place, so a reader never finds a half-copied run.
+The only things it removes are its own leftovers: a `_partial_` from an
+interrupted pass, and the probe file it writes to test the share. Mock runs and
+`example_dut` are not mirrored.
+
+Its last pass is published to `mytest-mirror.json` in the temp directory
+(`protocol/mirror_status.py`), which is what a run's operator prompt reads to
+warn that results are not reaching the share - including the case a live check
+cannot see, where the share is fine and the mirror is not running at all.
+
 ## Adding a new tool
 
 Prefer a new top-level module here (matching the shape of the tools above)

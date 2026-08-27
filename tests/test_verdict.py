@@ -53,6 +53,8 @@ def test_round_trip_preserves_every_field():
     original = make_verdict(
         lifecycle=Lifecycle.ERRORED,
         bounds_result=BoundsResult.FAIL,
+        dut="zdrive",
+        used_mock=True,
         reason="fatal bound overcurrent_bound violated",
         any_fatal=True,
         violations=[make_violation(), make_violation(transition="cleared", seq=9)],
@@ -79,6 +81,8 @@ def test_round_trip_tolerates_absent_optional_fields():
     assert verdict.metadata == {}
     assert verdict.completeness is None
     assert verdict.any_fatal is False
+    assert verdict.dut == ""
+    assert verdict.used_mock is False
 
 
 def test_outcome_is_derived_not_stored_as_source_of_truth():
@@ -169,3 +173,20 @@ def test_read_verdict_raises_on_unusable_content(tmp_path, bad):
     path.write_text(bad)
     with pytest.raises((KeyError, ValueError, TypeError)):
         read_verdict(path)
+
+
+def test_amend_completeness_keeps_the_fields_only_the_test_process_knew(tmp_path):
+    """The engine amends a verdict by reading it and writing it back whole, so a
+    field from_dict does not read is a field deleted from every run it touches.
+
+    dut and used_mock are both written by the test process and unknowable to the
+    engine - which stand this was, and whether it drove hardware at all."""
+    path = tmp_path / "verdict.json"
+    path.write_text(json.dumps(make_verdict(dut="ydrive", used_mock=True).to_dict()))
+
+    assert amend_completeness(path, {"frame_count": 10, "seq_gap_count": 0, "dropped_frames": 0})
+
+    amended = Verdict.from_dict(json.loads(path.read_text()))
+    assert amended.dut == "ydrive"
+    assert amended.used_mock is True
+    assert amended.completeness == {"frame_count": 10, "seq_gap_count": 0, "dropped_frames": 0}

@@ -84,7 +84,9 @@ class Verdict:
     `metadata` is a freeform bag the test attaches (tuning profile,
     setpoints, DUT serial, operator, git SHA); `completeness` is added by
     the engine at record time and is the honest account of what the
-    best-effort PUB/SUB transport actually delivered.
+    best-effort PUB/SUB transport actually delivered. `dut` is a real
+    field rather than part of that bag: which stand produced a run is
+    structural, and it decides where the run is filed.
     """
 
     test_id: str
@@ -93,6 +95,17 @@ class Verdict:
     bounds_result: str
     started_at: float
     ended_at: float
+    dut: str = ""
+    """Which DUT package produced this run - see TestCase.DUT.
+
+    Empty on a verdict the engine synthesized, which knows the run's id and
+    name but not the class that was running. The key's presence is what tells
+    a reader this verdict was written by a version that records it at all."""
+    used_mock: bool = False
+    """Whether this run drove a simulated backend instead of the hardware.
+
+    False on a verdict the engine synthesized, and on one written before this
+    was recorded - neither knows, and neither should claim a run was mocked."""
     reason: str = ""
     any_fatal: bool = False
     violations: List[Violation] = field(default_factory=list)
@@ -130,6 +143,8 @@ class Verdict:
             test_id=data["test_id"],
             test_name=data["test_name"],
             lifecycle=data["lifecycle"],
+            dut=data.get("dut", ""),
+            used_mock=data.get("used_mock", False),
             bounds_result=data["bounds_result"],
             started_at=data["started_at"],
             ended_at=data["ended_at"],

@@ -11,7 +11,13 @@ from pathlib import Path
 
 import pytest
 
-from testcases.ydrive.teststeps.teststeps import RunDetail, await_operator
+from testcases.teststeps.duts import serials_for
+from testcases.teststeps.operator import (
+    ER_TICKET_HINT,
+    ER_TICKET_PATTERN,
+    RunDetail,
+    await_operator,
+)
 from tools import operator_ack, operator_prompt
 
 
@@ -63,9 +69,9 @@ def test_a_stale_acknowledgement_does_not_skip_the_wait(tmp_path, monkeypatch):
     ack = tmp_path / "mytest-ack-test-prompt"
     ack.touch()
     case = FakeTestCase(ack)
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None: FakeWindow())
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
+    monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
+                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: FakeWindow())
+    monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
 
     await_operator(case, "do the thing")
 
@@ -77,9 +83,9 @@ def test_the_prompt_is_published_while_waiting_and_cleared_after(tmp_path, monke
     otherwise indistinguishable from a hang."""
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     windows = []
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None: windows.append(FakeWindow()) or windows[-1])
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
+    monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
+                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: windows.append(FakeWindow()) or windows[-1])
+    monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
 
     await_operator(case, "move the load")
 
@@ -92,8 +98,8 @@ def test_the_window_is_closed_even_when_the_wait_is_aborted(tmp_path, monkeypatc
     for something nobody is waiting for is worse than none."""
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     window = FakeWindow()
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None: window)
+    monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
+                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: window)
 
     # Not on the first call: @step checks at its own entry, before the window is
     # spawned, and an abort there has no window to close. The case worth pinning
@@ -169,15 +175,15 @@ def _answer_with(case, answers):
 def test_the_answers_are_published_as_run_state(tmp_path, monkeypatch):
     """Published, so the engine merges them into every recorded row - a stored run
     then says which DUT it was and under what load without a separate note."""
-    from testcases.ydrive.teststeps.teststeps import RunDetail, prompt_for_SN_ER_load
+    from testcases.teststeps.operator import RunDetail, prompt_for_run_details
 
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None: FakeWindow())
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
+    monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
+                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: FakeWindow())
+    monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
     _answer_with(case, {"DUT SN": "YD-014", "Load (lb)": "250"})
 
-    details = prompt_for_SN_ER_load(case, FIELDS)
+    details = prompt_for_run_details(case, FIELDS)
 
     assert details == {"dut_serial_number": "YD-014", "load_lb": "250"}
     assert case.state["dut_serial_number"] == "YD-014"
@@ -188,16 +194,16 @@ def test_the_answers_are_published_as_run_state(tmp_path, monkeypatch):
 def test_the_prompt_labels_are_what_the_window_is_asked_for(tmp_path, monkeypatch):
     """The label a person reads and the channel it lands in are written as a pair,
     so renaming a prompt cannot rename a channel stored runs are keyed by."""
-    from testcases.ydrive.teststeps.teststeps import RunDetail, prompt_for_SN_ER_load
+    from testcases.teststeps.operator import RunDetail, prompt_for_run_details
 
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     asked = []
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None: asked.extend(fields) or FakeWindow())
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
+    monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
+                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: asked.extend(fields) or FakeWindow())
+    monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
     _answer_with(case, {"DUT SN": "YD-014", "Load (lb)": "250"})
 
-    prompt_for_SN_ER_load(case, FIELDS)
+    prompt_for_run_details(case, FIELDS)
 
     assert asked == ["DUT SN", "Load (lb)"]
 
@@ -206,35 +212,35 @@ def test_a_run_without_its_details_does_not_start(tmp_path, monkeypatch):
     """An operator can dismiss the window with the CLI acknowledgement, which
     answers nothing - and a run that cannot be attributed to a DUT is not worth the
     hours it takes."""
-    from testcases.ydrive.teststeps.teststeps import RunDetail, prompt_for_SN_ER_load
+    from testcases.teststeps.operator import RunDetail, prompt_for_run_details
 
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None: FakeWindow())
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
+    monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
+                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: FakeWindow())
+    monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
     _answer_with(case, None)  # a plain acknowledgement, no values
 
     with pytest.raises(RuntimeError, match="no answer for 'DUT SN'"):
-        prompt_for_SN_ER_load(case, FIELDS)
+        prompt_for_run_details(case, FIELDS)
 
 
 def test_the_serial_is_picked_from_a_list_and_a_typo_is_refused(tmp_path, monkeypatch):
     """The window cannot produce anything but a listed value, but the CLI
     acknowledgement can - and a serial the record cannot match to a DUT is worse
     than no serial."""
-    from testcases.ydrive.teststeps.teststeps import prompt_for_SN_ER_load
+    from testcases.teststeps.operator import prompt_for_run_details
 
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     offered = {}
     monkeypatch.setattr(
-        "testcases.ydrive.teststeps.teststeps.spawn_operator_prompt",
-        lambda test_id, message, fields=(), choices=None: offered.update(choices or {}) or FakeWindow(),
+        "testcases.teststeps.operator.spawn_operator_prompt",
+        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: offered.update(choices or {}) or FakeWindow(),
     )
-    monkeypatch.setattr("testcases.ydrive.teststeps.teststeps.OPERATOR_POLL_INTERVAL_S", 0.001)
+    monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
     _answer_with(case, {"DUT SN": "YD-O14", "Load (lb)": "250"})  # letter O, not zero
 
     with pytest.raises(RuntimeError, match="is not one of the values"):
-        prompt_for_SN_ER_load(case, FIELDS)
+        prompt_for_run_details(case, FIELDS)
 
     assert offered == {"DUT SN": ("YD-014", "YD-015")}, "the dropdown was not offered its values"
 
@@ -244,7 +250,7 @@ def test_the_stands_serials_are_the_ones_offered():
 
     serial = BrakeEnduranceTest.RUN_DETAIL_FIELDS[0]
     assert serial.channel == "dut_serial_number"
-    assert serial.choices == BrakeEnduranceTest.DUT_SERIAL_NUMBERS
+    assert serial.choices == serials_for(BrakeEnduranceTest.DUT)
     assert "YDRIVE1" in serial.choices
     others = [f for f in BrakeEnduranceTest.RUN_DETAIL_FIELDS if f is not serial]
     assert all(f.choices == () for f in others), "the ticket and the load are free text"
@@ -273,3 +279,222 @@ def test_every_asked_field_is_seeded_so_the_engine_keeps_it():
 
     for field in BrakeEnduranceTest.RUN_DETAIL_FIELDS:
         assert field.channel in DEFAULT_STATE, f"{field.channel} is not seeded"
+
+
+# --- a ticket the results can be filed under -----------------------------------
+
+
+TICKET_FIELDS = (
+    RunDetail("ER Ticket", "er_ticket", pattern=ER_TICKET_PATTERN, hint=ER_TICKET_HINT),
+)
+
+
+def _prompt_with_answer(tmp_path, monkeypatch, answers, captured=None):
+    """Run the details prompt against a canned answer, as the CLI path delivers it."""
+    from testcases.teststeps.operator import prompt_for_run_details
+
+    case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
+
+    def spawn(test_id, message, fields=(), choices=None, patterns=None, hints=None):
+        if captured is not None:
+            captured.update({"patterns": patterns or {}, "hints": hints or {}})
+        return FakeWindow()
+
+    monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt", spawn)
+    monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
+    _answer_with(case, answers)
+    return case, prompt_for_run_details
+
+
+@pytest.mark.parametrize("typed", ["ER 64", "64", "er_64", "ER-", "ER-64-2", "bringup"])
+def test_a_ticket_that_is_not_a_ticket_is_refused(tmp_path, monkeypatch, typed):
+    """The window will not submit these, but `tools.operator_ack --answer` will.
+
+    The ticket is a directory name wherever runs are filed by it, so free text
+    becomes as many sibling pseudo-tickets as there are ways to type one."""
+    case, prompt = _prompt_with_answer(tmp_path, monkeypatch, {"ER Ticket": typed})
+    with pytest.raises(RuntimeError, match="is not a usable 'ER Ticket'"):
+        prompt(case, TICKET_FIELDS)
+
+
+@pytest.mark.parametrize("typed,stored", [
+    ("ER-64", "ER-64"),
+    ("er-64", "ER-64"),
+    ("  ER-64  ", "ER-64"),
+    ("Er-00", "ER-00"),
+])
+def test_the_ticket_is_stored_in_one_spelling(tmp_path, monkeypatch, typed, stored):
+    """Upper-cased and stripped before it is stored.
+
+    SMB is case-insensitive but case-preserving, so er-64 and ER-64 are one
+    directory whose name depends on who typed first."""
+    case, prompt = _prompt_with_answer(tmp_path, monkeypatch, {"ER Ticket": typed})
+    assert prompt(case, TICKET_FIELDS) == {"er_ticket": stored}
+    assert case.state["er_ticket"] == stored
+
+
+def test_the_no_ticket_bucket_is_a_valid_ticket(tmp_path, monkeypatch):
+    """ER-00 satisfies the pattern like any other, so an exploratory run has an
+    answer that is not somebody else's ticket number."""
+    case, prompt = _prompt_with_answer(tmp_path, monkeypatch, {"ER Ticket": "ER-00"})
+    assert prompt(case, TICKET_FIELDS) == {"er_ticket": "ER-00"}
+
+
+def test_a_ticket_number_outside_ascii_is_refused(tmp_path, monkeypatch):
+    """[0-9], not \\d - which also matches digits outside ASCII, and a ticket
+    number in Devanagari would become a directory nobody can type."""
+    case, prompt = _prompt_with_answer(tmp_path, monkeypatch, {"ER Ticket": "ER-٦٤"})
+    with pytest.raises(RuntimeError, match="is not a usable 'ER Ticket'"):
+        prompt(case, TICKET_FIELDS)
+
+
+def test_the_window_is_told_what_to_enforce(tmp_path, monkeypatch):
+    """The pattern and its hint reach the window, so a typo is corrected in front
+    of the person who made it rather than ending the run they were starting."""
+    captured = {}
+    case, prompt = _prompt_with_answer(
+        tmp_path, monkeypatch, {"ER Ticket": "ER-64"}, captured=captured
+    )
+    prompt(case, TICKET_FIELDS)
+    assert captured["patterns"] == {"ER Ticket": ER_TICKET_PATTERN}
+    assert captured["hints"] == {"ER Ticket": ER_TICKET_HINT}
+
+
+def test_an_unpatterned_field_is_stored_as_typed(tmp_path, monkeypatch):
+    """Only a patterned field is upper-cased: a pattern is what says the field has
+    one canonical spelling. Whitespace is stripped either way."""
+    fields = (RunDetail("Note", "note"),)
+    case, prompt = _prompt_with_answer(tmp_path, monkeypatch, {"Note": "  slow leg  "})
+    assert prompt(case, fields) == {"note": "slow leg"}
+
+
+# --- telling the operator their results are not being copied anywhere ------------
+
+
+class RecordingTestCase(FakeTestCase):
+    """A test case that answers every wait, and remembers what it was asked."""
+
+    def __init__(self, ack_path, require_engine=True):
+        super().__init__(ack_path)
+        self.require_engine = require_engine
+        self.prompts = []
+
+    def set_state(self, name, value):
+        super().set_state(name, value)
+        if name == "operator_prompt" and value is not None:
+            self.prompts.append(value)
+
+    def check_should_continue(self):
+        import json as _json
+
+        self._ack_path.write_text(_json.dumps({"ER Ticket": "ER-64"}))
+
+
+def _run_prompt(tmp_path, monkeypatch, status, require_engine=True):
+    from testcases.teststeps.operator import prompt_for_run_details
+
+    case = RecordingTestCase(tmp_path / "mytest-ack-test-prompt", require_engine)
+    monkeypatch.setattr("testcases.teststeps.operator.read_status", lambda: status)
+    monkeypatch.setattr(
+        "testcases.teststeps.operator.spawn_operator_prompt",
+        lambda *a, **k: FakeWindow(),
+    )
+    monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
+    prompt_for_run_details(case, TICKET_FIELDS)
+    return case
+
+
+def test_a_stand_that_is_not_mirroring_says_so_before_it_asks_anything(tmp_path, monkeypatch):
+    """The one moment somebody is guaranteed to be looking. Its own dialog rather
+    than a line above the fields, which is a line people stop reading by Thursday."""
+    case = _run_prompt(tmp_path, monkeypatch, None)
+
+    assert len(case.prompts) == 2, "the warning and the details should be two dialogs"
+    assert "has never run on this machine" in case.prompts[0]
+    assert case.prompts[1] == "enter this run's details"
+
+
+def test_the_warning_does_not_stop_the_run(tmp_path, monkeypatch):
+    """The record is safe locally and the mirror backfills, so refusing to start
+    would spend stand time on a problem that no longer threatens the record."""
+    case = _run_prompt(tmp_path, monkeypatch, None)
+
+    assert case.state["er_ticket"] == "ER-64", "the run went ahead and was attributed"
+
+
+def test_a_healthy_mirror_says_nothing(tmp_path, monkeypatch):
+    import time as _time
+
+    from protocol.mirror_status import MirrorStatus
+
+    case = _run_prompt(tmp_path, monkeypatch, MirrorStatus(_time.time(), "//nas/x", True))
+
+    assert case.prompts == ["enter this run's details"]
+
+
+def test_a_run_that_records_nothing_is_not_warned_about_mirroring(tmp_path, monkeypatch):
+    """A demo or a unit test declares require_engine=False. Nothing about those is
+    being recorded, so nothing about them is being mirrored either."""
+    case = _run_prompt(tmp_path, monkeypatch, None, require_engine=False)
+
+    assert case.prompts == ["enter this run's details"]
+
+
+def test_the_published_prompt_stays_one_line(tmp_path, monkeypatch):
+    """operator_prompt is a telemetry column carried on every frame of the wait,
+    and the dashboard shows it live. The window gets the paragraphs; the channel
+    gets the headline."""
+    case = _run_prompt(tmp_path, monkeypatch, None)
+
+    assert "\n" not in case.prompts[0]
+    assert case.prompts[0].startswith("The results mirror has never run")
+
+
+def test_a_dut_with_no_catalogued_units_cannot_build_a_serial_prompt():
+    """An empty `choices` is how a field says it is free text, so an empty
+    dropdown would silently make the serial the one thing it must never be -
+    unchecked."""
+    from testcases.teststeps.operator import run_detail_fields
+
+    with pytest.raises(ValueError, match="no DUT serial numbers catalogued"):
+        run_detail_fields("example_dut")
+
+
+# --- what the window refuses to submit --------------------------------------------
+
+
+def test_the_window_refuses_a_ticket_that_does_not_match():
+    """The point of checking in the window at all: the person who made the typo is
+    standing in front of it, so they fix it instead of losing the run."""
+    answers = {"ER Ticket": "ER 64"}
+
+    said = operator_prompt.normalise_and_check(
+        answers, {"ER Ticket": ER_TICKET_PATTERN}, {"ER Ticket": ER_TICKET_HINT}
+    )
+
+    assert said == f"ER Ticket should look like {ER_TICKET_HINT}"
+
+
+def test_the_window_submits_the_canonical_spelling():
+    """Upper-cased in place, so what leaves the window is what the step would have
+    stored anyway - the two cannot disagree about the answer."""
+    answers = {"ER Ticket": "er-64"}
+
+    assert operator_prompt.normalise_and_check(answers, {"ER Ticket": ER_TICKET_PATTERN}) is None
+    assert answers == {"ER Ticket": "ER-64"}
+
+
+def test_the_window_shows_the_pattern_when_there_is_no_hint():
+    said = operator_prompt.normalise_and_check({"X": "no"}, {"X": "^YES$"})
+    assert said == "X should look like ^YES$"
+
+
+def test_a_pattern_for_a_field_nobody_was_asked_is_ignored():
+    """A typo on a command line, not a reason for the button to stop working."""
+    assert operator_prompt.normalise_and_check({"X": "ok"}, {"Typo": "^never$"}) is None
+
+
+def test_an_unpatterned_answer_is_left_exactly_as_typed():
+    answers = {"Load (lb)": "250", "ER Ticket": "er-1"}
+    operator_prompt.normalise_and_check(answers, {"ER Ticket": ER_TICKET_PATTERN})
+    assert answers["Load (lb)"] == "250"

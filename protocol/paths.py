@@ -84,6 +84,35 @@ output alone rather than from whatever scrolled past in a terminal."""
 
 _UNSAFE_IN_PATH = re.compile(r"[^A-Za-z0-9._-]+")
 
+_WINDOWS_RESERVED = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{n}" for n in range(1, 10)]
+    + [f"LPT{n}" for n in range(1, 10)]
+)
+"""Names Windows refuses as a path component, with or without an extension.
+
+A run filed under a directory called CON cannot be created on the machine that
+would create it, and the failure is an OSError at copy time rather than
+anything legible. Cheap to avoid, and this is the one function that knows a
+string is about to become a path component."""
+
+
+def safe_path_component(text: str, fallback: str) -> str:
+    """`text` reduced to something that behaves as a single path component.
+
+    Anything outside [A-Za-z0-9._-] becomes '-', which takes out the separators,
+    the characters Windows refuses outright, and the trailing dot or space that
+    Explorer silently strips. A name that reduces to nothing, or to something
+    Windows reserves, becomes `fallback`.
+
+    Shared by run directory names and by the operator's answers where those
+    become directories on the results share - one place that knows what a path
+    component may contain, rather than one per writer."""
+    safe = _UNSAFE_IN_PATH.sub("-", text).strip("-.")
+    if not safe or safe.split(".")[0].upper() in _WINDOWS_RESERVED:
+        return fallback
+    return safe
+
 
 def new_test_id(test_name: str, when: Optional[datetime] = None) -> str:
     """An id for one run: the test's name, then when it started.
@@ -98,8 +127,7 @@ def new_test_id(test_name: str, when: Optional[datetime] = None) -> str:
     run. Nothing in a manual test workflow produces that, but an automated
     caller that might should pass its own id."""
     stamp = (when or datetime.now()).strftime(RUN_TIMESTAMP_FORMAT)
-    safe_name = _UNSAFE_IN_PATH.sub("-", test_name).strip("-.") or "test"
-    return f"{safe_name}_{stamp}"
+    return f"{safe_path_component(test_name, 'test')}_{stamp}"
 
 
 def ensure_output_dir(output_dir: Path) -> Path:

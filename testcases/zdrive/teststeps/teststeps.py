@@ -36,11 +36,9 @@ spinout thresholds and overspeed tolerance - in RAM, so a run leaves the board's
 saved configuration alone. The motor's current limits are NOT here: ZdriveTestbed
 writes those, and one owner per setting is the point.
 
-prompt_for_SN_ER_load: ask the operator which DUT, which ticket and what load,
-and publish the answers so every recorded row carries them.
-
-await_operator: wait for a person, polling for a fatal bound, a stop request and
-a lost recorder throughout.
+Steps that wait for a person - await_operator, prompt_for_run_details - are
+not here: they are the same on every stand and live in
+testcases/teststeps/operator.py.
 
 release_brake_for_positioning: the one step that leaves the load held by nothing.
 
@@ -54,10 +52,9 @@ state moved together, each confirming the axis reached the state it was asked
 for. Not steps: they would bury their caller's `current_step`."""
 from __future__ import annotations
 
-import json
 import logging
 import time
-from typing import Dict, NamedTuple, Optional, Sequence, Tuple
+from typing import Dict, Optional
 
 from hardware.odrive import odrive_errors
 from testbeds.zdrive_testbed.zdrive_testbed import (
@@ -67,8 +64,9 @@ from testbeds.zdrive_testbed.zdrive_testbed import (
     ZdriveTestbed,
 )
 from testcases.step import step
+from testcases.teststeps.operator import await_operator
 from testcases.zdrive.rulebooks.zdrive_rulebook import MAX_TEMPERATURE_C
-from testcases.utils import Stopwatch, spawn_operator_prompt
+from testcases.utils import Stopwatch
 from testcases.zdrive.testcases.base_zdrive_test import BaseZdriveTest
 
 logger = logging.getLogger(__name__)
@@ -160,11 +158,6 @@ for the bus to come up, since DC_BUS_UNDER_VOLTAGE re-latches until it has."""
 CLEAR_SETTLE_S = 0.25
 """Seconds between clearing and reading the result, so the frame checked was
 produced after the clear rather than before it."""
-
-OPERATOR_POLL_INTERVAL_S = 0.1
-"""How often an operator-gated wait re-checks - slower than Stopwatch's tick
-because a person is what is being waited on. Every tick still runs the abort
-checks."""
 
 VELOCITY_LIMIT = 18.0  # turns/s
 FILTER_BW = 20.0  # 1/s
@@ -374,120 +367,6 @@ def _apply_tuning_params(
     testbed.command.set_controller_config_spinout_electrical_power_threshold(
         spinout_electrical_threshold
     )
-
-
-def _await_ack(
-    test_case: BaseZdriveTest,
-    instruction: str,
-    fields: Sequence[str] = (),
-    choices: Optional[Dict[str, Sequence[str]]] = None,
-) -> str:
-    """Publish an instruction, wait for the operator's marker, and return its
-    contents - empty for a plain acknowledgement, JSON when values were asked for.
-
-    A window opens with a button (tools/operator_prompt.py), and
-    `python -m tools.operator_ack` leaves the same marker from a terminal, which
-    is what a stand with no display uses. Either way this polls for the marker
-    file rather than blocking on input(), so every tick still runs
-    check_should_continue() - a fatal bound, a stop request or a lost recorder
-    ends the run instead of waiting on someone who may have walked away. On this
-    axis that matters more than most: one of the steps that precedes an operator
-    prompt here is the one that leaves the load held by nothing.
-
-    The instruction is published as `operator_prompt` and cleared afterwards, so
-    a recorded run shows what it was waiting for rather than looking like a
-    hang."""
-    path = test_case.operator_ack_path()
-    path.unlink(missing_ok=True)  # a stale ack from an earlier run must not skip this
-    test_case.set_state("operator_prompt", instruction)
-    logger.warning("test %s: WAITING FOR OPERATOR - %s", test_case.test_id, instruction)
-    logger.warning("test %s: click the window, or `python -m tools.operator_ack`", test_case.test_id)
-
-    window = spawn_operator_prompt(test_case.test_id, instruction, fields, choices)
-    clock = Stopwatch()
-    try:
-        while not path.exists():
-            test_case.check_should_continue()
-            time.sleep(OPERATOR_POLL_INTERVAL_S)
-        answered = path.read_text()
-        path.unlink(missing_ok=True)
-        logger.info(
-            "test %s: operator acknowledged after %.0fs", test_case.test_id, clock.elapsed_s(),
-        )
-        return answered
-    finally:
-        test_case.set_state("operator_prompt", None)
-        # However this ended, the window is asking for something nobody is
-        # waiting for any more, and a stale one left on a stand's screen is worse
-        # than none.
-        if window is not None:
-            window.terminate()
-
-
-@step
-def await_operator(test_case: BaseZdriveTest, instruction: str) -> None:
-    """Block until a person acknowledges `instruction`. See _await_ack for the
-    wait itself."""
-    _await_ack(test_case, instruction)
-
-
-class RunDetail(NamedTuple):
-    """One thing the operator is asked for before a run.
-
-    `label` is read, `channel` is stored, and they are separate so rewording a
-    prompt cannot rename a channel that stored runs are keyed by. `choices` makes
-    the prompt a dropdown, and is enforced on the answer however it arrives."""
-
-    label: str
-    channel: str
-    choices: Tuple[str, ...] = ()
-
-
-@step
-def prompt_for_SN_ER_load(
-    test_case: BaseZdriveTest, fields: Sequence[RunDetail]
-) -> Dict[str, str]:
-    """Ask the operator for the details that identify this run, and publish them.
-
-    A field with choices is a dropdown and its answer is checked against them - the
-    window cannot produce anything else, but `tools.operator_ack --answer` can.
-
-    Published as run state, so the engine merges them into every recorded row. The
-    channels have to be seeded (../channels.py) or the engine fixes its header
-    before they exist and drops them. Asked before anything is energized, and
-    before the brake is released: it needs a person and does not need the stand,
-    and on this axis the release is the moment the load is held by nothing."""
-    answered = _await_ack(
-        test_case,
-        "enter this run's details",
-        [field.label for field in fields],
-        {field.label: field.choices for field in fields if field.choices},
-    )
-    try:
-        answers = json.loads(answered) if answered else {}
-    except ValueError:
-        answers = {}
-
-    details: Dict[str, str] = {}
-    for field in fields:
-        value = answers.get(field.label)
-        if not value:
-            raise RuntimeError(
-                f"test {test_case.test_id}: no answer for {field.label!r} - a run that cannot be "
-                "attributed to a DUT is not worth the hours it takes. Acknowledge with the "
-                "window, or `python -m tools.operator_ack --answer "
-                f"'{field.label}=...'` for a stand with no display"
-            )
-        if field.choices and value not in field.choices:
-            raise RuntimeError(
-                f"test {test_case.test_id}: {value!r} is not one of the values {field.label!r} "
-                f"accepts ({', '.join(field.choices)}). A serial the record cannot match to a DUT "
-                "is worse than no serial, so this is refused rather than stored"
-            )
-        details[field.channel] = value
-        test_case.set_state(field.channel, value)
-    logger.info("test %s: run details %s", test_case.test_id, details)
-    return details
 
 
 def engage_brake(test_case: BaseZdriveTest, arm_timeout_s: float = DEFAULT_ARM_TIMEOUT_S) -> None:

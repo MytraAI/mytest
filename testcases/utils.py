@@ -12,7 +12,7 @@ telemetry frame timestamps. A test's own sequencing - how long has
 this test been running, how long since the last position change - is
 a different concern from a Rulebook bound's persistence_s, which is
 correctly tied to the data's own timestamp (frame.t) rather than
-wall-clock time. See testcases/asimov/rulebook.py.
+wall-clock time. See asimov/rulebook.py.
 
 spawn_operator_dashboard: starts tools/operator_dashboard.py's
 lightweight status page for one test - see TestCase.run() (base.py)
@@ -105,6 +105,8 @@ def spawn_operator_prompt(
     message: str,
     fields: Sequence[str] = (),
     choices: Optional[Dict[str, Sequence[str]]] = None,
+    patterns: Optional[Dict[str, str]] = None,
+    hints: Optional[Dict[str, str]] = None,
 ) -> Optional[subprocess.Popen]:
     """Open a window asking the operator to do something, and return the process
     so the caller can close it once the wait is over however it ended.
@@ -116,7 +118,12 @@ def spawn_operator_prompt(
     Returns None (logged, not raised) if it cannot be started. The window is a
     convenience over the marker file it writes, and the wait it belongs to polls
     for that file whatever created it - so a stand with no display still answers
-    with `python -m tools.operator_ack` rather than failing the run."""
+    with `python -m tools.operator_ack` rather than failing the run.
+
+    `patterns` and `hints` are what the window refuses to submit against, so a
+    mistyped field is corrected in the window rather than raising out of the
+    waiting step and ending the run. The step checks them again on whatever
+    arrives, since the CLI path does not go through the window."""
     try:
         return subprocess.Popen(
             [_windowless_python(), "-m", "tools.operator_prompt", "--test-id", test_id,
@@ -126,6 +133,16 @@ def spawn_operator_prompt(
                 arg
                 for name, values in (choices or {}).items()
                 for arg in ("--choice", f"{name}={','.join(values)}")
+            ]
+            + [
+                arg
+                for name, pattern in (patterns or {}).items()
+                for arg in ("--pattern", f"{name}={pattern}")
+            ]
+            + [
+                arg
+                for name, hint in (hints or {}).items()
+                for arg in ("--hint", f"{name}={hint}")
             ]
         )
     except OSError as exc:

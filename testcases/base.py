@@ -50,7 +50,7 @@ staleness deadline is ten seconds, and a hundred opens a second is what made the
 engine's atomic replace collide with it on Windows."""
 from protocol.verdict import BoundsResult, Lifecycle, Verdict, write_verdict
 
-from .asimov.live_rulebook_runner import FatalBoundViolation, LiveRulebookRunner
+from asimov.live_rulebook_runner import FatalBoundViolation, LiveRulebookRunner
 from .state_publisher import RunStatePublisher
 from .utils import Stopwatch, spawn_operator_dashboard
 
@@ -110,6 +110,22 @@ class DeviceNotRecorded(Exception):
 class TestCase(ABC):
     """Abstract three-phase test case: PreTestSetup, MainExecution, PostTestTeardown."""
 
+    DUT: str = ""
+    """Which DUT package under testcases/ this test belongs to - "zdrive",
+    "ydrive", "example_dut".
+
+    Declared by each DUT's own base test case and inherited by every test on
+    it, including subclasses defined outside the package (a test module's
+    one-off subclass of a real test still reports the DUT it came from).
+    Deliberately not derived from __module__ at runtime, which would report
+    the module a subclass happens to be written in.
+
+    Recorded in the verdict, so a stored run says which stand produced it
+    without that having to be inferred from the test's name. The value is the
+    package's own directory name, and the same string the registry keys tests
+    by ("<dut>.<test>"); tests/test_dut_identifier.py holds those three in
+    agreement."""
+
     DEVICES: Tuple[str, ...] = ()
     """Which devices this test claims, as protocol/wire.py DEVICE_* names.
 
@@ -133,6 +149,14 @@ class TestCase(ABC):
         from this test's name and the current time unless the caller supplies
         one (see protocol/paths.py)."""
         self.runner: Optional[LiveRulebookRunner] = None
+        self.used_mock = False
+        """Whether this run drove a simulated backend instead of the hardware.
+
+        Set by a DUT base test case that has a mock to choose; left False by one
+        with no such choice to make. Recorded in the verdict because a mock run
+        answers the same prompt with a real serial and a real ticket, and
+        produces telemetry at the same rate - so without this, numbers nobody
+        measured are indistinguishable from numbers somebody did."""
         self.require_engine = require_engine
         """Whether this run needs the telemetry engine to be recording:
         refuse to start without it, and abort if it stops mid-run (see
@@ -374,6 +398,8 @@ class TestCase(ABC):
             verdict = Verdict(
                 test_id=self.test_id,
                 test_name=getattr(self, "TEST_NAME", "unknown"),
+                dut=self.DUT,
+                used_mock=self.used_mock,
                 lifecycle=lifecycle,
                 bounds_result=bounds_result,
                 started_at=started_at,
@@ -414,7 +440,7 @@ class TestCase(ABC):
         has violated - a no-op otherwise (including if self.runner is
         None or never started). Called from wait_for() below (once per
         tick) and from @step's entry/exit (see step.py) - see
-        testcases/asimov/live_rulebook_runner.py's docstring for the
+        asimov/live_rulebook_runner.py's docstring for the
         polling model this is part of, and its known gap."""
         if self.runner is not None and self.runner.fatal_violation is not None:
             raise self.runner.fatal_violation

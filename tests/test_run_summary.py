@@ -16,8 +16,8 @@ from __future__ import annotations
 import time
 
 from protocol.verdict import BoundsResult
-from testcases.asimov.live_rulebook_runner import LiveRulebookRunner, RunSummary
-from testcases.asimov.rulebook import Bound, Rulebook
+from asimov.live_rulebook_runner import LiveRulebookRunner, RunSummary
+from asimov.rulebook import Bound, Rulebook
 
 
 class FakePublisher:
@@ -144,7 +144,7 @@ def test_unevaluable_bound_forces_not_evaluated_rather_than_pass():
     would claim the DUT behaved when the run can't actually know.
 
     Regression test: found in review."""
-    from testcases.asimov.rulebook import UnevaluableBoundError
+    from asimov.rulebook import UnevaluableBoundError
 
     runner = make_runner(Bound(name="uv", channel="vbus", lower=10.5, unevaluable_grace_s=0.01))
     runner.evaluate({"vbus": 48.0}, seq=0, frame_t=0.0)

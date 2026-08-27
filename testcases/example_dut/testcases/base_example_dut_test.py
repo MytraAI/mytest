@@ -43,8 +43,8 @@ import logging
 from typing import List, Optional
 
 from testbeds.example_testbed.example_testbed import ExampleTestbed
-from testcases.asimov.live_rulebook_runner import LiveRulebookRunner
-from testcases.asimov.rulebook import Rulebook
+from asimov.live_rulebook_runner import LiveRulebookRunner
+from asimov.rulebook import Rulebook
 from testcases.base import TestCase
 
 from ..channels import DEFAULT_STATE
@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 class BaseExampleDutTest(TestCase):
     """Base test case for example_dut: starts the testbed + DUT, tags DUT telemetry, wires evaluation - no test sequence logic."""
 
+    DUT = "example_dut"
     TEST_NAME = "base_example_dut_test"
     RULEBOOKS: List[Rulebook] = []
 

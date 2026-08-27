@@ -30,7 +30,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from protocol.paths import TELEMETRY_FILENAME, VERDICT_FILENAME
 from protocol.verdict import Verdict, Violation, read_verdict
-from testcases.asimov.rulebook import Rulebook, RulebookEvaluator
+from asimov.rulebook import Rulebook, RulebookEvaluator
 
 logger = logging.getLogger(__name__)
 

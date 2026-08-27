@@ -30,7 +30,7 @@ back without a circular import.
 """
 from __future__ import annotations
 
-from testcases.asimov.rulebook import Bound, Rulebook
+from asimov.rulebook import Bound, Rulebook
 
 TEST_NAMES = ["cycle_dut_position_test"]
 

@@ -17,8 +17,8 @@ from protocol.verdict import BoundsResult, Lifecycle, Verdict, read_verdict, wri
 from telemetry_engine.replay import compare_with_verdict, read_frames, replay
 from telemetry_engine.storage import WriteItem
 from telemetry_engine.wide_csv_storage import WideCsvTelemetryStorage
-from testcases.asimov.live_rulebook_runner import LiveRulebookRunner
-from testcases.asimov.rulebook import Bound, Rulebook
+from asimov.live_rulebook_runner import LiveRulebookRunner
+from asimov.rulebook import Bound, Rulebook
 
 RULEBOOK = Rulebook(
     name="test_rulebook",

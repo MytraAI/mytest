@@ -38,7 +38,7 @@ from typing import Any, Callable, Dict, List, Optional
 from hardware.clients.telemetry_client import TelemetryClient, TelemetryTimeout
 from protocol.verdict import BoundsResult, Violation
 
-from ..state_publisher import RunStatePublisher
+from testcases.state_publisher import RunStatePublisher
 from .rulebook import Rulebook, RulebookEvaluator, UnevaluableBoundError
 
 logger = logging.getLogger(__name__)

@@ -17,8 +17,8 @@ from testbeds.ydrive_testbed.ydrive_testbed import YdriveTestbed
 from hardware.cpx400dp.rails import deliverable_current_a
 from testbeds.ydrive_testbed.ydrive_testbed import MOTOR_BUS, TC_DAQ_STALENESS_S
 from hardware.tc_daq.transport import SILENCE_TIMEOUT_S
-from testcases.asimov.live_rulebook_runner import LiveRulebookRunner
-from testcases.asimov.rulebook import Bound, Rulebook, RulebookEvaluator, UnevaluableBoundError
+from asimov.live_rulebook_runner import LiveRulebookRunner
+from asimov.rulebook import Bound, Rulebook, RulebookEvaluator, UnevaluableBoundError
 from testcases.ydrive.rulebooks.ydrive_rulebook import (
     BUS_CURRENT_PERSISTENCE_S,
     TC_DROPOUT_GRACE_S,
@@ -126,7 +126,7 @@ def test_the_thermocouples_get_a_wider_dropout_window_than_the_framework_default
     """This DAQ drops the odd sample; the bus channels do not, and a window is time
     spent without supervision - so it is widened where it is needed rather than
     everywhere."""
-    from testcases.asimov.rulebook import DEFAULT_UNEVALUABLE_GRACE_S
+    from asimov.rulebook import DEFAULT_UNEVALUABLE_GRACE_S
 
     assert TC_DROPOUT_GRACE_S == 10.0 > DEFAULT_UNEVALUABLE_GRACE_S
     for bound in TEMPERATURE_BOUNDS:
