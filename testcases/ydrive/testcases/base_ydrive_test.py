@@ -33,8 +33,8 @@ import logging
 from typing import List, Optional
 
 from testbeds.ydrive_testbed.ydrive_testbed import YdriveTestbed
-from testcases.asimov.live_rulebook_runner import LiveRulebookRunner
-from testcases.asimov.rulebook import Rulebook
+from asimov.live_rulebook_runner import LiveRulebookRunner
+from asimov.rulebook import Rulebook
 from testcases.base import TestCase
 
 from ..channels import DEFAULT_STATE

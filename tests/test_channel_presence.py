@@ -28,8 +28,8 @@ import pytest
 from hardware.backend import MissingChannelError
 from hardware.odrive.odrive_backend import OdriveBackend
 from protocol.wire import TelemetryFrame
-from testcases.asimov.live_rulebook_runner import LiveRulebookRunner
-from testcases.asimov.rulebook import Bound, Rulebook, UnevaluableBoundError
+from asimov.live_rulebook_runner import LiveRulebookRunner
+from asimov.rulebook import Bound, Rulebook, UnevaluableBoundError
 
 
 class FakeAttrNode:
@@ -248,7 +248,7 @@ def test_runner_makes_an_unevaluable_bound_fatal_instead_of_dying():
 def test_other_bounds_are_still_judged_while_one_channel_is_absent():
     """A flaky channel must not blind the rest of the frame: only the bound that
     cannot be evaluated is skipped, and only for as long as it is tolerated."""
-    from testcases.asimov.rulebook import Bound, Rulebook, RulebookEvaluator
+    from asimov.rulebook import Bound, Rulebook, RulebookEvaluator
 
     evaluator = RulebookEvaluator()
     evaluator.register(Rulebook(name="rb", test_names=["t"], bounds=[
@@ -266,7 +266,7 @@ def test_other_bounds_are_still_judged_while_one_channel_is_absent():
 def test_a_recovered_channel_starts_its_grace_again():
     """Otherwise a channel that drops one sample a minute would eventually exhaust
     a window it never actually stayed absent for."""
-    from testcases.asimov.rulebook import Bound, Rulebook, RulebookEvaluator, UnevaluableBoundError
+    from asimov.rulebook import Bound, Rulebook, RulebookEvaluator, UnevaluableBoundError
 
     bound = Bound(name="flaky", channel="temperature", upper=80.0, unevaluable_grace_s=1.0)
     evaluator = RulebookEvaluator()
@@ -373,7 +373,7 @@ def test_one_streams_frames_do_not_reset_anothers_unevaluable_grace():
 
     Every ydrive test watches two streams and every zdrive test three, so this
     path is the normal one rather than an edge case."""
-    from testcases.asimov.rulebook import Bound, Rulebook, RulebookEvaluator
+    from asimov.rulebook import Bound, Rulebook, RulebookEvaluator
 
     rulebook = Rulebook(
         name="two_stream",
@@ -404,7 +404,7 @@ def test_a_stream_that_lacks_the_channel_reports_nothing_either_way():
     """The other half of the rule: a stream carrying no temperatures must neither
     reset the grace nor make the bound look evaluated. Its status stays whatever
     it was seeded with, which is what keeps 'no transitions' honest."""
-    from testcases.asimov.rulebook import Bound, Rulebook, RulebookEvaluator
+    from asimov.rulebook import Bound, Rulebook, RulebookEvaluator
 
     rulebook = Rulebook(
         name="two_stream",

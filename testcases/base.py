@@ -50,7 +50,7 @@ staleness deadline is ten seconds, and a hundred opens a second is what made the
 engine's atomic replace collide with it on Windows."""
 from protocol.verdict import BoundsResult, Lifecycle, Verdict, write_verdict
 
-from .asimov.live_rulebook_runner import FatalBoundViolation, LiveRulebookRunner
+from asimov.live_rulebook_runner import FatalBoundViolation, LiveRulebookRunner
 from .state_publisher import RunStatePublisher
 from .utils import Stopwatch, spawn_operator_dashboard
 
@@ -414,7 +414,7 @@ class TestCase(ABC):
         has violated - a no-op otherwise (including if self.runner is
         None or never started). Called from wait_for() below (once per
         tick) and from @step's entry/exit (see step.py) - see
-        testcases/asimov/live_rulebook_runner.py's docstring for the
+        asimov/live_rulebook_runner.py's docstring for the
         polling model this is part of, and its known gap."""
         if self.runner is not None and self.runner.fatal_violation is not None:
             raise self.runner.fatal_violation

@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import pytest
 
-from testcases.asimov.live_rulebook_runner import LiveRulebookRunner
-from testcases.asimov.rulebook import Bound, Rulebook, UnevaluableBoundError
+from asimov.live_rulebook_runner import LiveRulebookRunner
+from asimov.rulebook import Bound, Rulebook, UnevaluableBoundError
 
 
 class FakePublisher:

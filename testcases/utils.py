@@ -12,7 +12,7 @@ telemetry frame timestamps. A test's own sequencing - how long has
 this test been running, how long since the last position change - is
 a different concern from a Rulebook bound's persistence_s, which is
 correctly tied to the data's own timestamp (frame.t) rather than
-wall-clock time. See testcases/asimov/rulebook.py.
+wall-clock time. See asimov/rulebook.py.
 
 spawn_operator_dashboard: starts tools/operator_dashboard.py's
 lightweight status page for one test - see TestCase.run() (base.py)

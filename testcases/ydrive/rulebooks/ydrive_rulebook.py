@@ -105,7 +105,7 @@ rulebooks for the same pattern).
 """
 from __future__ import annotations
 
-from testcases.asimov.rulebook import Bound, Rulebook
+from asimov.rulebook import Bound, Rulebook
 
 MAX_BUS_CURRENT_A = 12.0
 """Fatal ceiling on the ODrive's DC bus current.

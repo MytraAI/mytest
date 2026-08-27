@@ -26,7 +26,7 @@ and it needs no device-specific or DUT-specific knowledge at all.
 Separately, while the test is still running, the page also reflects the
 Rulebook's own *live* pass/fail state - the aggregate test_status
 LiveRulebookRunner already publishes onto the run-state stream on
-every frame (see testcases/asimov/live_rulebook_runner.py), which can
+every frame (see asimov/live_rulebook_runner.py), which can
 go PASS/FAIL well before the test itself reaches any final conclusion
 (a non-fatal bound violating doesn't raise anything - see
 check_fatal_violation()'s docstring - so run()'s own try/except never
