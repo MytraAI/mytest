@@ -214,10 +214,25 @@ def test_the_motor_limits_are_ordered():
     command its way straight into a fault."""
     assert ODRIVE_MOTOR_SOFT_MAX_A < ODRIVE_MOTOR_HARD_MAX_A
     # Both inside the inverter ceiling this hardware reports (100 A soft /
-    # 150 A hard), so the motor limits are what the stand asks for rather than
+    # 150 A hard), so the motor limits are the motor's rating rather than
     # what the board can deliver.
     assert ODRIVE_MOTOR_SOFT_MAX_A <= 100.0
     assert ODRIVE_MOTOR_HARD_MAX_A <= 150.0
+
+
+def test_the_hard_limit_is_the_motor_s_rated_current():
+    """A device figure, not a stand preference: the trip is there to protect the
+    motor, so it belongs at the nameplate rather than at whatever this stand
+    happens to draw. Pinned so that moving it needs a reason about the motor."""
+    assert ODRIVE_MOTOR_HARD_MAX_A == 71.0
+
+
+def test_a_lift_cannot_command_its_way_to_the_motor_bound():
+    """The soft limit clamps a demand rather than delivering it, so a lift that
+    needs more torque than the stand allows falls behind its trajectory instead
+    of arriving at the fatal bound. What reaches the bound is measured overshoot
+    or a fault, not duty."""
+    assert ODRIVE_MOTOR_SOFT_MAX_A < MAX_MOTOR_CURRENT_A
 
 
 # --- the testbed ------------------------------------------------------------
