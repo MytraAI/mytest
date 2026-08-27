@@ -141,10 +141,17 @@ def test_a_run_no_engine_will_ever_finalise_is_copied_anyway(tmp_path):
 
 def test_a_run_still_being_written_has_no_verdict_to_find(tmp_path):
     """The test process writes its verdict at the end, so a directory without one
-    is a run in progress - it is not skipped, it is not seen."""
+    is a run in progress - it is not skipped, it is not seen.
+
+    Checked alongside a finished run, so this cannot pass by pending_runs finding
+    nothing at all."""
     runs = tmp_path / "runs"
     (runs / "in-progress" / "odrive").mkdir(parents=True)
-    assert pending_runs(tmp_path, tmp_path / "share") == []
+    write_run(runs, "finished", verdict())
+
+    found = pending_runs(tmp_path, tmp_path / "share")
+
+    assert [run.name for run, _ in found] == ["finished"]
 
 
 # --- copying ---------------------------------------------------------------------
@@ -259,7 +266,8 @@ def test_a_dry_run_copies_nothing(tmp_path):
     status = run_once(tmp_path, share, dry_run=True)
 
     assert status.mirrored == 0 and status.outstanding == 1
-    assert not any(share.glob("zdrive/**/runs/*"))
+    # The exact destination, not a glob over a tree that might not exist at all.
+    assert not destination(share, verdict(), "real").exists()
 
 
 # --- what the operator is told ------------------------------------------------------
@@ -269,20 +277,88 @@ def test_nothing_is_said_when_the_mirror_is_healthy():
     assert describe_for_operator(MirrorStatus(time.time(), "//nas/x", True)) is None
 
 
-def test_a_mirror_that_is_not_running_at_all_is_the_loudest_case():
+def test_a_mirror_that_has_never_run_is_the_loudest_case():
     """The failure a live share check cannot see: the share is fine and nothing
     is copying to it."""
     said = describe_for_operator(None)
-    assert "not running on this machine" in said
+    assert "has never run on this machine" in said
     assert "Setup-StandBox.ps1 -ResultsShareOnly" in said
 
 
-def test_a_mirror_that_has_stopped_reporting_counts_as_not_running():
-    stale = MirrorStatus(time.time() - 999_999, "//nas/x", True)
-    assert "not running on this machine" in describe_for_operator(stale)
+def test_a_mirror_that_has_stopped_reporting_says_when_it_last_managed_a_pass():
+    """Not "it has stopped", which is more than is known: a task registered
+    without its repeating trigger runs at logon and no more."""
+    said = describe_for_operator(MirrorStatus(time.time() - 3600, "//nas/x", True))
+    assert "last completed a pass 60 min ago" in said
+    assert "Setup-StandBox.ps1 -ResultsShareOnly" in said
 
 
 def test_an_unreachable_share_says_so_and_says_the_run_is_safe():
     said = describe_for_operator(MirrorStatus(time.time(), "//nas/x", False, error="denied"))
     assert "not reachable" in said and "denied" in said
     assert "recorded on this machine either way" in said
+
+
+def test_a_down_share_is_not_asked_what_it_already_has(tmp_path, monkeypatch):
+    """A stat against a dead SMB server does not fail fast, it blocks for the
+    session timeout - so doing it once per run is how counting a backlog becomes
+    a pass that never finishes.
+
+    Shown by the count: this run IS already on the share, and it is still
+    reported outstanding, because the share was never consulted."""
+    runs = tmp_path / "runs"
+    share = tmp_path / "share"
+    write_run(runs, "already-there", verdict())
+    run_once(tmp_path, share)  # gets it onto the share
+    monkeypatch.setattr(mirror_results, "check_reachable", lambda root: "down")
+
+    assert run_once(tmp_path, share).outstanding == 1
+
+
+def test_a_reachable_share_is_asked_and_answers(tmp_path):
+    """The contrast: with the share up, a run already on it is not outstanding."""
+    runs = tmp_path / "runs"
+    share = tmp_path / "share"
+    write_run(runs, "already-there", verdict())
+    run_once(tmp_path, share)
+
+    assert pending_runs(tmp_path, share) == []
+    assert len(pending_runs(tmp_path, share, check_destination=False)) == 1
+
+
+def test_many_failures_are_summarised_rather_than_concatenated(tmp_path, monkeypatch):
+    """The error text ends up in a dialog. Every failure is logged in full on the
+    way past, so nothing is lost by capping what is reported."""
+    runs = tmp_path / "runs"
+    for n in range(5):
+        write_run(runs, f"run-{n}", verdict())
+    monkeypatch.setattr(
+        mirror_results, "copy_run",
+        lambda src, dest: (_ for _ in ()).throw(OSError("nope")),
+    )
+
+    status = run_once(tmp_path, tmp_path / "share")
+
+    assert status.mirrored == 0 and status.outstanding == 5
+    assert status.error.endswith("and 2 more")
+
+
+def test_a_run_directory_windows_would_refuse_is_still_filable():
+    """A name the far side rejects is a run that fails on every pass forever, and
+    a permanently-failing run quietly poisons the backlog the prompt reports."""
+    filed = destination(SHARE, verdict(), "CON")
+    assert filed.name != "CON"
+    assert filed == SHARE / "zdrive" / "ER-64" / "ZDRIVE2IN" / "runs" / "_UNNAMED-RUN"
+
+
+def test_a_well_formed_run_id_is_untouched():
+    """The reduction has to be identity for every id new_test_id() produces."""
+    test_id = "zdrive_brake_hold_test_2026-08-27_10-00-00"
+    assert destination(SHARE, verdict(), test_id).name == test_id
+
+
+def test_a_backlog_that_will_not_clear_says_why():
+    said = describe_for_operator(
+        MirrorStatus(time.time(), "//nas/x", True, outstanding=2, error="disk full")
+    )
+    assert "disk full" in said and "2 finished run(s)" in said

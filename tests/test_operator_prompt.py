@@ -410,7 +410,7 @@ def test_a_stand_that_is_not_mirroring_says_so_before_it_asks_anything(tmp_path,
     case = _run_prompt(tmp_path, monkeypatch, None)
 
     assert len(case.prompts) == 2, "the warning and the details should be two dialogs"
-    assert "not running on this machine" in case.prompts[0]
+    assert "has never run on this machine" in case.prompts[0]
     assert case.prompts[1] == "enter this run's details"
 
 
@@ -438,3 +438,63 @@ def test_a_run_that_records_nothing_is_not_warned_about_mirroring(tmp_path, monk
     case = _run_prompt(tmp_path, monkeypatch, None, require_engine=False)
 
     assert case.prompts == ["enter this run's details"]
+
+
+def test_the_published_prompt_stays_one_line(tmp_path, monkeypatch):
+    """operator_prompt is a telemetry column carried on every frame of the wait,
+    and the dashboard shows it live. The window gets the paragraphs; the channel
+    gets the headline."""
+    case = _run_prompt(tmp_path, monkeypatch, None)
+
+    assert "\n" not in case.prompts[0]
+    assert case.prompts[0].startswith("The results mirror has never run")
+
+
+def test_a_dut_with_no_catalogued_units_cannot_build_a_serial_prompt():
+    """An empty `choices` is how a field says it is free text, so an empty
+    dropdown would silently make the serial the one thing it must never be -
+    unchecked."""
+    from testcases.teststeps.operator import run_detail_fields
+
+    with pytest.raises(ValueError, match="no DUT serial numbers catalogued"):
+        run_detail_fields("example_dut")
+
+
+# --- what the window refuses to submit --------------------------------------------
+
+
+def test_the_window_refuses_a_ticket_that_does_not_match():
+    """The point of checking in the window at all: the person who made the typo is
+    standing in front of it, so they fix it instead of losing the run."""
+    answers = {"ER Ticket": "ER 64"}
+
+    said = operator_prompt.normalise_and_check(
+        answers, {"ER Ticket": ER_TICKET_PATTERN}, {"ER Ticket": ER_TICKET_HINT}
+    )
+
+    assert said == f"ER Ticket should look like {ER_TICKET_HINT}"
+
+
+def test_the_window_submits_the_canonical_spelling():
+    """Upper-cased in place, so what leaves the window is what the step would have
+    stored anyway - the two cannot disagree about the answer."""
+    answers = {"ER Ticket": "er-64"}
+
+    assert operator_prompt.normalise_and_check(answers, {"ER Ticket": ER_TICKET_PATTERN}) is None
+    assert answers == {"ER Ticket": "ER-64"}
+
+
+def test_the_window_shows_the_pattern_when_there_is_no_hint():
+    said = operator_prompt.normalise_and_check({"X": "no"}, {"X": "^YES$"})
+    assert said == "X should look like ^YES$"
+
+
+def test_a_pattern_for_a_field_nobody_was_asked_is_ignored():
+    """A typo on a command line, not a reason for the button to stop working."""
+    assert operator_prompt.normalise_and_check({"X": "ok"}, {"Typo": "^never$"}) is None
+
+
+def test_an_unpatterned_answer_is_left_exactly_as_typed():
+    answers = {"Load (lb)": "250", "ER Ticket": "er-1"}
+    operator_prompt.normalise_and_check(answers, {"ER Ticket": ER_TICKET_PATTERN})
+    assert answers["Load (lb)"] == "250"

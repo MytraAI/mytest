@@ -81,7 +81,14 @@ def status_path() -> Path:
 def write_status(status: MirrorStatus, path: Optional[Path] = None) -> None:
     """Publish the result of a pass. Atomic, and best-effort: a worker that
     cannot say what it did has still done it, and must not fail the pass over
-    the report."""
+    the report.
+
+    No replace-retry loop, unlike write_heartbeat next door. That exists because
+    the heartbeat's reader opens it constantly and Windows fails os.replace()
+    while it is open, so a collision is normal there and a missed beat spends the
+    staleness budget of a healthy run. Here the reader opens the file once per
+    run, the writer once per pass, and the staleness window is half an hour of
+    passes - so a collision is unlikely and one lost report costs nothing."""
     target = status_path() if path is None else path
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -112,8 +119,16 @@ def read_status(path: Optional[Path] = None) -> Optional[MirrorStatus]:
         return None
 
 
-REPAIR_COMMAND = r"powershell -File provisioning\Setup-StandBox.ps1 -ResultsShareOnly"
+REPAIR_COMMAND = (
+    r"cd <your mytest checkout>" "\n    "
+    r"powershell -ExecutionPolicy Bypass -File provisioning\Setup-StandBox.ps1 -ResultsShareOnly"
+)
 """What an operator runs to put the mirror back.
+
+Carries -ExecutionPolicy Bypass and the cd, because without either it fails on a
+stand box - the default policy refuses an unsigned script, and the path is
+relative to the checkout. A repair instruction that errors is worse than none:
+it teaches people the dialog is wrong.
 
 Named rather than offered as a button. The prompt window is deliberate that it
 cannot act - "a dialog that could do both invites clicking the wrong one while
@@ -134,12 +149,21 @@ def describe_for_operator(
     locally either way - because none of them is a reason not to run."""
     safe = ("This run will be recorded on this machine either way, and copied to "
             "the share once it is reachable.")
-    if status is None or not status.is_fresh():
-        age = "" if status is None else f" (last pass {status.age_s() / 60:.0f} min ago)"
+    if status is None:
         return (
-            f"The results mirror is not running on this machine{age}.\n\n"
+            "The results mirror has never run on this machine.\n\n"
             f"Finished runs are not being copied to the results share. {safe}\n\n"
             f"To fix it, from a console on this machine:\n    {repair_command}"
+        )
+    if not status.is_fresh():
+        # What is known is when it last finished a pass, which is not the same as
+        # "it is not running" - a task registered without its repeating trigger
+        # runs at logon and no more, and saying it had stopped would be wrong.
+        return (
+            f"The results mirror last completed a pass {status.age_s() / 60:.0f} min ago.\n\n"
+            f"It is not keeping up, or it has stopped. Finished runs are not reliably "
+            f"reaching the results share. {safe}\n\n"
+            f"To check it, from a console on this machine:\n    {repair_command}"
         )
     if not status.reachable:
         detail = f"\n\n{status.error}" if status.error else ""
@@ -149,6 +173,15 @@ def describe_for_operator(
             f"If it stays unreachable, from a console on this machine:\n    {repair_command}"
         )
     if status.outstanding:
+        if status.error:
+            # A run that fails to copy is retried every pass and stays in the count
+            # forever, so a backlog that will not clear on its own must say why -
+            # otherwise it is a number that grows and nags with nothing to act on.
+            return (
+                f"{status.outstanding} finished run(s) are waiting to be copied to the "
+                f"results share, and the last pass reported errors.\n\n{status.error}\n\n"
+                f"{safe}"
+            )
         return (
             f"{status.outstanding} finished run(s) are waiting to be copied to the "
             f"results share.\n\nThe mirror is running and reachable, so this should "

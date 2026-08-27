@@ -258,11 +258,13 @@ handshake with the engine or the test process, and picks up a run whose test
 process died. `raw/` is never copied: it belongs to no run, and it is most of
 the tree.
 
-It only ever adds. A run is already mirrored if its destination directory
-exists, so the share is the state and there is nothing to lose when a box is
-reimaged. Copies land in a `_partial_` sibling and are renamed into place, so
-a reader never finds a half-copied run. Mock runs and `example_dut` are not
-mirrored, and nothing is ever deleted from either side.
+It never deletes or overwrites a run, on either side. A run is already
+mirrored if its destination directory exists, so the share is the state and
+there is nothing to lose when a box is reimaged. Copies land in a `_partial_`
+sibling and are renamed into place, so a reader never finds a half-copied run.
+The only things it removes are its own leftovers: a `_partial_` from an
+interrupted pass, and the probe file it writes to test the share. Mock runs and
+`example_dut` are not mirrored.
 
 Its last pass is published to `mytest-mirror.json` in the temp directory
 (`protocol/mirror_status.py`), which is what a run's operator prompt reads to

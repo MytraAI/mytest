@@ -84,12 +84,20 @@ def run_detail_fields(dut: str) -> Tuple[RunDetail, ...]:
     """The three details every attributable run carries, for one DUT package.
 
     The serial is a dropdown of what this DUT can actually run (see
-    duts.serials_for); the ticket and the load are free text. A DUT with no
-    catalogued units gets an empty dropdown, which the prompt will refuse to
-    accept an answer for - a stand whose units nobody has listed cannot file a
-    run against one."""
+    duts.serials_for); the ticket and the load are free text.
+
+    Refuses to build fields for a DUT with no catalogued units, rather than
+    handing back an empty dropdown. An empty `choices` is how a field says it is
+    free text, so the serial would silently become the one thing it must never
+    be - unchecked - on the stand whose catalogue somebody forgot."""
+    serials = serials_for(dut)
+    if not serials:
+        raise ValueError(
+            f"no DUT serial numbers catalogued for {dut!r} - add its units to "
+            "testcases/teststeps/duts.py, or this stand's serial prompt accepts anything"
+        )
     return (
-        RunDetail("DUT SN", "dut_serial_number", serials_for(dut)),
+        RunDetail("DUT SN", "dut_serial_number", serials),
         RunDetail("ER Ticket", "er_ticket", pattern=ER_TICKET_PATTERN, hint=ER_TICKET_HINT),
         RunDetail("Load (lb)", "load_lb"),
     )
@@ -102,6 +110,7 @@ def _await_ack(
     choices: Optional[Dict[str, Sequence[str]]] = None,
     patterns: Optional[Dict[str, str]] = None,
     hints: Optional[Dict[str, str]] = None,
+    state_text: Optional[str] = None,
 ) -> str:
     """Publish an instruction, wait for the operator's marker, and return its
     contents - empty for a plain acknowledgement, JSON when values were asked for.
@@ -114,11 +123,18 @@ def _await_ack(
 
     The instruction is published as `operator_prompt` and cleared afterwards, so
     a recorded run shows what it was waiting for rather than looking like a
-    hang."""
+    hang. `state_text` publishes something shorter than what the window shows,
+    for an instruction that runs to paragraphs: the channel is a telemetry
+    column carried on every frame of the wait and read live by the dashboard,
+    and neither wants a screenful."""
     path = test_case.operator_ack_path()
     path.unlink(missing_ok=True)  # a stale ack from an earlier run must not skip this
-    test_case.set_state("operator_prompt", instruction)
-    logger.warning("test %s: WAITING FOR OPERATOR - %s", test_case.test_id, instruction)
+    test_case.set_state("operator_prompt", state_text or instruction)
+    # The short form when there is one: a log is read a line at a time, and an
+    # instruction that runs to paragraphs makes a mess of logs.txt.
+    logger.warning(
+        "test %s: WAITING FOR OPERATOR - %s", test_case.test_id, state_text or instruction
+    )
     logger.warning("test %s: click the window, or `python -m tools.operator_ack`", test_case.test_id)
 
     window = spawn_operator_prompt(
@@ -179,8 +195,7 @@ def _warn_if_results_are_not_reaching_the_share(test_case: TestCase) -> None:
     complaint = describe_for_operator(read_status())
     if complaint is None:
         return
-    logger.warning("test %s: %s", test_case.test_id, complaint.replace("\n", " "))
-    _await_ack(test_case, complaint)
+    _await_ack(test_case, complaint, state_text=complaint.splitlines()[0])
 
 
 @step

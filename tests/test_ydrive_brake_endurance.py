@@ -16,7 +16,6 @@ from testcases.ydrive.rulebooks.ydrive_rulebook import (
 )
 from testcases.ydrive.teststeps.teststeps import (
     BRAKE_TRIGGER_VELOCITY_LIMIT,
-    await_operator,
     brake_from_speed,
     release_brake_in_place,
 )

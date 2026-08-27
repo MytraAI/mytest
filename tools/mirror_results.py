@@ -24,7 +24,17 @@ WHAT IT KEYS OFF. A run is finished when its verdict.json carries
 the run's stream go quiet. That is an existing signal, not one invented
 here, and it means no handshake with anything.
 
-WHAT MAKES IT SAFE TO RUN AGAIN. It never deletes and never overwrites.
+WHAT STOPS TWO PASSES COLLIDING. Nothing in here does - the scheduled
+task is registered with MultipleInstances IgnoreNew, so a pass that is
+still copying when the next tick fires keeps the slot. Two passes started
+by hand against the same output directory can fight over one `_partial_`;
+the loser's rename fails and is logged, and the size check means neither
+publishes a short copy, but the wasted work is real. One at a time.
+
+WHAT MAKES IT SAFE TO RUN AGAIN. It never deletes or overwrites a run, on
+either side - the only things it removes are its own leftovers: a
+`_partial_` directory from an interrupted pass, and the probe file it
+writes to find out whether the share can be written to at all.
 The share is the state: a run is already mirrored if its destination
 directory exists, so there is no ledger to lose when a box is reimaged,
 and "is this run copied?" is answerable by looking, from any machine. A
@@ -77,6 +87,10 @@ still worth keeping: somebody killed it for a reason, and the telemetry usually
 says what it was. Underscore-led so they sort away from the ER-nnnn block and
 cannot be mistaken for a ticket. NO_DUT is the rare one - the DUT is a class
 attribute, so only an engine-synthesised verdict lacks it."""
+
+NO_TEST_ID = "_UNNAMED-RUN"
+"""A run directory whose name is not usable as one on the far side. Only
+reachable for a directory nothing in this project named."""
 
 PARTIAL_PREFIX = "_partial_"
 """Prefix for a copy in progress. Its own name until the copy is complete and
@@ -148,9 +162,15 @@ def destination(share_root: Path, verdict: Dict, test_id: str) -> Path:
     """Where this run is filed: <dut>/<ticket>/<serial>/runs/<test_id>.
 
     Every component is reduced to something that is one path component and legal
-    on Windows, since two of the three are what an operator typed. The unreduced
+    on Windows, since two of them are what an operator typed. The unreduced
     answers stay in verdict.json, so nothing is lost by filing under a tidied
-    name."""
+    name.
+
+    The run's own directory name is reduced too, even though new_test_id()
+    already produced a safe one: a run directory named by hand, or by a caller
+    passing --test-id, can hold anything the local filesystem allowed, and a
+    name Windows refuses is a run that fails to copy on every pass forever -
+    which quietly poisons the backlog count the operator prompt reports."""
     metadata = verdict.get("metadata") or {}
     return (
         Path(share_root)
@@ -158,7 +178,7 @@ def destination(share_root: Path, verdict: Dict, test_id: str) -> Path:
         / safe_path_component(str(metadata.get("er_ticket") or ""), NO_ER_TICKET)
         / safe_path_component(str(metadata.get("dut_serial_number") or ""), NO_DUT_SERIAL)
         / "runs"
-        / test_id
+        / safe_path_component(test_id, NO_TEST_ID)
     )
 
 
@@ -228,11 +248,19 @@ def check_reachable(share_root: Path) -> str:
             pass
 
 
-def pending_runs(output_dir: Path, share_root: Path) -> List[Tuple[Path, Path]]:
+def pending_runs(
+    output_dir: Path, share_root: Path, check_destination: bool = True
+) -> List[Tuple[Path, Path]]:
     """Every finished, mirrorable run not yet on the share, oldest first.
 
     Oldest first so a backlog drains in the order the runs happened, which is
-    the order somebody looking for them expects them to appear."""
+    the order somebody looking for them expects them to appear.
+
+    `check_destination=False` skips asking the share what it already has, and
+    reports every finished mirrorable run instead. For a share that is known to
+    be down: a stat against a dead SMB server does not fail fast, it blocks for
+    the session timeout, and doing that once per run is how counting a backlog
+    turns into a pass that never finishes."""
     found: List[Tuple[float, Path, Path]] = []
     root = runs_dir(output_dir)
     if not root.is_dir():
@@ -252,7 +280,7 @@ def pending_runs(output_dir: Path, share_root: Path) -> List[Tuple[Path, Path]]:
         if not is_finished(verdict, verdict_file):
             continue
         dest = destination(share_root, verdict, run.name)
-        if dest.exists():
+        if check_destination and dest.exists():
             continue
         found.append((verdict_file.stat().st_mtime, run, dest))
     return [(run, dest) for _, run, dest in sorted(found, key=lambda item: item[0])]
@@ -288,8 +316,17 @@ def run_once(output_dir: Path, share_root: Path, dry_run: bool = False) -> Mirro
     return MirrorStatus(
         updated_at=time.time(), share_root=str(share_root), reachable=True,
         mirrored=mirrored, outstanding=len(pending) - mirrored,
-        error="; ".join(errors[:3]),
+        # Capped: this ends up in a dialog, and every one of them was logged in
+        # full on the way past.
+        error=_summarise(errors),
     )
+
+
+def _summarise(errors: List[str], keep: int = 3) -> str:
+    """The first few failures, and how many more there were."""
+    if len(errors) <= keep:
+        return "; ".join(errors)
+    return "; ".join(errors[:keep]) + f"; and {len(errors) - keep} more"
 
 
 def _countable(output_dir: Path, share_root: Path) -> List:
@@ -297,9 +334,11 @@ def _countable(output_dir: Path, share_root: Path) -> List:
 
     Every finished mirrorable run counts as outstanding: with the share down
     there is no way to know which are already there, and over-reporting a
-    backlog during an outage is the harmless direction to be wrong in."""
+    backlog during an outage is the harmless direction to be wrong in. The
+    share is not touched at all - see pending_runs on why asking a dead server
+    is worse than not knowing."""
     try:
-        return pending_runs(output_dir, share_root)
+        return pending_runs(output_dir, share_root, check_destination=False)
     except OSError:
         return []
 

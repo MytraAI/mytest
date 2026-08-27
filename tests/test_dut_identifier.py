@@ -35,14 +35,19 @@ TESTCASES_DIR = Path(__file__).resolve().parent.parent / "testcases"
 
 
 def _dut_directories() -> set:
-    """Every DUT package under testcases/, as a set of directory names."""
+    """Every DUT package under testcases/, as a set of directory names.
+
+    Recognised by shape rather than by a list of names to keep in step, and
+    rather than by excluding the shared packages one at a time: a DUT is a
+    package with its own testcases/ and its own channel surface. A new shared
+    package (teststeps/ is the first) is therefore not a DUT by construction,
+    and a real DUT missing either half is not silently exempted from the checks
+    below - it fails the first one."""
     return {
         entry.name
         for entry in TESTCASES_DIR.iterdir()
-        if entry.is_dir()
-        and not entry.name.startswith(("_", "."))
-        and entry.name != "teststeps"
-        and (entry / "__init__.py").exists()
+        if (entry / "testcases" / "__init__.py").exists()
+        and (entry / "channels.py").exists()
     }
 
 

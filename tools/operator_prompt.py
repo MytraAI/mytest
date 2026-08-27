@@ -46,6 +46,33 @@ logger = logging.getLogger(__name__)
 WRAP_WIDTH_PX = 420
 
 
+def normalise_and_check(
+    answers: Dict[str, str],
+    patterns: Dict[str, str],
+    hints: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    """Upper-case every patterned answer in place, and return the first complaint.
+
+    Upper-cased before it is checked, and it is the upper-cased value that gets
+    submitted: a patterned field has one canonical spelling, and the waiting step
+    applies the same rule to whatever arrives however it arrived.
+
+    A pattern naming a field that was not asked for is skipped rather than raising -
+    that is a typo on a command line, and an unhandled exception inside a Tk callback
+    is a button that silently does nothing.
+
+    Outside show() because it is the part worth testing: it is what stops a typo
+    ending a run somebody was in the middle of starting, and it needs no display."""
+    hints = hints or {}
+    for name, pattern in patterns.items():
+        if name not in answers:
+            continue
+        answers[name] = answers[name].upper()
+        if not re.match(pattern, answers[name]):
+            return f"{name} should look like {hints.get(name) or pattern}"
+    return None
+
+
 def show(
     test_id: str,
     message: str,
@@ -87,17 +114,13 @@ def show(
             # than a run that waited for someone to type.
             complaint.config(text=f"still needed: {', '.join(missing)}")
             return
-        for name, pattern in patterns.items():
-            # Upper-cased before checking, and it is the upper-cased value that is
-            # submitted: a patterned field has one canonical spelling, and the
-            # waiting step checks the same thing again on whatever arrives.
-            answers[name] = answers[name].upper()
-            if not re.match(pattern, answers[name]):
-                # Refused here rather than by the test: this window is open with a
-                # person in front of it, so a typo is something they can fix. The
-                # same answer arriving from the CLI ends the run instead.
-                complaint.config(text=f"{name} should look like {hints.get(name) or pattern}")
-                return
+        # Refused here rather than by the test: this window is open with a person in
+        # front of it, so a typo is something they can fix. The same answer arriving
+        # from the CLI ends the run instead.
+        bad = normalise_and_check(answers, patterns, hints)
+        if bad:
+            complaint.config(text=bad)
+            return
         acknowledged = True
         acknowledge(test_id, answers)
         root.destroy()
