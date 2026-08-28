@@ -27,7 +27,11 @@ import re
 import time
 from typing import Dict, NamedTuple, Optional, Sequence, Tuple
 
-from protocol.mirror_status import describe_for_operator, read_status
+from protocol.mirror_status import (
+    WARNING_HEADLINE,
+    describe_for_operator,
+    read_status,
+)
 from testcases.base import TestCase
 from testcases.step import step
 from testcases.teststeps.duts import serials_for
@@ -111,6 +115,7 @@ def _await_ack(
     patterns: Optional[Dict[str, str]] = None,
     hints: Optional[Dict[str, str]] = None,
     state_text: Optional[str] = None,
+    headline: Optional[str] = None,
 ) -> str:
     """Publish an instruction, wait for the operator's marker, and return its
     contents - empty for a plain acknowledgement, JSON when values were asked for.
@@ -138,7 +143,8 @@ def _await_ack(
     logger.warning("test %s: click the window, or `python -m tools.operator_ack`", test_case.test_id)
 
     window = spawn_operator_prompt(
-        test_case.test_id, instruction, fields, choices, patterns, hints,
+        test_case.test_id, instruction, fields, choices,
+        patterns=patterns, hints=hints, headline=headline,
     )
     clock = Stopwatch()
     try:
@@ -195,7 +201,13 @@ def _warn_if_results_are_not_reaching_the_share(test_case: TestCase) -> None:
     complaint = describe_for_operator(read_status())
     if complaint is None:
         return
-    _await_ack(test_case, complaint, state_text=complaint.splitlines()[0])
+    # The headline is the same whichever state this is; the body says which,
+    # and the recorded channel keeps the specific line rather than the shout,
+    # since that is what a query over stored runs wants.
+    _await_ack(
+        test_case, complaint,
+        state_text=complaint.splitlines()[0], headline=WARNING_HEADLINE,
+    )
 
 
 @step

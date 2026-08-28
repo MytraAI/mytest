@@ -62,7 +62,20 @@ not reaching the share - most likely because the box was reimaged. Nothing is ur
 run is recorded locally either way and the mirror backfills whatever it missed, so this
 can be run during a run or after it.
 
-The full script also runs it, so a freshly provisioned box needs no separate step.
+The full script also runs it, so a freshly provisioned box needs no separate step. It is
+idempotent: a share that is already reachable is left alone rather than re-mapped, because
+re-mapping means removing the existing mapping first and a wrong credential would then leave
+the box worse off than before the repair.
+
+Two things learned registering this on a real stand box, both of which look fine until they
+are not. `New-ScheduledTaskTrigger -RepetitionDuration ([TimeSpan]::MaxValue)` - the
+documented-looking way to say "repeat indefinitely" - builds a trigger object without
+complaint and is then rejected by `Register-ScheduledTask` with *"value which is incorrectly
+formatted or out of range"*, taking the whole task with it; `[TimeSpan]::Zero` fails the same
+way. Omitting `-RepetitionDuration` is what actually means indefinite. And `Get-Credential`
+over SSH does not fail, it blocks forever, so `-ResultsShareOnly` refuses up front when
+`$env:SSH_CONNECTION` is set rather than hanging - pass `-ResultsShareCredential`, or run it
+at the console.
 
 ### Run it from the console for first-time setup
 

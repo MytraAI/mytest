@@ -119,6 +119,15 @@ def read_status(path: Optional[Path] = None) -> Optional[MirrorStatus]:
         return None
 
 
+WARNING_HEADLINE = "THIS RUN IS ONLY BEING SAVED LOCALLY!"
+"""The one line an operator has to read, shown large and in red above the rest.
+
+Every state below is some version of the same fact - the run is going onto this
+machine's disk and nowhere else right now - and that is what somebody standing
+at a stand needs to know before they start a six-hour test. Which of the three
+reasons it is depends on the body text, and matters to whoever fixes it rather
+than to whoever is about to run."""
+
 REPAIR_COMMAND = (
     r"cd <your mytest checkout>" "\n    "
     r"powershell -ExecutionPolicy Bypass -File provisioning\Setup-StandBox.ps1 -ResultsShareOnly"
@@ -147,12 +156,12 @@ def describe_for_operator(
     at all, a mirror that cannot reach the share, and a mirror that is running
     and behind. All three end with the same reassurance - the run is recorded
     locally either way - because none of them is a reason not to run."""
-    safe = ("This run will be recorded on this machine either way, and copied to "
-            "the share once it is reachable.")
+    safe = ("Nothing is lost: the run is recorded on this machine either way, and "
+            "gets copied to the share as soon as it is reachable again.")
     if status is None:
         return (
-            "The results mirror has never run on this machine.\n\n"
-            f"Finished runs are not being copied to the results share. {safe}\n\n"
+            "The results mirror has never run on this machine, so finished runs "
+            f"are not being copied to the results share at all.\n\n{safe}\n\n"
             f"To fix it, from a console on this machine:\n    {repair_command}"
         )
     if not status.is_fresh():
@@ -161,15 +170,15 @@ def describe_for_operator(
         # asleep, has not stopped, and saying so would send somebody after the
         # wrong thing.
         return (
-            f"The results mirror last completed a pass {status.age_s() / 60:.0f} min ago.\n\n"
-            f"It is not keeping up, or it has stopped. Finished runs are not reliably "
-            f"reaching the results share. {safe}\n\n"
+            f"The results mirror last completed a pass {status.age_s() / 60:.0f} min ago - "
+            "it is either not keeping up or has stopped, so finished runs are not "
+            f"reliably reaching the results share.\n\n{safe}\n\n"
             f"To check it, from a console on this machine:\n    {repair_command}"
         )
     if not status.reachable:
         detail = f"\n\n{status.error}" if status.error else ""
         return (
-            f"The results share is not reachable from this machine.\n\n"
+            f"The results share cannot be reached from this machine.\n\n"
             f"{status.share_root}{detail}\n\n{safe}\n\n"
             f"If it stays unreachable, from a console on this machine:\n    {repair_command}"
         )
@@ -180,12 +189,12 @@ def describe_for_operator(
             # otherwise it is a number that grows and nags with nothing to act on.
             return (
                 f"{status.outstanding} finished run(s) are waiting to be copied to the "
-                f"results share, and the last pass reported errors.\n\n{status.error}\n\n"
-                f"{safe}"
+                f"results share, and the last pass reported errors - so this backlog "
+                f"may not clear on its own.\n\n{status.error}\n\n{safe}"
             )
         return (
             f"{status.outstanding} finished run(s) are waiting to be copied to the "
             f"results share.\n\nThe mirror is running and reachable, so this should "
-            f"clear on its own. {safe}"
+            f"clear within a few minutes. {safe}"
         )
     return None
