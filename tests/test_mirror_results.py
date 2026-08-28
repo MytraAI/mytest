@@ -295,8 +295,8 @@ def test_a_mirror_that_has_stopped_reporting_says_when_it_last_managed_a_pass():
 
 def test_an_unreachable_share_says_so_and_says_the_run_is_safe():
     said = describe_for_operator(MirrorStatus(time.time(), "//nas/x", False, error="denied"))
-    assert "not reachable" in said and "denied" in said
-    assert "recorded on this machine either way" in said
+    assert "cannot be reached" in said and "denied" in said
+    assert "recorded on this machine either way" in said, "the reassurance is the point"
 
 
 def test_a_down_share_is_not_asked_what_it_already_has(tmp_path, monkeypatch):
@@ -362,3 +362,18 @@ def test_a_backlog_that_will_not_clear_says_why():
         MirrorStatus(time.time(), "//nas/x", True, outstanding=2, error="disk full")
     )
     assert "disk full" in said and "2 finished run(s)" in said
+
+
+def test_every_warning_body_says_where_the_run_is_and_how_to_fix_it():
+    """Whatever is wrong, the body has to answer both questions the headline
+    raises - is my data safe, and what do I do - since the headline itself only
+    shouts that the run is local."""
+    states = [
+        None,
+        MirrorStatus(time.time() - 99_999, "//nas/x", True),
+        MirrorStatus(time.time(), "//nas/x", False, error="denied"),
+    ]
+    for status in states:
+        said = describe_for_operator(status)
+        assert "recorded on this machine either way" in said, said
+        assert "Setup-StandBox.ps1 -ResultsShareOnly" in said, said

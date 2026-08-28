@@ -107,6 +107,7 @@ def spawn_operator_prompt(
     choices: Optional[Dict[str, Sequence[str]]] = None,
     patterns: Optional[Dict[str, str]] = None,
     hints: Optional[Dict[str, str]] = None,
+    headline: Optional[str] = None,
 ) -> Optional[subprocess.Popen]:
     """Open a window asking the operator to do something, and return the process
     so the caller can close it once the wait is over however it ended.
@@ -144,6 +145,7 @@ def spawn_operator_prompt(
                 for name, hint in (hints or {}).items()
                 for arg in ("--hint", f"{name}={hint}")
             ]
+            + (["--headline", headline] if headline else [])
         )
     except OSError as exc:
         logger.warning("test %s: couldn't open the operator prompt window: %s", test_id, exc)

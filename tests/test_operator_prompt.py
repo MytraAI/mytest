@@ -70,7 +70,7 @@ def test_a_stale_acknowledgement_does_not_skip_the_wait(tmp_path, monkeypatch):
     ack.touch()
     case = FakeTestCase(ack)
     monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: FakeWindow())
+                        lambda test_id, message, fields=(), choices=None, **kw: FakeWindow())
     monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
 
     await_operator(case, "do the thing")
@@ -84,7 +84,7 @@ def test_the_prompt_is_published_while_waiting_and_cleared_after(tmp_path, monke
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     windows = []
     monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: windows.append(FakeWindow()) or windows[-1])
+                        lambda test_id, message, fields=(), choices=None, **kw: windows.append(FakeWindow()) or windows[-1])
     monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
 
     await_operator(case, "move the load")
@@ -99,7 +99,7 @@ def test_the_window_is_closed_even_when_the_wait_is_aborted(tmp_path, monkeypatc
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     window = FakeWindow()
     monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: window)
+                        lambda test_id, message, fields=(), choices=None, **kw: window)
 
     # Not on the first call: @step checks at its own entry, before the window is
     # spawned, and an abort there has no window to close. The case worth pinning
@@ -179,7 +179,7 @@ def test_the_answers_are_published_as_run_state(tmp_path, monkeypatch):
 
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: FakeWindow())
+                        lambda test_id, message, fields=(), choices=None, **kw: FakeWindow())
     monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
     _answer_with(case, {"DUT SN": "YD-014", "Load (lb)": "250"})
 
@@ -199,7 +199,7 @@ def test_the_prompt_labels_are_what_the_window_is_asked_for(tmp_path, monkeypatc
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     asked = []
     monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: asked.extend(fields) or FakeWindow())
+                        lambda test_id, message, fields=(), choices=None, **kw: asked.extend(fields) or FakeWindow())
     monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
     _answer_with(case, {"DUT SN": "YD-014", "Load (lb)": "250"})
 
@@ -216,7 +216,7 @@ def test_a_run_without_its_details_does_not_start(tmp_path, monkeypatch):
 
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
     monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt",
-                        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: FakeWindow())
+                        lambda test_id, message, fields=(), choices=None, **kw: FakeWindow())
     monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
     _answer_with(case, None)  # a plain acknowledgement, no values
 
@@ -234,7 +234,7 @@ def test_the_serial_is_picked_from_a_list_and_a_typo_is_refused(tmp_path, monkey
     offered = {}
     monkeypatch.setattr(
         "testcases.teststeps.operator.spawn_operator_prompt",
-        lambda test_id, message, fields=(), choices=None, patterns=None, hints=None: offered.update(choices or {}) or FakeWindow(),
+        lambda test_id, message, fields=(), choices=None, **kw: offered.update(choices or {}) or FakeWindow(),
     )
     monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
     _answer_with(case, {"DUT SN": "YD-O14", "Load (lb)": "250"})  # letter O, not zero
@@ -295,9 +295,14 @@ def _prompt_with_answer(tmp_path, monkeypatch, answers, captured=None):
 
     case = FakeTestCase(tmp_path / "mytest-ack-test-prompt")
 
-    def spawn(test_id, message, fields=(), choices=None, patterns=None, hints=None):
+    def spawn(test_id, message, fields=(), choices=None, **kw):
         if captured is not None:
-            captured.update({"patterns": patterns or {}, "hints": hints or {}})
+            captured.update({
+                "patterns": kw.get("patterns") or {},
+                "hints": kw.get("hints") or {},
+                "headline": kw.get("headline"),
+                "message": message,
+            })
         return FakeWindow()
 
     monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt", spawn)
@@ -390,15 +395,18 @@ class RecordingTestCase(FakeTestCase):
         self._ack_path.write_text(_json.dumps({"ER Ticket": "ER-64"}))
 
 
-def _run_prompt(tmp_path, monkeypatch, status, require_engine=True):
+def _run_prompt(tmp_path, monkeypatch, status, require_engine=True, seen=None):
     from testcases.teststeps.operator import prompt_for_run_details
 
     case = RecordingTestCase(tmp_path / "mytest-ack-test-prompt", require_engine)
     monkeypatch.setattr("testcases.teststeps.operator.read_status", lambda: status)
-    monkeypatch.setattr(
-        "testcases.teststeps.operator.spawn_operator_prompt",
-        lambda *a, **k: FakeWindow(),
-    )
+
+    def spawn(test_id, message, fields=(), choices=None, **kw):
+        if seen is not None:
+            seen.append({"message": message, "headline": kw.get("headline")})
+        return FakeWindow()
+
+    monkeypatch.setattr("testcases.teststeps.operator.spawn_operator_prompt", spawn)
     monkeypatch.setattr("testcases.teststeps.operator.OPERATOR_POLL_INTERVAL_S", 0.001)
     prompt_for_run_details(case, TICKET_FIELDS)
     return case
@@ -498,3 +506,31 @@ def test_an_unpatterned_answer_is_left_exactly_as_typed():
     answers = {"Load (lb)": "250", "ER Ticket": "er-1"}
     operator_prompt.normalise_and_check(answers, {"ER Ticket": ER_TICKET_PATTERN})
     assert answers["Load (lb)"] == "250"
+
+
+def test_the_warning_shouts_one_line_and_explains_underneath(tmp_path, monkeypatch):
+    """The headline is what gets read across a workshop; the body is for whoever
+    fixes it. Passed separately so the window can render them differently, rather
+    than the window guessing which line matters."""
+    from protocol.mirror_status import WARNING_HEADLINE
+
+    seen = []
+    _run_prompt(tmp_path, monkeypatch, None, seen=seen)
+
+    warning, details = seen[0], seen[1]
+    assert warning["headline"] == WARNING_HEADLINE
+    assert "\n" not in warning["headline"], "a shouted line must not wrap on its own newlines"
+    assert "never run on this machine" in warning["message"]
+    assert "Setup-StandBox.ps1" in warning["message"]
+    assert details["headline"] is None, "the ordinary details prompt keeps the generic title"
+
+
+def test_a_healthy_mirror_shouts_nothing(tmp_path, monkeypatch):
+    import time as _time
+
+    from protocol.mirror_status import MirrorStatus
+
+    seen = []
+    _run_prompt(tmp_path, monkeypatch, MirrorStatus(_time.time(), "//nas/x", True), seen=seen)
+
+    assert len(seen) == 1 and seen[0]["headline"] is None

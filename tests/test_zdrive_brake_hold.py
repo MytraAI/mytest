@@ -120,7 +120,7 @@ def _answering(tmp_path, monkeypatch, answers):
     test_case = _FakeTestCase(ack)
     captured = {}
 
-    def fake_spawn(test_id, message, fields=(), choices=None, patterns=None, hints=None):
+    def fake_spawn(test_id, message, fields=(), choices=None, **kw):
         captured["fields"] = list(fields)
         captured["choices"] = dict(choices or {})
         ack.write_text(_json.dumps(answers) if answers is not None else "")

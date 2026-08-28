@@ -80,6 +80,7 @@ def show(
     choices: Optional[Dict[str, Sequence[str]]] = None,
     patterns: Optional[Dict[str, str]] = None,
     hints: Optional[Dict[str, str]] = None,
+    headline: Optional[str] = None,
 ) -> int:
     """Show the window and block until it is closed. Returns 0 if the operator
     acknowledged, 1 if they closed it without doing so, 2 if no window could be
@@ -92,7 +93,13 @@ def show(
     one. A field named in `patterns` is free text that has to match that regular
     expression, upper-cased first, and the window will not submit until it does -
     `hints` is what the operator is told to type instead, since a regex is not an
-    instruction."""
+    instruction.
+
+    `headline` replaces the generic title with one line in large red bold - for a
+    window whose whole point is that one sentence, where the detail underneath is
+    for whoever fixes it rather than whoever is about to press the button. It
+    replaces rather than adds, because two lines that size compete and neither
+    gets read."""
     try:
         import tkinter as tk
     except ImportError:
@@ -131,11 +138,19 @@ def show(
         logger.warning("no display for the operator prompt (%s) - use `tools.operator_ack`", exc)
         return 2
 
-    root.title("Mytest - operator action needed")
+    root.title("Mytest - " + (headline or "operator action needed"))
     root.attributes("-topmost", True)  # a stand's screen has other windows on it
     frame = tk.Frame(root, padx=24, pady=20)
     frame.pack()
-    tk.Label(frame, text="Operator action needed", font=("TkDefaultFont", 15, "bold")).pack()
+    if headline:
+        # Wrapped wider than the body: this is meant to be read across the room,
+        # and a short shouted line broken over three lines reads as neither.
+        tk.Label(
+            frame, text=headline, font=("TkDefaultFont", 17, "bold"), fg="#b00",
+            wraplength=WRAP_WIDTH_PX + 120, justify="center",
+        ).pack()
+    else:
+        tk.Label(frame, text="Operator action needed", font=("TkDefaultFont", 15, "bold")).pack()
     tk.Label(frame, text=test_id, font=("TkDefaultFont", 10), fg="#666").pack(pady=(2, 14))
     tk.Label(frame, text=message, wraplength=WRAP_WIDTH_PX, justify="left",
              font=("TkDefaultFont", 12)).pack()
@@ -202,6 +217,10 @@ if __name__ == "__main__":
         "--hint", action="append", default=[], metavar="NAME=TEXT",
         help="what to tell the operator when that field's --pattern does not match",
     )
+    parser.add_argument(
+        "--headline", default=None,
+        help="one line shown large and in red instead of the generic title",
+    )
     args = parser.parse_args()
     choices = {}
     for spec in args.choice:
@@ -209,4 +228,5 @@ if __name__ == "__main__":
         choices[name] = [v for v in values.split(",") if v]
     patterns = dict(spec.partition("=")[::2] for spec in args.pattern)
     hints = dict(spec.partition("=")[::2] for spec in args.hint)
-    sys.exit(show(args.test_id, args.message, args.field, choices, patterns, hints))
+    sys.exit(show(args.test_id, args.message, args.field, choices,
+                  patterns=patterns, hints=hints, headline=args.headline))
