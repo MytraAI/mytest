@@ -24,12 +24,13 @@ from protocol.verdict import Verdict
 from testcases.base import TestCase
 from testcases.example_dut.testcases.base_example_dut_test import BaseExampleDutTest
 from testcases.registry import REGISTERED_TESTS
+from testcases.xdeploy.testcases.base_xdeploy_test import BaseXdeployTest
 from testcases.teststeps.duts import DUT_SERIAL_NUMBERS, serials_for
 from testcases.ydrive.testcases.base_ydrive_test import BaseYdriveTest
 from testcases.ydrive.testcases.testcases import EnduranceCycleTest
 from testcases.zdrive.testcases.base_zdrive_test import BaseZdriveTest
 
-DUT_BASE_CLASSES = (BaseExampleDutTest, BaseYdriveTest, BaseZdriveTest)
+DUT_BASE_CLASSES = (BaseExampleDutTest, BaseXdeployTest, BaseYdriveTest, BaseZdriveTest)
 
 TESTCASES_DIR = Path(__file__).resolve().parent.parent / "testcases"
 

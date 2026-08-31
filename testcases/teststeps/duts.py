@@ -20,6 +20,7 @@ DUT_SERIAL_NUMBERS: Dict[str, Tuple[str, ...]] = {
     "YDRIVE1": ("ydrive",),
     "YDRIVE2": ("ydrive",),
     "ZDRIVE2IN": ("ydrive", "zdrive"),
+    "XDEPLOY3": ("xdeploy",),
 }
 """Every unit these tests can run on, mapped to the DUT packages that can run it.
 
