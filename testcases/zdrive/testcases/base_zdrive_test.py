@@ -1,36 +1,13 @@
-"""Base test case for zdrive: starts the zdrive testbed, seeds this run's state
-channels, and constructs (but does not start) a LiveRulebookRunner against
-RULEBOOKS. No test sequence logic of its own - there is no separate DUT
-abstraction here, since the ODrive is the test's entire hardware interface, so
-DEVICES is just the testbed's.
+"""Base test case for zdrive: starts the testbed, seeds this run's state channels,
+and constructs (but does not start) a LiveRulebookRunner against RULEBOOKS.
 
 pre_test_setup() deliberately does not call self.runner.start() - a concrete
-subclass decides when live evaluation begins by calling self.runner.start()
-itself, wherever in its own main_execution() that should happen.
-post_test_teardown() always stops the runner regardless of whether start() was
-ever called.
+subclass decides when evaluation begins. It energizes nothing and leaves the
+brake engaged: releasing here would leave the load held by nothing.
 
-ALL THREE TELEMETRY STREAMS ARE NEEDED, and getting that wrong is invisible:
-zdrive_rulebook's bus bounds are on N6974A channels, its motor bounds on the
-ODrive's and its thermal bounds on the TC DAQ's, no device publishes another's,
-and a bound whose channel is absent from a frame returns no result - so a runner
-started against fewer streams evaluates part of the rulebook and reports a clean
-pass for the rest. Every concrete test must pass all three, as ManualTest does.
-
-Runnable on its own, not abstract: main_execution() here just logs and returns,
-and never calls runner.start(), so running this base case directly does no live
-evaluation.
-
-pre_test_setup() energizes nothing, and leaves the brake engaged. The stand comes
-up with the motor bus and every rail off, so the magnet-applied brake is already
-holding and the axis is still IDLE. Releasing here would leave the load held by
-nothing until a subclass arms the axis: the handover goes controller-first, which
-is why releasing is a concrete test's job.
-
-use_mock is plumbed through to ZdriveTestbed for developing without an ODrive
-attached. It substitutes the ODrive only - neither supply's driver has a mock
-backend, so a reachable CPX400DP and N6974A are needed either way.
-"""
+ALL THREE TELEMETRY STREAMS ARE NEEDED, and getting it wrong is invisible: a
+bound whose channel is absent from a frame returns no result, so fewer streams
+silently evaluates part of the rulebook and passes the rest."""
 from __future__ import annotations
 
 import logging
@@ -49,23 +26,17 @@ logger = logging.getLogger(__name__)
 
 
 class BaseZdriveTest(TestCase):
-    """Base test case for zdrive: starts the testbed, tags its telemetry, constructs (but doesn't start) Rulebook evaluation - no test sequence logic."""
+    """Base test case for zdrive: starts the testbed, tags its telemetry, and constructs (but does not start) Rulebook evaluation."""
 
     DUT = "zdrive"
     TEST_NAME = BASE_ZDRIVE_TEST_NAME
     RUN_DETAIL_FIELDS = run_detail_fields(DUT)
-    """What the operator is asked for before a run, if a test chooses to ask.
-
-    Held here rather than on the tests that use it, so every test on this DUT
-    can prompt and each one decides whether to - a manual test that exists to
-    poke at hardware by hand has nothing to attribute. The serial dropdown is
-    whatever the catalogue says this DUT can run."""
+    """What the operator is asked for before a run, if a test chooses to ask."""
 
     RULEBOOKS: List[Rulebook] = [ZDRIVE_RULEBOOK]
 
     DEVICES = ZdriveTestbed.DEVICES
-    """Just the testbed's devices: zdrive is purely mechanical, so there is no
-    DUT façade with a device of its own to union in."""
+    """Just the testbed's devices: zdrive is purely mechanical."""
 
     def __init__(self, test_id: Optional[str] = None, use_mock: bool = False, require_engine: bool = True):
         super().__init__(test_id, require_engine=require_engine)
@@ -98,23 +69,13 @@ class BaseZdriveTest(TestCase):
         )
 
     def _seed_channels(self) -> None:
-        """Publish a default for every state channel this test can produce, so
-        each one exists in the stream from frame 1 rather than appearing when a
-        step first computes it.
+        """Publish a default for every state channel this test can produce, so each
+        exists in the stream from frame 1.
 
-        Seeding is what keeps them in the recorded file at all: the engine fixes
-        a wide file's header from its first frames and drops a channel that
-        appears later, so a value a step computes partway through a sequence
-        would never be written. See ../channels.py.
-
-        MUST RUN BEFORE THE DRIVERS DO. The header window is counted in frames
-        per device, so the fastest publisher closes it first - see
-        pre_test_setup(), which calls this before starting the testbed for that
-        reason.
-
-        Bound-status channels are derived from RULEBOOKS rather than hand-listed,
-        since the Rulebook is already the single source of truth for bound
-        names."""
+        Seeding is what keeps them in the recorded file at all: the engine fixes a
+        wide file's header from its first frames and drops a channel that appears
+        later - see ../channels.py. MUST RUN BEFORE THE DRIVERS DO; see
+        pre_test_setup()."""
         for name, default in DEFAULT_STATE.items():
             self.set_state(name, default)
 
