@@ -12,15 +12,15 @@ importing each other (see the package docstring in wire.py):
 Layout::
 
     <output_dir>/                             ~/Desktop/mytestresults by default
-      runs/<test_id>/                         e.g. endurance_cycle_test_2026-08-17_14-30-12
+      runs/<test_id>/                         e.g. endurance_cycle_test_2026-08-17_14-30-12_1f3c...
         verdict.json              one authoritative record per test run
         <device>/telemetry.csv    wide: one row per frame, one column per channel
         <device>/logs.txt         that driver process's own detailed log
       raw/<device>/telemetry_<session>.csv
 
 A run directory is named by its test_id, which new_test_id() composes from the
-test's name and the time it started, so a run is identifiable from the file
-tree alone.
+test's name, the time it started and a uuid, so a run is identifiable from the
+file tree alone and no two runs can ever land in one directory.
 
 One directory per run, one subdirectory per device inside it. Per-device
 because devices sample at different rates, declare different channel sets,
@@ -40,6 +40,7 @@ telemetry_engine/run_recorder.py). Recover an unattributed slice by time range.
 from __future__ import annotations
 
 import re
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -115,19 +116,39 @@ def safe_path_component(text: str, fallback: str) -> str:
 
 
 def new_test_id(test_name: str, when: Optional[datetime] = None) -> str:
-    """An id for one run: the test's name, then when it started.
+    """An id for one run: the test's name, when it started, and a uuid.
 
     This is the run directory's own name (see run_dir), so the test name is
     reduced to characters that behave as a single path component - anything
     else becomes '-'. The time carries seconds because the same test is
-    routinely run several times a day and each run needs its own directory.
+    routinely run several times a day, and a person reading a path wants to
+    know which run it was without opening anything.
 
-    Not a globally unique id: two runs of the same test starting within the
-    same second would share one, and the engine would record them as a single
-    run. Nothing in a manual test workflow produces that, but an automated
-    caller that might should pass its own id."""
+    THE UUID IS WHAT MAKES IT UNIQUE, and the time is no longer asked to.
+    Without it two runs of the same test starting in the same second shared an
+    id, and nothing detected that: they shared a run directory, the engine
+    attributed both devices' frames to it, and the second verdict overwrote the
+    first. One run silently disappeared into another. Reachable by an automated
+    or scripted caller launching runs in parallel rather than by an operator,
+    which is why it survived this long.
+
+    IT GOES LAST so the name still sorts chronologically. The timestamp is
+    fixed-width and precedes it, so a plain alphabetical listing of runs/ is
+    still in the order the runs happened; only two runs within one second are
+    ordered arbitrarily against each other, and they have no true order worth
+    preserving anyway.
+
+    A UUID RATHER THAN A FINER CLOCK. Sub-second precision would close the same
+    gap in fewer characters, but it stays a bet on the clock: two starts can
+    land in one tick, and a clock that steps backwards under NTP produces an id
+    that both collides and sorts wrongly. Randomness is unconditional and does
+    not care what the clock did.
+
+    `when` is injectable so a test can pin the timestamp; the uuid deliberately
+    is not, because a generator that can be made to repeat is one that will be.
+    A caller needing a fixed id passes its own - TestCase takes one."""
     stamp = (when or datetime.now()).strftime(RUN_TIMESTAMP_FORMAT)
-    return f"{safe_path_component(test_name, 'test')}_{stamp}"
+    return f"{safe_path_component(test_name, 'test')}_{stamp}_{uuid.uuid4().hex}"
 
 
 def ensure_output_dir(output_dir: Path) -> Path:

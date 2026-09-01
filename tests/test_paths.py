@@ -10,6 +10,7 @@ from protocol.paths import (
     ensure_output_dir,
     new_test_id,
     run_dir,
+    safe_path_component,
     verdict_path,
 )
 
@@ -29,7 +30,29 @@ def test_the_output_root_is_created_if_it_is_missing(tmp_path):
 
 
 def test_a_run_is_named_by_its_test_and_when_it_started():
-    assert new_test_id("endurance_cycle_test", WHEN) == "endurance_cycle_test_2026-08-17_14-30-12"
+    """The readable half of the id, which is what a person navigating the tree
+    reads. The uuid that follows is checked separately below."""
+    test_id = new_test_id("endurance_cycle_test", WHEN)
+    assert test_id.startswith("endurance_cycle_test_2026-08-17_14-30-12_")
+
+
+def test_two_runs_of_one_test_in_the_same_second_get_different_ids():
+    """The id is the run directory's name, so a collision is not a duplicate
+    label - it is two runs sharing one directory, both devices' frames
+    attributed to it, and the second verdict overwriting the first. One run
+    disappears into another and nothing reports it."""
+    ids = {new_test_id("endurance_cycle_test", WHEN) for _ in range(1000)}
+    assert len(ids) == 1000
+
+
+def test_the_unique_half_is_a_uuid_and_is_path_safe():
+    """A uuid4 hex, so it adds no character safe_path_component would have to
+    reduce - the id stays usable verbatim as a directory name, and the results
+    mirror copies it unchanged."""
+    suffix = new_test_id("endurance_cycle_test", WHEN).rsplit("_", 1)[1]
+    assert len(suffix) == 32
+    assert all(c in "0123456789abcdef" for c in suffix)
+    assert safe_path_component(suffix, "fallback") == suffix
 
 
 def test_run_directories_list_in_the_order_they_happened():
