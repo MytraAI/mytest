@@ -48,9 +48,10 @@ HEARTBEAT_POLL_INTERVAL_S = 0.5
 more often than that, but the answer cannot change meaningfully faster: the
 staleness deadline is ten seconds, and a hundred opens a second is what made the
 engine's atomic replace collide with it on Windows."""
-from protocol.verdict import BoundsResult, Lifecycle, Verdict, write_verdict
+from protocol.verdict import BoundsResult, Lifecycle, MeasurementsResult, Verdict, write_verdict
 
 from asimov.live_rulebook_runner import FatalBoundViolation, LiveRulebookRunner
+from asimov.measurement import MeasurementLog
 from .state_publisher import RunStatePublisher
 from .utils import Stopwatch, spawn_operator_dashboard
 
@@ -153,6 +154,15 @@ class TestCase(ABC):
         collide; a hand-written id reused across two runs puts both in one
         directory, and the second verdict overwrites the first."""
         self.runner: Optional[LiveRulebookRunner] = None
+        self.measurements = MeasurementLog()
+        """Every deliberate spot check this run takes - see
+        asimov/measurement.py's take_measurement().
+
+        Built here rather than by a subclass, and never None, unlike
+        self.runner: measuring needs no Rulebook, no telemetry subscription
+        and no background thread, so a test that has none of those can still
+        take a measurement. The pointwise half of this run's judgement, read
+        by _author_verdict() the way the runner's summary is."""
         self.used_mock = False
         """Whether this run drove a simulated backend instead of the hardware.
 
@@ -339,10 +349,16 @@ class TestCase(ABC):
             # produced while teardown is still safing hardware belong to it.
             self.teardown_step("stop state publisher", self._publisher.stop)
             if dashboard is not None:
-                if verdict is not None and verdict.bounds_result == BoundsResult.FAIL:
-                    # A bound violated at some point, so the run failed even if
-                    # it completed cleanly - make the dashboard's final state
-                    # match the verdict rather than the momentary "passing".
+                if verdict is not None and (
+                    verdict.bounds_result == BoundsResult.FAIL
+                    or verdict.measurements_result == MeasurementsResult.FAIL
+                ):
+                    # A bound violated, or a measurement missed its limits, so
+                    # the run failed even if it completed cleanly - make the
+                    # dashboard's final state match the verdict rather than the
+                    # momentary "passing". Both checked because a failed
+                    # measurement does not interrupt the sequence, so a run can
+                    # reach here having set "passing" with one already recorded.
                     dashboard.set_status("failing")
                 if linger and threading.current_thread() is threading.main_thread():
                     logger.info(
@@ -381,14 +397,16 @@ class TestCase(ABC):
     def _author_verdict(
         self, started_at: float, lifecycle: str, reason: str, exc_was_fatal: bool
     ) -> Optional[Verdict]:
-        """Assemble this run's verdict from how run() resolved plus the
-        LiveRulebookRunner's bound summary, and write it into this run's
-        directory (see protocol/verdict.py).
+        """Assemble this run's verdict from how run() resolved, plus the
+        LiveRulebookRunner's bound summary and this run's measurements, and
+        write it into this run's directory (see protocol/verdict.py).
 
         `lifecycle` is how the run ended; `bounds_result` comes from the
         runner independently, since they're orthogonal - a stopped run with
         no violations is the *expected success* for both real-hardware test
         cases, and a completed run that violated a bound still failed.
+        `measurements_result` is a third such axis: a run can keep every bound
+        and still fail a measurement, which is why the two are not merged.
 
         Best-effort: logs rather than raises, so a write failure can't mask
         the test's own outcome propagating out of run(). Returns the Verdict
@@ -411,6 +429,8 @@ class TestCase(ABC):
                 reason=reason,
                 any_fatal=any_fatal,
                 violations=violations,
+                measurements_result=self.measurements.result,
+                measurements=self.measurements.measurements,
                 metadata=self.result_metadata(),
             )
             path = write_verdict(verdict, self._output_dir)

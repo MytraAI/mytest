@@ -110,6 +110,13 @@ class TelemetryClient:
         """Blocking generator of telemetry frames. Iterate with a
         for-loop; break out of the loop (or call close()) to stop.
 
+        Yields every frame exactly once, oldest first, discarding nothing -
+        which is what latest_frame() trades away for freshness, and what a
+        consumer aggregating over a window would need. Its cost is the one
+        that motivated latest_frame(): a subscriber read later than it was
+        created hands back its backlog first, so this answers a question about
+        the present with a frame that may be seconds old.
+
         Each frame must arrive within timeout_s of the previous one (or
         of the call, for the first); otherwise raises TelemetryTimeout
         rather than blocking forever on a dead stream - see the module
@@ -154,7 +161,25 @@ class TelemetryClient:
 
         Blocks for one frame if none is queued, so it paces a polling loop the
         same way frames() does, and raises TelemetryTimeout on the same
-        staleness deadline."""
+        staleness deadline.
+
+        THE WRONG PRIMITIVE FOR ANYTHING THAT AGGREGATES OVER TIME, and the
+        discarding above is why. It is exactly right for "what is the value
+        now": one answer, the freshest one. But a caller asking "what was the
+        lowest value over ten seconds" needs every frame in that window, and
+        this throws away whatever queued while the caller was busy - so the
+        extreme it was looking for can be dropped without a trace. The loss is
+        silent: the loop still returns a plausible number from a plausible
+        count of samples.
+
+        In practice a loop that does nothing but call this keeps up easily -
+        the ODrive publishes about every 79 ms - so the hazard is a loop that
+        does something else too, or waits on a second stream and therefore runs
+        at the slower one's rate. Two consecutive calls can never return the
+        same frame, since this consumes; frames() is what misses none of them.
+        asimov's take_measurement_over_time() samples through this deliberately
+        and records how many samples backed its answer - see AI/Mytest.md's
+        open decision on a transport that would not consume on read."""
         frame = next(self.frames())
         while self._poller.poll(0):
             frame = TelemetryFrame.from_bytes(self._recv_frame())

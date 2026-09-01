@@ -34,6 +34,18 @@ evaluates against the union of the device's frame and the test's published
 state, read in-process from the state publisher. State never has to travel
 over the wire to be gated on.
 
+TWO SHAPES OF BOUND CAN NEVER FIRE, and neither is refused. A Bound with
+none of `upper`/`lower`/`expected` set is satisfied by every value, and so is
+one whose `upper` or `lower` is a NaN, since every comparison against a NaN is
+False. Either sits in a Rulebook reporting PASS for the whole run while
+supervising nothing - the same false-supervision failure UnevaluableBoundError
+exists to prevent, arrived at from the rulebook's side rather than the data's.
+Construction is deliberately left permissive; the check is a reviewer reading
+the rulebook. All 27 bounds registered in this repo today are clear of both.
+Note asimov.measurement's take_measurement() does refuse the no-limits case,
+because its limits are written inline at a call site rather than declared in a
+file somebody reviews as a whole.
+
 A Bound may also require `persistence_s` seconds of continuous
 violation before it actually trips (e.g. a current bound that only
 fails after being exceeded for 200ms, to ignore a brief noise spike).
@@ -54,6 +66,8 @@ import logging
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+
+from .limits import Uncomparable, compare
 
 
 logger = logging.getLogger(__name__)
@@ -171,27 +185,14 @@ class Bound:
             return None
 
         actual = channels[self.channel]
-        if self.upper is not None or self.lower is not None:
-            if actual is None:
-                raise UnevaluableBoundError(
-                    self.label, self.channel, actual,
-                    "the channel reported no value, so its numeric limits can't be checked",
-                )
-            if not isinstance(actual, (int, float)):
-                # bool is an int subclass and compares fine, so it passes here
-                # deliberately - a bool channel with a numeric limit is a
-                # rulebook mistake, not an unevaluable frame.
-                raise UnevaluableBoundError(
-                    self.label, self.channel, actual,
-                    f"a {type(actual).__name__} can't be compared against a numeric limit",
-                )
-        if self.upper is not None and actual > self.upper:
-            return True
-        if self.lower is not None and actual < self.lower:
-            return True
-        if self.expected is not None and actual != self.expected:
-            return True
-        return False
+        try:
+            return compare(actual, upper=self.upper, lower=self.lower, expected=self.expected)
+        except Uncomparable as exc:
+            # The comparison itself is shared with measurement.py (see
+            # asimov/limits.py); what an unjudgeable value *means* is not. Here
+            # it is a bound left unsupervised, which a runner tolerates for
+            # unevaluable_grace_s before ending the run.
+            raise UnevaluableBoundError(self.label, self.channel, actual, exc.reason) from exc
 
 
 @dataclass(frozen=True)
