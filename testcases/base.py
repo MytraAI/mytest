@@ -146,8 +146,12 @@ class TestCase(ABC):
         self.test_id = test_id or new_test_id(getattr(self, "TEST_NAME", "unknown"))
         """Identifies this run everywhere: on the state stream, in the stop
         file, and as the name of the directory holding its output. Generated
-        from this test's name and the current time unless the caller supplies
-        one (see protocol/paths.py)."""
+        from this test's name, the current time and a uuid unless the caller
+        supplies one (see protocol/paths.py).
+
+        A CALLER THAT SUPPLIES ONE OWNS ITS UNIQUENESS. new_test_id() cannot
+        collide; a hand-written id reused across two runs puts both in one
+        directory, and the second verdict overwrites the first."""
         self.runner: Optional[LiveRulebookRunner] = None
         self.used_mock = False
         """Whether this run drove a simulated backend instead of the hardware.
