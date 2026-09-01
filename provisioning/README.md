@@ -111,9 +111,24 @@ logon: Machine inactivity limit* policy. It locks the console after 20 minutes o
 never still ends up behind a lock screen. Tests keep running; what you lose is the
 operator dashboard and any on-screen GUI.
 
-`-DisableAutoLock` sets it to 0. It is opt-in because it leaves the box logged in
-unattended and `seitteam` is a local administrator. Without the switch the script reports
-the current value rather than changing it. Both stands were set to 0 on 2026-08-27.
+The script sets it to 0 on every run. `-KeepAutoLock` opts out, on a box that must keep
+locking; the cost of the default is that the box stays signed in unattended and `seitteam`
+is a local administrator.
+
+**This used to be opt-in, behind `-DisableAutoLock`, and that is why both stands went on
+locking for weeks after being provisioned.** Without the switch the function printed one
+`[warn]` line and changed nothing, which in a run this long scrolls past - so the box
+behaved exactly as though the script had never touched it. An earlier version of this
+README claimed both stands were set to 0 on 2026-08-27; they were not. Both were still at
+1200 on 2026-09-01, on SEIT-LT-2 and SEIT-STATION-7 alike.
+
+Nothing else manages this value, so the registry write is enough. Both boxes are in a
+workgroup, neither has a local policy template (`GptTmpl.inf` is absent), and the setting
+is Not Defined in the local security database - a value written to the registry survived
+`gpupdate /force` on SEIT-LT-2. One trap worth knowing: `secedit /export` **without**
+`/db` reports the live registry back rather than a stored policy, so it looks like an
+independent second source confirming the registry, and it is not. Read the database with
+`secedit /export /db C:\Windows\security\database\secedit.sdb` instead.
 
 The change applies from the next sign-in, so a box already locked needs unlocking by hand
 once; if it locks again after 20 minutes, sign out and back in.

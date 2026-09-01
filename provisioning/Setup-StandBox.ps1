@@ -11,7 +11,8 @@
     Power     display / sleep / hibernate / unattended-sleep -> never, lid close -> do
               nothing, USB selective suspend / PCIe ASPM / disk spindown / wireless
               power saving / Energy Saver off, per-device "turn off to save power"
-              cleared, screen saver off, and a boot-time task holding a wake lock.
+              cleared, screen saver off, the automatic lock off (-KeepAutoLock to keep
+              it), and a boot-time task holding a wake lock.
     SSH       OpenSSH.Server installed, sshd Automatic with restart-on-failure,
               DefaultShell -> pwsh, optional public key for -TargetUser.
     Network   inbound TCP 22 open on the Private and Domain profiles (not Public),
@@ -39,11 +40,15 @@
 .PARAMETER InstallBonjour
     If the built-in mDNS responder does not answer, attempt to install Apple's Bonjour.
 
-.PARAMETER DisableAutoLock
-    Turn off the 'Interactive logon: Machine inactivity limit' policy, which locks the
-    console after N minutes of no input regardless of any power or screen saver setting.
-    Opt-in: it leaves the box logged in and unattended, and the stand account is a local
-    administrator.
+.PARAMETER KeepAutoLock
+    Leave the 'Interactive logon: Machine inactivity limit' policy alone. That policy locks
+    the console after N minutes of no input regardless of any power or screen saver
+    setting, and this script disables it by default: a stand behind a lock screen keeps
+    running its tests but loses the operator dashboard and every on-screen GUI, which is
+    the thing the rest of this script exists to prevent.
+
+    Pass this on a box that must keep locking. The cost of the default is that the box
+    stays signed in unattended, and the stand account is a local administrator.
 
 .PARAMETER ResultsShareOnly
     Establish access to the results share and register the mirror task, and do nothing
@@ -123,7 +128,7 @@ param(
     [string]$RepoPath,
     [int]   $MirrorIntervalMinutes  = 5,
     [switch]$InstallBonjour,
-    [switch]$DisableAutoLock,
+    [switch]$KeepAutoLock,
     [switch]$DisableHibernation,
     [switch]$MaxProcessor,
     [switch]$AllDevices,
@@ -200,7 +205,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     $psExe   = (Get-Process -Id $PID).Path
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
     foreach ($sw in 'PowerOnly','SshOnly','InstallWakeLockTaskOnly','ResultsShareOnly','InstallBonjour',
-                    'DisableAutoLock','DisableHibernation','MaxProcessor','AllDevices','KeepAwake') {
+                    'KeepAutoLock','DisableHibernation','MaxProcessor','AllDevices','KeepAwake') {
         if ($PSBoundParameters[$sw]) { $argList += "-$sw" }
     }
     foreach ($p in 'TargetUser','PublicKey','SshPort','InstallTimeoutMinutes','StallMinutes','PollSeconds',
@@ -391,7 +396,21 @@ function Set-AutoLockPolicy {
     # 'Interactive logon: Machine inactivity limit'. Locks the workstation after N seconds
     # of no input, independently of screen saver and power settings - so a box with every
     # timeout set to never still ends up behind a lock screen, which no amount of powercfg
-    # work prevents. Reported on every run, changed only when asked.
+    # work prevents.
+    #
+    # DISABLED BY DEFAULT, AND IT DID NOT USED TO BE. This needed an opt-in -DisableAutoLock
+    # and without it the function only printed a warning, so both stands were provisioned
+    # and then went on locking themselves for weeks - the warning scrolls past in a run
+    # this long, and the box behaves exactly as though the script had never been run. A
+    # setting that has to be remembered separately from the run that configures everything
+    # else is one nobody remembers.
+    #
+    # NOTHING ELSE MANAGES THIS VALUE, so writing the registry is enough and no policy
+    # tooling is needed. Checked on both stands: they are in a workgroup, there is no
+    # local policy template, and the setting is Not Defined in the local security
+    # database - and a value written here survived a gpupdate /force on SEIT-LT-2. Beware
+    # `secedit /export` without `/db`, which reports the live registry back and so looks
+    # like a second, independent source agreeing with it.
     $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
     $cur = (Get-ItemProperty $key -Name InactivityTimeoutSecs -ErrorAction SilentlyContinue).InactivityTimeoutSecs
 
@@ -399,14 +418,43 @@ function Set-AutoLockPolicy {
 
     if ($null -eq $cur -or $cur -eq 0) { Write-Ok 'no automatic lock configured'; return }
 
-    $mins = [int]$cur / 60
-    if (-not $DisableAutoLock) {
-        Write-Note "this box locks itself after $mins min of no input - no power setting prevents that. Re-run with -DisableAutoLock to turn it off."
+    # Rounded, because this is a duration in a sentence: a box shipped with a limit that is
+    # not a whole number of minutes prints 14.8333333333333 otherwise.
+    $mins = [math]::Round($cur / 60, 1)
+    if ($KeepAutoLock) {
+        Write-Note "this box locks itself after $mins min of no input and -KeepAutoLock was passed, so it was left alone - no power setting prevents that lock."
         return
     }
 
     if (-not $PSCmdlet.ShouldProcess('InactivityTimeoutSecs', 'set to 0')) { return }
-    Set-ItemProperty -Path $key -Name InactivityTimeoutSecs -Value 0 -Type DWord
+
+    # Guarded like Disable-ScreenSaver above, and for a reason that is new: this script runs
+    # under $ErrorActionPreference = 'Stop', so an unhandled failure here terminates the run
+    # before SSH, the firewall and the results mirror are ever set up. That was survivable
+    # while the write only happened for somebody who passed a switch. Now that it happens on
+    # every run, one refused write would take the whole provisioning down with it.
+    try {
+        Set-ItemProperty -Path $key -Name InactivityTimeoutSecs -Value 0 -Type DWord
+    } catch {
+        Write-Note "automatic lock: $($_.Exception.Message)"
+        return
+    }
+
+    # Read back rather than assumed. This is the one setting on these boxes whose failure
+    # mode was months of silence, so it reports what the machine holds, not what was sent.
+    $after = (Get-ItemProperty $key -Name InactivityTimeoutSecs -ErrorAction SilentlyContinue).InactivityTimeoutSecs
+    if ($null -eq $after) {
+        # Deliberately not folded into the check below. $null -ne 0 is TRUE in PowerShell,
+        # so one test would blame an enforcing policy for a read that merely failed, and
+        # print a blank where the number goes.
+        Write-Note 'set the automatic lock to 0 but could not read the value back to confirm it.'
+        return
+    }
+    if ($after -ne 0) {
+        Write-Note "tried to disable the automatic lock but it still reads $after s - something else is enforcing it. Look for a domain policy or a management agent."
+        return
+    }
+
     Write-Fix "automatic lock disabled (was $mins min) - applies from the next sign-in"
     Write-Skip 'the console then stays unlocked: anyone with physical access has a live session as this account'
 }
