@@ -14,18 +14,22 @@ doing is knowable only where it is consumed, at the drive's own
 `board_vbus_voltage`; get_bus_voltage() reads that, and xdeploy_rulebook's
 undervoltage_bound is what watches it.
 
-THE AXIS IS GRAVITY-LOADED AND THERE IS NO BRAKE. A disarmed axis on this stand
-does not stop, it descends, and nothing here can catch it - not the testbed,
-which holds no rail, and not the drive, which is what let go. That is a property
-of the stand rather than a gap in this module, and it is why stop() disarms
-rather than pretending to safe anything: see xdeploy_rulebook's docstring for
-what the run does and does not notice while it happens.
+THE AXIS IS GRAVITY-LOADED AND THERE IS NO BRAKE. Gravity pulls the load in the
+POSITIVE (retract) direction, so a disarmed axis runs positive until the load
+reaches the ground and is held there. The fall is bounded, but it is still an
+uncontrolled drop of the full load from wherever the axis was, and nothing here
+can catch it - which is why stop() disarms rather than pretending to safe
+anything. See xdeploy_rulebook for what a run does and does not notice.
 
-What this does NOT do: configure the ODrive. Its current limits, its bus limits
-and its trip levels are persistent device state, and this stand has not been
-measured, so writing numbers borrowed from another stand would be a fabricated
-configuration that every later run would inherit. The board keeps whatever it
-was last given, and start() says so in the log rather than silently adopting it.
+WHAT THIS CONFIGURES, AND WHAT IT LEAVES ALONE. start() writes the motor's
+current ceilings and the regen threshold - stand ceilings, taken from the motor's
+nameplate and this stand's brake resistor. It writes nothing else: the controller
+tuning is whatever was last loaded and dialled in by hand, and a run uses it as
+found.
+
+THE BOARD HAS NO DC BUS OVERVOLTAGE TRIP. Lowering a gravity load onto a bench
+supply that cannot sink is caught by the brake resistor and by
+xdeploy_rulebook's overvoltage_bound, and by nothing else.
 
 use_mock_odrive substitutes the ODrive only. The DAQ's driver has no mock
 backend, so a reachable thermocouple DAQ is always needed.
@@ -67,6 +71,16 @@ from protocol.wire import (
 
 logger = logging.getLogger(__name__)
 
+ODRIVE_MOTOR_SOFT_MAX_A = 28.5
+"""Phase current the stand drives to, under the motor's rated ceiling."""
+
+ODRIVE_MOTOR_HARD_MAX_A = 36.0
+"""Measured phase current that trips CURRENT_LIMIT_VIOLATION - the motor's rating."""
+
+ODRIVE_MAX_REGEN_CURRENT_A = 10.0
+"""Regen current above which the brake resistor shunts, so a lowered load has
+somewhere to go: the 1000 W bench supply cannot sink."""
+
 
 class Motion(NamedTuple):
     """Where the axis is, how fast it is going, and whether it is still driving -
@@ -78,8 +92,8 @@ class Motion(NamedTuple):
 
     `armed` is in here because a loop watching a move has to notice the axis
     stopping driving. The ODrive disarms itself on a fault, so a move can end with
-    the load coasting and no exception anywhere - which on a gravity-loaded axis
-    with no brake means the load descending with nothing left to stop it."""
+    the load coasting and no exception anywhere - which on this axis means it
+    running to the ground under gravity while the loop waits for a position."""
 
     position: float
     velocity: float
@@ -171,12 +185,8 @@ class XdeployTestbed:
         return driver_console_path(self._output_dir, self._test_id, device)
 
     def start(self) -> None:
-        """Bring both drivers up and verify their channel surfaces.
-
-        Writes nothing to either device. There is no rail to configure here and
-        no ODrive limit this stand has earned the right to set - see this
-        module's docstring - so a started testbed has changed the stand in
-        exactly one way: two driver processes are now streaming."""
+        """Bring both drivers up, verify their channel surfaces, and write the
+        ODrive's current and regen ceilings. Nothing else is configured."""
         odrive_args = [sys.executable, "-m", "hardware.odrive.main", *self._log_args(DEVICE_ODRIVE)]
         if self._use_mock_odrive:
             odrive_args.append("--mock")
@@ -231,14 +241,24 @@ class XdeployTestbed:
         # started against the wrong port and is streaming something else.
         self._tc_daq_telemetry.verify_channels(TC_DAQ_TELEMETRY_CHANNELS)
 
-        # Said once, at the top of every run, because it is the one thing about
-        # this stand a recorded log cannot otherwise establish: these limits are
-        # whatever the last person to touch the board left behind.
+        # After the command surface is verified, not before: a write to an action
+        # the board does not have should fail as a missing action rather than as
+        # a command timeout. Written every run so the ceilings cannot be
+        # inherited from whoever last touched the board; the controller tuning is
+        # deliberately not written - see this module's docstring.
+        self._command.set_motor_config_current_soft_max(ODRIVE_MOTOR_SOFT_MAX_A)
+        self._command.set_motor_config_current_hard_max(ODRIVE_MOTOR_HARD_MAX_A)
+        self._command.set_board_config_max_regen_current(ODRIVE_MAX_REGEN_CURRENT_A)
+
+        # Said once at the top of every run, because it is what a recorded log
+        # cannot otherwise establish: which numbers this run drove under, and
+        # that the tuning behind them was not this stand's choice.
         logger.info(
-            "xdeploy testbed up: %s and %s streaming. This stand configures NOTHING on the "
-            "ODrive - its current, bus and trip limits are the board's persistent state - and "
-            "holds no supply, so the DC bus is whatever the bench supply is set to.",
-            DEVICE_ODRIVE, DEVICE_TC_DAQ,
+            "xdeploy testbed up: %s and %s streaming, motor current limited to %.1f/%.1f A soft/hard "
+            "with regen above %.1f A shunted. The controller tuning is the board's own, and this "
+            "stand holds no supply - the DC bus is whatever the bench supply is set to.",
+            DEVICE_ODRIVE, DEVICE_TC_DAQ, ODRIVE_MOTOR_SOFT_MAX_A, ODRIVE_MOTOR_HARD_MAX_A,
+            ODRIVE_MAX_REGEN_CURRENT_A,
         )
 
     def _require_drivers_alive(self) -> None:
@@ -272,10 +292,10 @@ class XdeployTestbed:
         THIS DOES NOT SAFE THE STAND, AND NOTHING HERE COULD. The bus belongs to
         a bench supply this framework does not hold, and the axis has no brake -
         so disarming is the most a teardown can do, and on a gravity-loaded axis
-        it is also the moment the load is left to itself. A run that ends with
-        the load anywhere but resting on its stop ends with it descending; where
-        the load is when a test finishes is that test's business, taken before
-        teardown, not something this can retrofit.
+        it is also the moment the load is left to itself. A run that ends with the
+        load still lifted ends with it dropping to the ground; getting it down
+        first is that test's business, taken before teardown, not something this
+        can retrofit.
 
         Each step runs independently, logging a failure rather than raising, so
         one wedged client cannot leave the rest of the stand up."""
