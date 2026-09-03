@@ -306,12 +306,110 @@ def test_a_run_up_that_never_reaches_the_trigger_counts_no_event():
     assert counted == [], "nothing braked, so nothing to count"
 
 
-def test_the_power_envelope_is_watched_and_only_recorded():
-    """The channel that actually reports the limit overcurrent_bound cannot reach.
-    Recorded rather than fatal until there is data on how often the stand hits it."""
+def test_the_power_envelope_is_recorded_but_no_longer_bounded():
+    """It was bounded to find out how often the stand leaves the 420 W envelope.
+    Two 1800 lb runs answered ~45-49 brief excursions an hour - the longest 43 ms -
+    so every healthy run recorded FAIL for a direction reversal. The channel is
+    still in the cpx400dp stream; it just no longer decides pass/fail."""
     from testcases.ydrive.rulebooks.ydrive_rulebook import YDRIVE_RULEBOOK
+    from hardware.cpx400dp.cpx400dp_channels import TELEMETRY_CHANNELS
 
-    bound = next(b for b in YDRIVE_RULEBOOK.bounds if b.channel == "in_power_limit_2")
+    assert not any(b.channel == "in_power_limit_2" for b in YDRIVE_RULEBOOK.bounds)
+    assert "in_power_limit_2" in TELEMETRY_CHANNELS, "still recorded, just not judged"
 
-    assert bound.expected is False
-    assert bound.fatal is False, "not fatal until the stand says how often it happens"
+
+def test_the_bus_is_bounded_from_both_directions():
+    """The rail rises on regen - it peaked at 50.36 V against a 48 V setpoint -
+    and nothing bounded that direction before."""
+    from testcases.ydrive.rulebooks.ydrive_rulebook import (
+        MAX_BUS_VOLTAGE_V, MIN_BUS_VOLTAGE_V, YDRIVE_RULEBOOK,
+    )
+
+    vbus = [b for b in YDRIVE_RULEBOOK.bounds if b.channel == "board_vbus_voltage"]
+    assert {b.name for b in vbus} == {"undervoltage_bound", "overvoltage_bound"}
+    assert all(b.fatal for b in vbus)
+    assert MIN_BUS_VOLTAGE_V < MAX_BUS_VOLTAGE_V
+
+
+def test_the_bus_ceiling_fires_before_the_drive_faults_on_its_own():
+    """config.dc_bus_overvoltage_trip_level is 64.0 V on this board. A bound above
+    it could only ever report the aftermath of a fault the ODrive already took."""
+    from testcases.ydrive.rulebooks.ydrive_rulebook import MAX_BUS_VOLTAGE_V
+
+    assert MAX_BUS_VOLTAGE_V < 64.0
+
+
+def test_the_bus_floor_sits_where_the_stand_runs_not_at_the_drives_trip():
+    """10.5 V was the drive's own dc_bus_undervoltage_trip_level, so the old bound
+    could only fire at the instant the ODrive faulted by itself. The measured floor
+    with the bus up was 37.14 V."""
+    from testcases.ydrive.rulebooks.ydrive_rulebook import MIN_BUS_VOLTAGE_V
+
+    assert MIN_BUS_VOLTAGE_V > 10.5
+    assert MIN_BUS_VOLTAGE_V < 37.14, "must sit under the lowest reading measured"
+
+
+def test_the_cycle_time_bound_is_fatal_and_undebounced():
+    """One number per completed cycle, held until the next - not a sampled signal
+    that can spike, so debouncing would mean waiting for a second slow cycle to
+    agree with the first."""
+    from testcases.ydrive.rulebooks.ydrive_rulebook import MAX_CYCLE_TIME_S, YDRIVE_RULEBOOK
+
+    bound = next(b for b in YDRIVE_RULEBOOK.bounds if b.channel == "cycle_time_s")
+
+    assert bound.upper == MAX_CYCLE_TIME_S == 34.0
+    assert bound.lower is None, "a fast cycle is not a fault"
+    assert bound.fatal is True
+    assert bound.persistence_s is None
+
+
+def test_the_cycle_time_ceiling_clears_the_slowest_cycle_measured():
+    """308 cycles over 2.5 h at 1800 lb ran 27.92-28.59 s. A ceiling near that
+    band would abort healthy runs; this one sits ~19% above the slowest."""
+    from testcases.ydrive.rulebooks.ydrive_rulebook import MAX_CYCLE_TIME_S
+
+    slowest_measured = 28.59
+    assert MAX_CYCLE_TIME_S > slowest_measured
+    assert MAX_CYCLE_TIME_S / slowest_measured > 1.15
+
+
+def test_cycle_time_is_seeded_numeric_so_a_run_can_start():
+    """A numeric bound on a channel carrying None is unevaluable, and unevaluable
+    stops a run - so None here would abort every ydrive run on its first frame,
+    exactly as a None stopping_distance_m once did."""
+    from testcases.ydrive.channels import DEFAULT_STATE
+    from testcases.ydrive.rulebooks.ydrive_rulebook import MAX_CYCLE_TIME_S
+
+    assert DEFAULT_STATE["cycle_time_s"] == 0.0
+    assert isinstance(DEFAULT_STATE["cycle_time_s"], float)
+    assert DEFAULT_STATE["cycle_time_s"] < MAX_CYCLE_TIME_S, "the seed must not trip it"
+
+
+def test_the_cycle_clock_excludes_the_brake_event():
+    """A brake event adds ~12 s and runs OUTSIDE the cycling loop. Timing it into
+    a cycle would trip a 34 s ceiling on a perfectly healthy run."""
+    import inspect
+
+    from testcases.ydrive.testcases.testcases import CycleBrakeEnduranceTest
+
+    source = inspect.getsource(CycleBrakeEnduranceTest.main_execution)
+    started = source.index("cycle_clock = Stopwatch()")
+    published = source.index('set_state("cycle_time_s"')
+    braked = source.index("brake_from_speed(")
+
+    assert started < published < braked, "the clock must open and close inside the cycling loop"
+
+
+def test_cycle_time_is_published_after_the_cycle_closes():
+    """So the value is the time of a cycle that actually completed. A cycle that
+    hangs never publishes one - that is move_to()'s arrival timeout to catch."""
+    import inspect
+
+    from testcases.ydrive.testcases.testcases import CycleBrakeEnduranceTest
+
+    source = inspect.getsource(CycleBrakeEnduranceTest.main_execution)
+    last_leg = source.index("cycle_leg(self, self.START_POSITION)",
+                            source.index("cycle_clock = Stopwatch()"))
+    published = source.index('set_state("cycle_time_s"')
+
+    assert last_leg < published
