@@ -10,12 +10,9 @@ written partway through a sequence would be logged once and dropped, and the
 measurement the run exists to take would be missing from the recorded file while
 the run reported a clean pass.
 
-SHORT BECAUSE THIS STAND MEASURES NOTHING YET. Every channel here is published by
-a shared operator step rather than by an xdeploy step: what the operator said the
-run is, and what the run is currently waiting for them to do. A real xdeploy
-measurement - a deployment time, a travel, a force - gets a channel here on the
-day the step that produces it is written, and not before, because a seeded
-channel nothing writes is a column of the seed value for the whole run.
+THE RULE CUTS BOTH WAYS: add a channel here only once something writes it. One
+seeded and never written records its default on every row of every run, which
+reads like a measurement that was taken and never moved.
 
 Bound-status channels ({bound.label}_status, plus test_status) are not listed
 here - they are derived from RULEBOOKS, which is already the single source of
@@ -44,4 +41,23 @@ DEFAULT_STATE: Dict[str, Any] = {
     # Seeded even though ManualTest never asks: the fields are declared on
     # BaseXdeployTest for the tests that will, and a channel the engine has
     # already dropped cannot be added back by the first test that publishes it.
+    "position_target": None,
+    # Where the last move was aimed, written by move_to().
+    "cycle_count": 0,
+    "cycle_time_s": 0.0,
+    # Completed cycles, and how long the last one's two legs took. cycle_time_s
+    # carries no bound yet on purpose - it is the evidence a cycle_time_bound
+    # would be set from, and a cycle that slows is how a jam, rising friction or
+    # a derating board first shows. Excludes the dwell and any thermal wait, so
+    # a cooled-down cycle and a hot one are still comparable.
+    "total_travel_turns": 0.0,
+    # How far the drive has travelled since cycling began, derived from the
+    # ODrive's own turns_traveled. In turns rather than metres: this stand has no
+    # measured metres-per-turn, and inventing one would put a fabricated geometry
+    # into every stored run. Seeded like any other channel - a derived channel
+    # appears only once its derivation has something to report, which is later
+    # than the engine fixes the header.
+    "thermal_waits": 0,
+    # How many 60 s holds a run has taken waiting to cool. Published so a stand
+    # that cannot cool reads as a collapsed cycle rate rather than a silent one.
 }

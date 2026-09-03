@@ -20,7 +20,10 @@ from .base import TestCase
 from .example_dut.testcases.base_example_dut_test import BaseExampleDutTest
 from .example_dut.testcases.halt_tests import CycleDutPositionTest
 from .xdeploy.testcases.base_xdeploy_test import BaseXdeployTest
-from .xdeploy.testcases.testcases import ManualTest as XdeployManualTest
+from .xdeploy.testcases.testcases import (
+    CycleTest as XdeployCycleTest,
+    ManualTest as XdeployManualTest,
+)
 from .ydrive.testcases.base_ydrive_test import BaseYdriveTest
 from .ydrive.testcases.testcases import (
     BrakeEnduranceTest,
@@ -41,6 +44,7 @@ REGISTERED_TESTS: Dict[str, Callable[[Optional[str], bool], TestCase]] = {
     "example_dut.cycle_position": lambda test_id, use_mock: CycleDutPositionTest(test_id=test_id),
     "xdeploy.base": lambda test_id, use_mock: BaseXdeployTest(test_id=test_id, use_mock=use_mock),
     "xdeploy.manual": lambda test_id, use_mock: XdeployManualTest(test_id=test_id, use_mock=use_mock),
+    "xdeploy.cycle": lambda test_id, use_mock: XdeployCycleTest(test_id=test_id, use_mock=use_mock),
     "ydrive.base": lambda test_id, use_mock: BaseYdriveTest(test_id=test_id, use_mock=use_mock),
     "ydrive.manual": lambda test_id, use_mock: ManualTest(test_id=test_id, use_mock=use_mock),
     "ydrive.endurance_cycle": lambda test_id, use_mock: EnduranceCycleTest(test_id=test_id, use_mock=use_mock),

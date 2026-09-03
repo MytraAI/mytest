@@ -1,6 +1,6 @@
-"""Evaluation Rulebook for xdeploy: a deliberately minimal safety net - one
-bound at the drive and one per wired thermocouple - checked regardless of what a
-given test's main_execution actually does.
+"""Evaluation Rulebook for xdeploy: a deliberately minimal safety net - the bus
+either side, the drive's own FET, and one bound per wired thermocouple - checked
+regardless of what a given test's main_execution actually does.
 
 THE BOUNDS SPAN TWO DEVICES, and each stream evaluates only the bounds whose
 channels it carries. `board_vbus_voltage` is the ODrive's; `temperature_<n>_c`
@@ -10,21 +10,36 @@ silently never runs - see ManualTest.
 
 WHAT THIS RULEBOOK DELIBERATELY DOES NOT BOUND, AND WHAT THAT COSTS.
 
-    There is no motor-current bound and no overspeed bound. Both exist on zdrive
-    and both would have to be given numbers, and no number about this stand has
-    been measured: the motor's rating, the speeds a normal move reaches, and the
-    speed a released load reaches are all unknown here. A bound carrying a figure
-    borrowed from another axis is not a smaller safety net than none - it is a
-    number that looks measured, and every later reader would take it as one.
+    There is no motor-current bound, no overspeed bound, no cycle-time bound and
+    nothing watching `axis_is_armed`. The speeds a normal move reaches and the
+    time a normal cycle takes have not been measured here, and a bound carrying a
+    figure borrowed from another axis is not a smaller safety net than none - it
+    is a number that looks measured.
 
-    THE COST IS SPECIFIC AND IT IS NOT SMALL: this axis is gravity-loaded and has
-    no brake, so a drive that disarms itself leaves the load descending, and
-    NOTHING IN THIS RULEBOOK NOTICES. Bus voltage stays nominal, the drive is no
-    longer drawing, the thermocouples stay cool, and the run records the fall and
-    reports a pass. zdrive carries `overspeed_bound` for exactly this, and its
-    docstring is worth reading before this stand runs unattended. Closing this
-    gap needs one measurement - the speed a normal move reaches - and the bound
-    that follows from it.
+    THE COST IS SPECIFIC AND IT IS ACCEPTED. This axis is gravity-loaded and has
+    no brake, so a drive that disarms itself lets the load run positive until it
+    reaches the ground, and NOTHING IN THIS RULEBOOK NOTICES. Bus voltage stays
+    nominal, the drive is no longer drawing, the thermocouples stay cool, and the
+    run records the drop and reports a pass. The fall is bounded by the ground
+    rather than by anything here. Closing the gap needs measurements a shakedown
+    run would produce - `cycle_time_s` is published from cycle one for exactly
+    that - plus, needing no measurement at all, an `axis_is_armed` bound gated on
+    a flag the test publishes while it expects to be driving.
+
+- overvoltage_bound: board_vbus_voltage > 52V, fatal, no persistence.
+
+  THE ONLY OVERVOLTAGE PROTECTION ON THIS STAND BEYOND THE BRAKE RESISTOR: this
+  board has no dc_bus_overvoltage_trip_level set, so there is no firmware trip
+  underneath this bound and nothing else acts if it is passed. Every cycle lowers
+  a gravity load onto a bench supply that cannot sink, which is what pushes the
+  bus up in the first place - see XdeployTestbed's ODRIVE_MAX_REGEN_CURRENT_A.
+
+- fet_overtemperature_bound: motor_fet_thermistor_temperature > 80C, fatal,
+  debounced 5s. A board figure rather than a stand figure, set below the point at
+  which this ODrive family begins derating its own current limit - past that a
+  move gets less current than the test believes it asked for. Above the
+  teststeps' FET_WAIT_C, where a cycle stops moving and waits, so reaching this
+  one means the stand went on heating while already being held back.
 
 - undervoltage_bound: board_vbus_voltage < 10.5V, fatal, no persistence -
   trusted instantaneously rather than debounced. Mirrors the ODrive's own
@@ -80,6 +95,20 @@ A DEVICE FIGURE, NOT A STAND FIGURE, which is what makes it usable here when
 nothing else about this stand has been measured: it is true of the board
 whatever the bench supply is set to."""
 
+MAX_BUS_VOLTAGE_V = 52.0
+"""Fatal ceiling on the DC bus measured at the drive.
+
+The same figure zdrive bounds its bus at. Unlike zdrive's it has no firmware trip
+beneath it - this board has no overvoltage trip level set - so nothing acts on an
+overvoltage except the brake resistor and this bound ending the run."""
+
+MAX_FET_TEMPERATURE_C = 80.0
+"""Fatal ceiling on the ODrive's own inverter FET thermistor, below the
+temperature at which this board family starts derating its current limit."""
+
+FET_PERSISTENCE_S = 5.0
+"""How long the FET must stay above MAX_FET_TEMPERATURE_C before the run stops."""
+
 MAX_TEMPERATURE_C = 70.0
 """Fatal ceiling on every live thermocouple channel.
 
@@ -103,18 +132,21 @@ LIVE_TC_CHANNELS = (1, 2)
 """Which thermocouple inputs are wired on this stand, and so the only ones
 bounded.
 
-STAND CONFIGURATION, AND UNCONFIRMED AGAINST THE xdeploy HARNESS - the first two
-channels are what zdrive wires, not something checked here. Getting it wrong
-fails loudly rather than quietly, which is the one mercy: a bound on an unwired
-channel is unevaluable and stops the run on its first frame, naming the channel.
-Unplug or move a thermocouple and this has to change with it."""
+CONFIRMED AGAINST THE HARNESS on 2026-09-03: read directly off the DAQ on COM7,
+channels 1 and 2 carried 31.3 C and 34.1 C and channels 3-8 all reported FAULT.
+Stand configuration, so unplug or move a thermocouple and this has to change with
+it. Getting it wrong fails loudly rather than quietly, which is the one mercy: a
+bound on an unwired channel is unevaluable and stops the run on its first frame,
+naming the channel."""
 
 BASE_XDEPLOY_TEST_NAME = "base_xdeploy_test"
 MANUAL_TEST_NAME = "xdeploy_manual_test"
+CYCLE_TEST_NAME = "xdeploy_cycle_test"
 
 TEST_NAMES = [
     BASE_XDEPLOY_TEST_NAME,
     MANUAL_TEST_NAME,
+    CYCLE_TEST_NAME,
 ]
 
 XDEPLOY_RULEBOOK = Rulebook(
@@ -126,6 +158,19 @@ XDEPLOY_RULEBOOK = Rulebook(
             lower=MIN_BUS_VOLTAGE_V,
             name="undervoltage_bound",
             fatal=True,
+        ),
+        Bound(
+            channel="board_vbus_voltage",
+            upper=MAX_BUS_VOLTAGE_V,
+            name="overvoltage_bound",
+            fatal=True,
+        ),
+        Bound(
+            channel="motor_fet_thermistor_temperature",
+            upper=MAX_FET_TEMPERATURE_C,
+            name="fet_overtemperature_bound",
+            fatal=True,
+            persistence_s=FET_PERSISTENCE_S,
         ),
         *[
             Bound(
