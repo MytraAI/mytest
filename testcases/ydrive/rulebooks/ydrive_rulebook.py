@@ -28,13 +28,20 @@ main_execution actually does:
   a bound on drift - a bound on how long the mechanism that removes it may go
   on not working, since nothing else on this stand can see the load slip past
   the motor. See MAX_DISTANCE_SINCE_CORRECTION_M.
-- undervoltage_bound: board_vbus_voltage < 10.5V, no persistence -
-  trusted instantaneously rather than debounced.
-- power_envelope_bound: in_power_limit_2 is False, RECORDED not fatal -
-  the supply's own report that the motor bus has gone unregulated
-  against its 420 W envelope. See IN_POWER_LIMIT_EXPECTED. Its channel
-  is the supply's, so a test that does not hand runner.start() the
-  supply's stream evaluates it against nothing.
+- undervoltage_bound: board_vbus_voltage < 33.43V, fatal, no persistence -
+  trusted instantaneously rather than debounced. 90% of the lowest reading
+  measured with the bus up. See MIN_BUS_VOLTAGE_V, including why it is measured
+  over energised frames only and why it replaced the drive's own 10.5 V trip.
+- overvoltage_bound: board_vbus_voltage > 55.39V, fatal - 110% of the highest
+  measured, and below the drive's own 64 V trip so the rulebook ends the run
+  first. The rail rises on regen, which nothing bounded before. See
+  MAX_BUS_VOLTAGE_V.
+- in_power_limit_2 is no longer bounded. It was recorded-not-fatal to find out
+  how often this stand leaves the supply's 420 W envelope; two 1800 lb runs
+  answered ~45-49 brief excursions an hour, the longest 43 ms, which made every
+  healthy run record FAIL for a direction reversal. Still recorded in the
+  cpx400dp stream, just no longer deciding pass/fail - see the note above
+  MIN_BUS_VOLTAGE_V.
 - overtemperature_bound_<n>: temperature_<n>_c > 80C on every LIVE
   thermocouple channel, fatal, debounced 5s.
 
@@ -77,6 +84,12 @@ main_execution actually does:
   lost sensor. Past that window it still stops the run: a thermocouple
   that has come out reads FAULT forever.
 
+- cycle_time_bound: cycle_time_s > 34s, fatal, no persistence. Not a hardware
+  channel: CycleBrakeEnduranceTest publishes each completed cycle's duration as
+  run state. A cycle that slows is how a jam or a current-limited axis first
+  shows itself, and CYCLE_VELOCITY_TOLERANCE is wide enough to hide it. Sized
+  ~19% above the slowest of 308 measured cycles - see MAX_CYCLE_TIME_S, which
+  also says why it cannot catch a cycle that never finishes.
 - stopping_distance_bound: stopping_distance_m > 3.25, fatal, no
   persistence. Not a hardware channel: brake_from_speed() publishes each
   brake event's stopping distance as run state, and the runner merges
@@ -108,148 +121,55 @@ from __future__ import annotations
 from asimov.rulebook import Bound, Rulebook
 
 MAX_BUS_CURRENT_A = 12.0
-"""Fatal ceiling on the ODrive's DC bus current.
-
-80% of the highest draw measured on this stand: a 1800 lb cycling run peaked at
-14.97 A, against a median of 5.3 A and a p95 of 9.9 A. Set from what the stand
-does rather than from what the supply can deliver, so it sits inside the duty
-rather than above everything the rail can reach.
-
-Signed, not magnitude: regen ran to -7.74 A on the same run and an upper bound
-ignores it, which is right - current flowing back into the supply is not the
-failure this guards.
-
-WHETHER IT CAN ENGAGE IS STILL OPEN. Sustaining this needs more than the supply's
-420 W envelope allows at 48 V, which caps a steady draw at 8.75 A, so a long
-enough overdraw sags the rail and undervoltage_bound catches it first. What
-reaching 14.97 A at all shows is that bus capacitance covers brief peaks; whether
-one can be held for BUS_CURRENT_PERSISTENCE_S is unmeasured."""
+"""Fatal ceiling on DC bus current. 80% of the highest draw measured at 1800 lb
+(14.97 A peak); signed, so regen does not trip it."""
 
 BUS_CURRENT_PERSISTENCE_S = 42.0
-"""How long board_ibus must stay above MAX_BUS_CURRENT_A before the run stops.
-
-150% of the longest stroke cycle measured on this stand - 27.8 s at 1800 lb,
-giving 41.7 s, rounded up - so a whole cycle of normal duty, peaks and all, cannot
-trip it. Only a draw that outlasts the motion producing it can.
-
-Cleared the moment the current drops back, so this is a continuous stretch and
-not a total. The same run's longest continuous stretch above MAX_BUS_CURRENT_A
-was 0.19 s, against 0.32% of frames above it at all."""
+"""Debounce for MAX_BUS_CURRENT_A: 150% of the longest measured stroke cycle, so
+a whole cycle of normal duty cannot trip it."""
 
 MAX_MOTOR_CURRENT_A = 17.0
-"""Motor-phase current, either direction, above which the axis is doing something
-other than moving the load.
-
-NOT A HEADROOM BOUND, and this is why the number looks wrong. Normal duty at 1800 lb
-sits ABOVE it: |Iq| over a 2169 m run had a median of 17.84 A and a p95 of 18.19 A
-against an 18.0 A soft max, with 65% of frames past 17 A. What separates duty from
-trouble here is not the height of the current but how long it is held - so the whole
-bound is really MOTOR_CURRENT_PERSISTENCE_S, and this is just the floor above which
-the clock is allowed to run.
-
-Signed both ways, because Iq's sign is the direction of travel and a stall is a stall
-going either way - the same run ran -18.79 A to +18.90 A. Magnitude, in effect, but
-expressed as two limits because that is what the evaluator compares.
-
-What it catches: an axis pushing something that will not move. The 2026-08-25 14:23
-run drove into a mechanical stop and held 18.0 A at zero velocity with -3.44 Nm for
-the 19 s until a person stopped it. Nothing in the rulebook or the test noticed."""
+"""Fatal phase-current limit, bounded in both directions. A STALL DETECTOR, not
+headroom: normal 1800 lb duty sits above this for 65% of frames."""
 
 MOTOR_CURRENT_PERSISTENCE_S = 21.0
-"""How long |motor_foc_iq_measured| must stay above MAX_MOTOR_CURRENT_A before the
-run stops.
-
-150% of one leg of the stroke - 14.0 s median over 180 legs at 1800 lb, giving 21.0 s
-- so no single leg of normal duty, current held the whole way, can trip it. Only a
-current that outlasts the motion producing it can.
-
-The measured margin is better than that ratio suggests. Cleared the moment the
-current drops back, so this is a continuous stretch and not a total, and the
-turnaround at each end of the stroke breaks the stretch: the same run's longest
-continuous stretch above 17 A was 9.58 s, less than half of this. A stall does not
-get that reprieve, which is the whole distinction being drawn."""
+"""Debounce for MAX_MOTOR_CURRENT_A: 150% of one leg (14.0 s median), against a
+measured worst healthy stretch of 9.58 s."""
 
 MAX_DISTANCE_SINCE_CORRECTION_M = 1000.0
-"""How far the load may travel without the camera re-referencing the axis.
+"""Fatal ceiling on travel since the camera last re-referenced the axis. Bounds
+how long the correction may go on not working, not drift itself."""
 
-NOT A BOUND ON DRIFT, which this test does not measure. It bounds how long the thing
-that REMOVES the drift may go on not working. A bumped camera, a turnaround that stops
-reaching the marker, a lens that fogs: corrections stop, the load resumes walking
-exactly as it did before, and nothing else on this stand can see it - the encoder is on
-the motor.
+MIN_BUS_VOLTAGE_V = 33.43
+"""Fatal floor on the motor bus: 90% of the lowest reading measured with the bus
+up (37.14 V). An 11% margin, undebounced - one sag ends the run."""
 
-A first cut, deliberately loose. Corrections land on most cycles, and a cycle covers
-24.3 m, so this is about 41 consecutive cycles of seeing nothing: an occasional miss
-cannot reach it and a camera that has stopped working entirely gets there in under
-20 minutes.
+MAX_BUS_VOLTAGE_V = 55.39
+"""Fatal ceiling on the motor bus: 110% of the highest measured (50.36 V, the
+rail rises on regen). Below the drive's own 64 V trip, so this fires first."""
 
-Sized by what the clearance can absorb rather than by what is normal. Slip runs about
-305 mm per km against a floor mark, so 1000 m is roughly 0.3 m of uncorrected walk
-against the 0.59 m between the measured overshoot peak and the mechanical stop. Twice
-this would spend all of it, and what that looks like is the 2026-08-25 14:23 run:
-1800 lb into a hard stop at the current limit.
-
-No persistence, because the channel cannot spike - it rises monotonically between
-corrections and is reset to zero by one."""
-
-IN_POWER_LIMIT_EXPECTED = False
-"""What in_power_limit_2 should read: the motor bus inside the supply's power
-envelope.
-
-RECORDED, NOT FATAL. This is the channel that actually reports the limit
-MAX_BUS_CURRENT_A cannot reach - at 48 V the supply's 420 W envelope caps a steady
-draw at 8.75 A, and past it the output goes unregulated and the rail sags rather
-than the current climbing. Whether that should end a run is not yet decided, and
-deciding it needs to know how often the stand does it: a non-fatal bound publishes
-in_power_limit_2_status and puts every transition on the run's timeline, which is
-the measurement that answers it. undervoltage_bound is still what stops the run if
-the sag gets deep enough to matter.
-
-Not debounced. Across the 5350 cycling frames measured at 1800 lb this never went
-true, so there is no flapping to suppress and every hit is worth seeing.
-
-THE CHANNEL ITSELF IS MARKED UNVERIFIED in cpx400dp_channels.py - it is bit 4 of
-LSR2, and nothing has confirmed the bit means what the manual says. A bound that is
-only recorded is the right place to find that out.
-
-The supply's stream has to be one of the streams a test hands runner.start(), or
-this bound is evaluated against no frames and reports a clean pass forever."""
+MAX_CYCLE_TIME_S = 34.0
+"""Fatal ceiling on one completed stroke cycle: ~19% above the slowest of 308
+measured (28.59 s). Catches a slow cycle, not a hung one."""
 
 MAX_STOPPING_DISTANCE_M = 3.25
-"""How far the load may travel after the brake is commanded, measured from the
-command rather than from when the brake bites - so it includes the coast through
-BRAKE_SETTLE_S, which at the brake test's engagement speed is up to 0.18 m of
-it."""
+"""Fatal ceiling on brake stopping distance - the clearance above the top of the
+stroke."""
 
 MAX_TEMPERATURE_C = 80.0
-"""Fatal ceiling for every wired thermocouple."""
+"""Fatal thermal ceiling, applied to every wired thermocouple."""
 
 TC_DROPOUT_GRACE_S = 10.0
-"""How long a thermocouple may report no reading before the run stops.
-
-Ten times the framework default, because this DAQ drops samples: it reports FAULT
-for a channel it cannot read that instant, and a wired thermocouple on this stand
-has been seen doing that for a single frame in a twelve-minute run. A window this
-wide costs ten seconds of thermal supervision in the worst case, which is
-affordable on a quantity that moves as slowly as temperature - the bound it guards
-already waits five seconds before believing a rise.
-
-What it still catches, and must: a thermocouple pulled out or broken, which reads
-FAULT forever rather than for a frame."""
+"""How long a thermocouple may report no value before that stops the run. This
+DAQ drops the odd sample; a channel that has come out reads FAULT forever."""
 
 TC_PERSISTENCE_S = 5.0
-"""How long a channel must stay above MAX_TEMPERATURE_C before the run stops -
-roughly 45 consecutive samples at the DAQ's 9 Hz. See this module's docstring for
-why a thermal bound can afford it and the bus bounds cannot."""
+"""Debounce for MAX_TEMPERATURE_C. Thermocouples spike from electrical noise, and
+thermal mass is slow enough that 5 s of genuine overtemperature is affordable."""
 
 LIVE_TC_CHANNELS = (5, 6, 7, 8)
-"""Which of the DAQ's eight inputs have a thermocouple on them.
-
-Stand configuration rather than a property of the device: channels 1-4 read
-FAULT because nothing is connected to them, and a numeric bound on a channel
-reporting no value stops the run once TC_DROPOUT_GRACE_S has passed (see this
-module's docstring). Wire another thermocouple and add its channel here; unplug
-one and remove it, or the run ends inside the first fifteen seconds."""
+"""Which thermocouples are wired. STAND CONFIGURATION: bounding an unconnected
+channel reads None, which is unevaluable, which stops the run."""
 
 ENDURANCE_CYCLE_TEST_NAME = "endurance_cycle_test"
 MANUAL_TEST_NAME = "manual_test"
@@ -284,19 +204,26 @@ YDRIVE_RULEBOOK = Rulebook(
         ),
         Bound(
             channel="board_vbus_voltage",
-            lower=10.5,
+            lower=MIN_BUS_VOLTAGE_V,
             name="undervoltage_bound",
             fatal=True,
         ),
         Bound(
-            channel="in_power_limit_2",
-            expected=IN_POWER_LIMIT_EXPECTED,
-            name="power_envelope_bound",
+            channel="board_vbus_voltage",
+            upper=MAX_BUS_VOLTAGE_V,
+            name="overvoltage_bound",
+            fatal=True,
         ),
         Bound(
             channel="distance_since_correction_m",
             upper=MAX_DISTANCE_SINCE_CORRECTION_M,
             name="marker_correction_bound",
+            fatal=True,
+        ),
+        Bound(
+            channel="cycle_time_s",
+            upper=MAX_CYCLE_TIME_S,
+            name="cycle_time_bound",
             fatal=True,
         ),
         Bound(

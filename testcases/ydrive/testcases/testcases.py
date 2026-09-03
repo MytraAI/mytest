@@ -39,6 +39,7 @@ from ..rulebooks.ydrive_rulebook import (
 )
 from .base_ydrive_test import BaseYdriveTest
 from testcases.teststeps.operator import prompt_for_run_details
+from testcases.utils import Stopwatch
 from ..teststeps.teststeps import (
     MAX_LOAD_VELOCITY_LIMIT,
     BRAKE_TRIGGER_VELOCITY_LIMIT,
@@ -440,6 +441,11 @@ class CycleBrakeEnduranceTest(_BrakingYdriveTest):
             # start line, which is where a brake event has to begin.
             brake_owed_at_m = (self.brake_cycles + 1) * self._brake_interval_m
             while self.total_distance_m < brake_owed_at_m:
+                # Timed over the whole body, which is exactly one cycle: down to the
+                # top and back to the start line. Brake events sit outside this loop
+                # on purpose, so the ~12 s one of those adds never lands in a cycle
+                # time and never trips MAX_CYCLE_TIME_S.
+                cycle_clock = Stopwatch()
                 # The leg to the top is the one the camera watches - see
                 # MARKER_POSITION. Watched all the way rather than read at the end,
                 # because the fixture crosses the view during the turnaround and is
@@ -451,6 +457,11 @@ class CycleBrakeEnduranceTest(_BrakingYdriveTest):
                 # The body still ENDS at the start line, which is where a brake
                 # event has to begin.
                 cycle_leg(self, self.START_POSITION)
+                # Published after the cycle closes, so it is the time of a cycle that
+                # actually completed. A cycle that never finishes never publishes and
+                # so never trips the bound - that one is move_to()'s arrival timeout
+                # to catch, not this. See MAX_CYCLE_TIME_S.
+                self.set_state("cycle_time_s", cycle_clock.elapsed_s())
                 logger.info(
                     "test %s: %.1f m travelled, brake event %d owed at %.0f m",
                     self.test_id, self.total_distance_m, self.brake_cycles + 1, brake_owed_at_m,

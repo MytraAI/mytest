@@ -93,4 +93,16 @@ DEFAULT_STATE: Dict[str, Any] = {
     # file's header from the union of its first frames and drops channels that
     # appear later, and neither of these is published until the stand is open and
     # the load has moved.
+    "cycle_time_s": 0.0,
+    # How long the last full stroke cycle took, published by
+    # CycleBrakeEnduranceTest at the end of each one. ydrive_rulebook bounds it -
+    # see MAX_CYCLE_TIME_S - because a cycle that slows is how a jam, rising
+    # friction or a current-limited axis shows itself on a test built to run
+    # unattended for months, and nothing else on this stand reports it.
+    #
+    # Seeded 0.0 rather than None for the reason stopping_distance_m is: a numeric
+    # bound on a channel carrying no value is UNEVALUABLE, which stops a run, so
+    # None here would abort every ydrive run on its first frame. Every ydrive test
+    # carries the channel; only the cycling one ever writes it, and 0.0 reads as
+    # "no cycle completed yet" while satisfying the bound.
 }
