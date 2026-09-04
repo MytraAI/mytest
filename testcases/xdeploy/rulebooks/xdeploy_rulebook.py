@@ -131,14 +131,10 @@ has come out reads FAULT forever."""
 
 LIVE_TC_CHANNELS = (1, 2)
 """Which thermocouple inputs are wired on this stand, and so the only ones
-bounded.
-
-CONFIRMED AGAINST THE HARNESS on 2026-09-03: read directly off the DAQ on COM7,
-channels 1 and 2 carried 31.3 C and 34.1 C and channels 3-8 all reported FAULT.
-Stand configuration, so unplug or move a thermocouple and this has to change with
-it. Getting it wrong fails loudly rather than quietly, which is the one mercy: a
-bound on an unwired channel is unevaluable and stops the run on its first frame,
-naming the channel."""
+bounded. Stand configuration: unplug or move a thermocouple and this has to
+change with it. Getting it wrong fails loudly rather than quietly - a bound on an
+unwired channel is unevaluable and stops the run on its first frame, naming the
+channel."""
 
 BASE_XDEPLOY_TEST_NAME = "base_xdeploy_test"
 MANUAL_TEST_NAME = "xdeploy_manual_test"
