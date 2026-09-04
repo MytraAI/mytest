@@ -75,6 +75,10 @@ class CycleTest(BaseXdeployTest):
         self.cycle_count = 0
         """Cycles COMPLETED - advanced only once back at FULL_RETRACT, so it
         describes the same work as the travel beside it."""
+        self.thermal_waits = 0
+        """THERMAL_WAIT_S waits this run entered to cool - the duty the stand lost
+        to temperature, where cycle_count is the duty it achieved. Counted on entry,
+        so a run stopped inside a wait still records it."""
         self._homed = False
         """Whether homing found the stop. Until it has, no absolute target on
         this axis means anything, and teardown has nowhere to send the load."""
@@ -88,6 +92,7 @@ class CycleTest(BaseXdeployTest):
         return {
             **self.run_details,
             "cycle_count": self.cycle_count,
+            "thermal_waits": self.thermal_waits,
             "total_travel_turns": self.total_travel_turns,
             "full_retract_turns": FULL_RETRACT,
             "full_deploy_turns": FULL_DEPLOY,

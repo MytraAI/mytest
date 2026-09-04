@@ -9,6 +9,8 @@ declared elsewhere, which is the point - a second copy of a limit is a limit tha
 """
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from testbeds.zdrive_testbed.zdrive_testbed import METERS_PER_TURN, turns_to_metres
@@ -61,6 +63,9 @@ class ThermalCase:
         self.testbed = stand
         self.state = {}
         self.waited = []
+        self.thermal_waits = 0
+        """The run's total, which the step keeps itself - what a real test case
+        that cycles declares."""
 
     def set_state(self, name, value):
         self.state[name] = value
@@ -386,9 +391,9 @@ def test_the_wait_is_a_named_step_so_a_still_stand_is_not_reported_as_moving():
     assert case.state["current_step"] == "wait_for_thermal_headroom"
 
 
-def test_the_wait_count_is_published_once_per_outcome():
-    """One write per path. It was written twice per iteration, which published the same
-    number to the same channel back to back for no reason."""
+def test_the_wait_count_is_published_once_per_wait_and_not_otherwise():
+    """One write per wait. A call that never waited has nothing to say: the run's
+    total has not moved, and writing it again would only overwrite it."""
     stand = FakeStand(fet=30.0)
     case = ThermalCase(stand)
     writes = []
@@ -396,7 +401,11 @@ def test_the_wait_count_is_published_once_per_outcome():
     case.set_state = lambda name, value: (writes.append(name), real(name, value))[1]
 
     wait_for_thermal_headroom(case)
+    assert writes.count("thermal_waits") == 0
 
+    stand.fet = 75.0
+    case.wait_for = lambda seconds: setattr(stand, "fet", 40.0)
+    wait_for_thermal_headroom(case)
     assert writes.count("thermal_waits") == 1
 
 
@@ -430,3 +439,83 @@ def test_only_loaded_holds_are_counted_and_the_name_says_so():
     the second is wear."""
     assert "loaded_brake_holds" in DEFAULT_STATE
     assert "brake_holds" not in DEFAULT_STATE
+
+
+def test_the_published_count_is_the_runs_total_not_one_calls():
+    """The count spans the run, not the call it was counted in: a stand stalling
+    once every fifty cycles is a duty problem only a total makes visible."""
+    stand = FakeStand(fet=75.0)
+    case = ThermalCase(stand)
+    case.wait_for = lambda seconds: setattr(stand, "fet", 40.0)
+
+    assert wait_for_thermal_headroom(case) == 1
+    stand.fet = 75.0
+    assert wait_for_thermal_headroom(case) == 1
+
+    assert case.state["thermal_waits"] == 2, "the second wait restarted the count"
+    assert case.thermal_waits == 2, "the channel and the verdict must not disagree"
+
+
+def test_a_cycle_that_did_not_wait_does_not_clear_the_total():
+    """A cool cycle publishes nothing, so it cannot put its own zero over a total
+    that earlier cycles paid for."""
+    stand = FakeStand(fet=75.0)
+    case = ThermalCase(stand)
+    case.wait_for = lambda seconds: setattr(stand, "fet", 40.0)
+    wait_for_thermal_headroom(case)
+
+    assert wait_for_thermal_headroom(case) == 0
+    assert case.state["thermal_waits"] == 1, "a cool cycle wiped the run's total"
+
+
+def test_a_run_stopped_inside_a_wait_keeps_the_wait():
+    """check_should_continue() raises out of the wait below, so the count has to be
+    taken as the wait begins rather than once the step returns."""
+    stand = FakeStand(fet=75.0)
+    case = ThermalCase(stand)
+
+    def stop_during_the_wait(seconds):
+        raise RuntimeError("stop requested")
+
+    case.wait_for = stop_during_the_wait
+
+    with pytest.raises(RuntimeError):
+        wait_for_thermal_headroom(case)
+
+    assert case.thermal_waits == 1
+    assert case.state["thermal_waits"] == 1
+
+
+def test_the_run_records_its_thermal_waits_in_the_verdict():
+    """A total nothing stores is a total nobody can query a finished run for."""
+    test = CycleBrakeHoldTest(require_engine=False)
+
+    assert test.result_metadata()["thermal_waits"] == 0
+
+    test.thermal_waits = 7
+    assert test.result_metadata()["thermal_waits"] == 7
+
+
+def test_the_wait_warning_renders_and_names_both_counts(caplog):
+    """The warning fires only on a hot stand, so a format argument that did not
+    match would first be seen on a stand rather than here."""
+    case = ThermalCase(FakeStand(fet=75.0))
+    case.thermal_waits = 4
+    case.wait_for = lambda seconds: setattr(case.testbed, "fet", 30.0)
+
+    with caplog.at_level(logging.WARNING):
+        wait_for_thermal_headroom(case)
+
+    holding = [r for r in caplog.records if "holding at the bottom" in r.getMessage()]
+    assert len(holding) == 1
+    assert "wait 1 of this cycle, 5 in the run" in holding[0].getMessage()
+
+
+def test_the_cycle_loop_leaves_the_count_to_the_step():
+    """One owner. A loop that also added `waits` would count every wait twice, and
+    the step is the only place that knows a wait happened before it finished."""
+    import inspect
+
+    source = inspect.getsource(CycleBrakeHoldTest.main_execution)
+    assert "wait_for_thermal_headroom" in source, "checking the wrong function"
+    assert "thermal_waits" not in source

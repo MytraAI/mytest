@@ -363,10 +363,11 @@ def temperatures_need_a_wait(test_case: BaseXdeployTest) -> Optional[str]:
 
 @step
 def wait_for_thermal_headroom(test_case: BaseXdeployTest) -> int:
-    """Block until nothing is too hot to cycle, and report how many waits it took.
+    """Block until nothing is too hot to cycle, and report the waits this call made.
 
-    Unbounded deliberately: a stand that cannot cool has a collapsed cycle rate
-    rather than a failed run, and thermal_waits is what keeps that visible.
+    The run's total is kept on the test case and published from here. Unbounded
+    deliberately: a stand that cannot cool has a collapsed cycle rate rather than
+    a failed run, and thermal_waits is what keeps that visible.
 
     CALLED AT FULL_RETRACT AND NOWHERE ELSE. The axis stays armed through the
     wait, but the load is on the ground there and the actuator is unloaded, so a
@@ -375,16 +376,21 @@ def wait_for_thermal_headroom(test_case: BaseXdeployTest) -> int:
     while True:
         objection = temperatures_need_a_wait(test_case)
         if objection is None:
-            test_case.set_state("thermal_waits", waits)
             if waits:
                 logger.info("test %s: cool enough to cycle after %d wait(s)",
                             test_case.test_id, waits)
             return waits
         waits += 1
-        test_case.set_state("thermal_waits", waits)
+        # Banked on the test case as the wait begins, not by the caller once this
+        # returns: check_should_continue() raises out of the wait below on a stop,
+        # and a wait the verdict never heard about is one the run did not record.
+        test_case.thermal_waits += 1
+        test_case.set_state("thermal_waits", test_case.thermal_waits)
         logger.warning(
-            "test %s: %s - holding at %.0f turns for %.0f s (wait %d)",
+            "test %s: %s - holding at %.0f turns for %.0f s "
+            "(wait %d of this cycle, %d in the run)",
             test_case.test_id, objection, FULL_RETRACT, THERMAL_WAIT_S, waits,
+            test_case.thermal_waits,
         )
         test_case.wait_for(THERMAL_WAIT_S)
 

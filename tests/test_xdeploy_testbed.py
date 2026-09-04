@@ -13,6 +13,7 @@ wrong in ways a live run might not reveal.
 from __future__ import annotations
 
 import inspect
+import logging
 
 import pytest
 
@@ -695,3 +696,136 @@ def test_every_channel_the_cycle_test_publishes_is_seeded():
         assert channel in DEFAULT_STATE, (
             f"{channel!r} is published but not seeded in channels.py, so the engine drops it"
         )
+
+
+# --- the thermal wait count ---------------------------------------------------
+
+
+class _FakeThermalStand:
+    def __init__(self, fet=25.0, tcs=None):
+        self.fet = fet
+        self.tcs = {1: 24.0, 2: 24.0} if tcs is None else tcs
+
+    def get_fet_temperature_c(self):
+        return self.fet
+
+    def get_tc_temperatures_c(self):
+        return dict(self.tcs)
+
+
+class _ThermalCase:
+    """The thermal decision with the run's plumbing left out."""
+
+    test_id = "fake-run"
+
+    def __init__(self, stand):
+        self.testbed = stand
+        self.state = {}
+        self.thermal_waits = 0
+        """The run's total, which the step keeps itself - what a real test case
+        that cycles declares."""
+
+    def set_state(self, name, value):
+        self.state[name] = value
+
+    def wait_for(self, seconds):
+        pass
+
+    def check_should_continue(self):
+        pass
+
+
+def test_the_published_count_is_the_runs_total_not_one_calls():
+    """The count spans the run, not the call it was counted in: a stand stalling
+    once every fifty cycles is a duty problem only a total makes visible."""
+    stand = _FakeThermalStand(fet=teststeps.FET_WAIT_C + 5)
+    case = _ThermalCase(stand)
+    case.wait_for = lambda seconds: setattr(stand, "fet", 30.0)
+
+    assert teststeps.wait_for_thermal_headroom(case) == 1
+    stand.fet = teststeps.FET_WAIT_C + 5
+    assert teststeps.wait_for_thermal_headroom(case) == 1
+
+    assert case.state["thermal_waits"] == 2, "the second wait restarted the count"
+    assert case.thermal_waits == 2, "the channel and the verdict must not disagree"
+
+
+def test_a_cycle_that_did_not_wait_does_not_clear_the_total():
+    """A cool cycle publishes nothing, so it cannot put its own zero over a total
+    that earlier cycles paid for."""
+    stand = _FakeThermalStand(fet=teststeps.FET_WAIT_C + 5)
+    case = _ThermalCase(stand)
+    case.wait_for = lambda seconds: setattr(stand, "fet", 30.0)
+    teststeps.wait_for_thermal_headroom(case)
+
+    assert teststeps.wait_for_thermal_headroom(case) == 0
+    assert case.state["thermal_waits"] == 1, "a cool cycle wiped the run's total"
+
+
+def test_the_count_rises_while_the_stand_is_still_waiting():
+    """Unbounded waiting is only survivable if it is visible while it happens."""
+    stand = _FakeThermalStand(fet=teststeps.FET_WAIT_C + 5)
+    case = _ThermalCase(stand)
+    case.thermal_waits = 4  # four already counted by earlier cycles
+    seen = []
+
+    def record_then_cool(seconds):
+        seen.append(case.state.get("thermal_waits"))
+        if len(seen) == 3:
+            stand.fet = 30.0
+
+    case.wait_for = record_then_cool
+    teststeps.wait_for_thermal_headroom(case)
+
+    assert seen == [5, 6, 7], "the total has to climb during the wait, not after it"
+
+
+def test_the_cycle_loop_leaves_the_count_to_the_step():
+    """One owner. A loop that also added `waits` would count every wait twice, and
+    the step is the only place that knows a wait happened before it finished."""
+    source = inspect.getsource(teststeps.cycle_position_forever)
+    assert "wait_for_thermal_headroom" in source, "checking the wrong function"
+    assert "thermal_waits" not in source
+
+
+def test_the_run_records_its_thermal_waits_in_the_verdict():
+    """A total nothing stores is a total nobody can query a finished run for."""
+    test = CycleTest(require_engine=False)
+
+    assert test.result_metadata()["thermal_waits"] == 0
+
+    test.thermal_waits = 7
+    assert test.result_metadata()["thermal_waits"] == 7
+
+
+def test_a_run_stopped_inside_a_wait_keeps_the_wait():
+    """check_should_continue() raises out of the wait below, so the count has to be
+    taken as the wait begins rather than once the step returns."""
+    stand = _FakeThermalStand(fet=teststeps.FET_WAIT_C + 5)
+    case = _ThermalCase(stand)
+
+    def stop_during_the_wait(seconds):
+        raise RuntimeError("stop requested")
+
+    case.wait_for = stop_during_the_wait
+
+    with pytest.raises(RuntimeError):
+        teststeps.wait_for_thermal_headroom(case)
+
+    assert case.thermal_waits == 1
+    assert case.state["thermal_waits"] == 1
+
+
+def test_the_wait_warning_renders_and_names_both_counts(caplog):
+    """The warning fires only on a hot stand, so a format argument that did not
+    match would first be seen on a stand rather than here."""
+    case = _ThermalCase(_FakeThermalStand(fet=teststeps.FET_WAIT_C + 5))
+    case.thermal_waits = 4
+    case.wait_for = lambda seconds: setattr(case.testbed, "fet", 30.0)
+
+    with caplog.at_level(logging.WARNING):
+        teststeps.wait_for_thermal_headroom(case)
+
+    holding = [r for r in caplog.records if "holding at" in r.getMessage()]
+    assert len(holding) == 1
+    assert "wait 1 of this cycle, 5 in the run" in holding[0].getMessage()
