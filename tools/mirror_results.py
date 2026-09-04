@@ -1,4 +1,4 @@
-"""Copy finished runs to the results share, filed by DUT, ticket and unit.
+"""Copy runs to the results share: finished ones filed by DUT, ticket and unit.
 
     python -m tools.mirror_results
     python -m tools.mirror_results --share-root /Volumes/SEIT/TestResults/MytestResults
@@ -24,6 +24,20 @@ WHAT IT KEYS OFF. A run is finished when its verdict.json carries
 the run's stream go quiet. That is an existing signal, not one invented
 here, and it means no handshake with anything.
 
+RUNS STILL BEING WRITTEN are copied too, so a long run can be watched
+while it happens. Those go to `_LIVE/<test_id>` and nowhere else: what a
+run is filed under lives in its verdict, and a run being written has
+none - which also means mock and example_dut runs appear there, since
+what excludes them is in a verdict too. Each pass appends the whole
+lines each file has gained, so the copy is always parseable and never
+holds a torn row. The remote file's size is how much of it has been
+sent, so a copy that was swept away is simply sent again. A live copy is
+removed once its run is filed, once its verdict says it never will be,
+or once nothing has extended it for an hour - that last one by whichever
+box notices, since a box that never came back cannot tidy up after
+itself. It is a view, not a record: the filed copy is made in full from
+the local run, and nothing is ever promoted out of `_LIVE`.
+
 WHAT STOPS TWO PASSES COLLIDING. Nothing in here does - the scheduled
 task is registered with MultipleInstances IgnoreNew, so a pass that is
 still copying when the next tick fires keeps the slot. Two passes started
@@ -31,10 +45,11 @@ by hand against the same output directory can fight over one `_partial_`;
 the loser's rename fails and is logged, and the size check means neither
 publishes a short copy, but the wasted work is real. One at a time.
 
-WHAT MAKES IT SAFE TO RUN AGAIN. It never deletes or overwrites a run, on
-either side - the only things it removes are its own leftovers: a
-`_partial_` directory from an interrupted pass, and the probe file it
-writes to find out whether the share can be written to at all.
+WHAT MAKES IT SAFE TO RUN AGAIN. It never deletes or overwrites a filed
+run, on either side - the only things it removes are a `_partial_`
+directory from an interrupted pass, the probe file it writes to find out
+whether the share can be written to at all, and live copies, which are
+disposable by construction.
 The share is the state: a run is already mirrored if its destination
 directory exists, so there is no ledger to lose when a box is reimaged,
 and "is this run copied?" is answerable by looking, from any machine. A
@@ -49,6 +64,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -110,6 +126,25 @@ SKIP_DUTS = frozenset({"example_dut"})
 """DUT packages whose runs are not mirrored. example_dut is scaffolding for
 writing a new DUT package - it measures nothing, and a top-level directory for
 it on the share is a permanent invitation to wonder what is in it."""
+
+LIVE_ROOT = "_LIVE"
+"""Where a run is copied while it is still being written, one directory per
+test_id. Underscore-led so it never reads as a DUT of that name."""
+
+LIVE_QUIET_S = 600.0
+"""How long a run with no verdict may go untouched before it stops being copied
+live. A running engine flushes every second, so this is margin, not a deadline."""
+
+LIVE_SWEEP_S = 3600.0
+"""How long a live copy may go unextended before any box may remove it. Covers
+the copies of a box that was reimaged, or lost the share, mid-run."""
+
+RAW_APPEND_LIMIT = 1_000_000
+"""How much unsent data with no newline in it is sent as-is rather than held
+for a line ending that may never come."""
+
+_SCAN_BLOCK = 65_536
+_COPY_BLOCK = 1 << 20
 
 
 def read_verdict_data(path: Path) -> Optional[Dict]:
@@ -290,6 +325,226 @@ def pending_runs(
     return [(run, dest) for _, run, dest in sorted(found, key=lambda item: item[0])]
 
 
+def live_destination(share_root: Path, test_id: str) -> Path:
+    """Where a run being written is copied. Named by test_id alone - the DUT,
+    ticket and serial a run is filed under are not knowable until its verdict."""
+    return Path(share_root) / LIVE_ROOT / safe_path_component(test_id, NO_TEST_ID)
+
+
+def newest_mtime(root: Path) -> Optional[float]:
+    """When anything under `root` was last written, or None if nothing was."""
+    times = []
+    for path in root.rglob("*"):
+        try:
+            if path.is_file():
+                times.append(path.stat().st_mtime)
+        except OSError:
+            continue
+    return max(times) if times else None
+
+
+def live_runs(output_dir: Path, now: Optional[float] = None) -> List[Path]:
+    """Run directories with no verdict that something is still writing to.
+
+    Mock and example_dut runs are among them: what excludes those from the filed
+    tree lives in a verdict, and a run being written has none."""
+    root = runs_dir(output_dir)
+    if not root.is_dir():
+        return []
+    cutoff = (time.time() if now is None else now) - LIVE_QUIET_S
+    found = []
+    for run in root.iterdir():
+        if not run.is_dir() or (run / VERDICT_FILENAME).is_file():
+            continue
+        touched = newest_mtime(run)
+        if touched is not None and touched > cutoff:
+            found.append(run)
+    return sorted(found)
+
+
+def _same_first_line(source: Path, dest: Path) -> bool:
+    """Whether both files still begin with the same line - a CSV's header."""
+    try:
+        with source.open("rb") as a, dest.open("rb") as b:
+            return a.readline(_SCAN_BLOCK) == b.readline(_SCAN_BLOCK)
+    except OSError:
+        return False
+
+
+def _already_sent(source: Path, dest: Path) -> int:
+    """How much of `source` the share already holds, and 0 when it has to start
+    over - a copy swept out from under this box leaves nothing to append to."""
+    try:
+        remote = dest.stat().st_size
+    except OSError:
+        return 0
+    if remote > source.stat().st_size or not _same_first_line(source, dest):
+        return 0
+    return remote
+
+
+def _last_line_end(handle, start: int, size: int) -> int:
+    """Where the last complete line before `size` ends, or `start` if there is
+    none. Scanned backwards so a gigabyte file costs one block, not a read."""
+    pos = size
+    while pos > start:
+        step = min(_SCAN_BLOCK, pos - start)
+        pos -= step
+        handle.seek(pos)
+        cut = handle.read(step).rfind(b"\n")
+        if cut >= 0:
+            return pos + cut + 1
+    return start
+
+
+def append_file(source: Path, dest: Path) -> int:
+    """Extend `dest` with whole lines `source` has gained, and say how many bytes.
+
+    Only complete lines: the engine's writer flushes mid-row, and a torn row on
+    the share is one a reader parses wrongly rather than fails on."""
+    size = source.stat().st_size
+    sent = _already_sent(source, dest)
+    if size <= sent:
+        return 0
+    with source.open("rb") as handle:
+        end = _last_line_end(handle, sent, size)
+        if end == sent:
+            if size - sent < RAW_APPEND_LIMIT:
+                return 0
+            end = size  # nothing line-shaped, and too much of it to keep holding
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        handle.seek(sent)
+        with dest.open("ab" if sent else "wb") as out:
+            if sent and out.tell() != sent:
+                # Swept between the stat above and this open. Appending now would
+                # write the tail into an empty file; the next pass sends it whole.
+                return 0
+            remaining = end - sent
+            while remaining > 0:
+                block = handle.read(min(_COPY_BLOCK, remaining))
+                if not block:
+                    break
+                out.write(block)
+                remaining -= len(block)
+    return end - sent
+
+
+def append_run(source: Path, dest: Path) -> int:
+    """Extend the live copy of one run, device directories and all.
+
+    Re-walked every pass rather than remembered, since a device directory
+    appears whenever its driver starts."""
+    appended = 0
+    for path in sorted(source.rglob("*")):
+        if path.is_file():
+            appended += append_file(path, dest / path.relative_to(source))
+    return appended
+
+
+def _live_names(share_root: Path) -> List[str]:
+    """Every live copy on the share, by directory name. One listing per pass."""
+    try:
+        return [path.name for path in (Path(share_root) / LIVE_ROOT).iterdir() if path.is_dir()]
+    except OSError:
+        return []
+
+
+def spent_live_copies(
+    output_dir: Path, share_root: Path, now: Optional[float] = None
+) -> List[Path]:
+    """This box's live copies whose run is done with them: filed, never to be
+    filed, or gone quiet. A name this box has no run for belongs to another."""
+    on_share = set(_live_names(share_root))
+    root = runs_dir(output_dir)
+    if not on_share or not root.is_dir():
+        return []
+    cutoff = (time.time() if now is None else now) - LIVE_QUIET_S
+    spent = []
+    for run in sorted(root.iterdir()):
+        name = safe_path_component(run.name, NO_TEST_ID)
+        if not run.is_dir() or name not in on_share:
+            continue
+        verdict_file = run / VERDICT_FILENAME
+        if not verdict_file.is_file():
+            touched = newest_mtime(run)
+            if touched is None or touched <= cutoff:
+                spent.append(live_destination(share_root, run.name))
+            continue
+        verdict = read_verdict_data(verdict_file)
+        if verdict is None:
+            continue  # unreadable: leave the live copy as the only thing to look at
+        if skip_reason(verdict) or destination(share_root, verdict, run.name).exists():
+            spent.append(live_destination(share_root, run.name))
+    return spent
+
+
+def sweep_live_copies(share_root: Path, now: Optional[float] = None) -> List[Path]:
+    """Live copies nothing has extended for LIVE_SWEEP_S, whichever box left them.
+
+    The only thing here that touches another box's directory, and it is what
+    clears the copies of a box that never came back."""
+    root = Path(share_root) / LIVE_ROOT
+    cutoff = (time.time() if now is None else now) - LIVE_SWEEP_S
+    stale = []
+    for name in _live_names(share_root):
+        live = root / name
+        try:
+            touched = newest_mtime(live)
+            if touched is None:
+                touched = live.stat().st_mtime
+        except OSError:
+            continue
+        if touched <= cutoff:
+            stale.append(live)
+    return stale
+
+
+def _remove_live(paths: List[Path], why: str, errors: List[str]) -> None:
+    for path in paths:
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            continue  # another box swept it first, which is the outcome wanted
+        except OSError as exc:
+            errors.append(f"{path.name}: {exc}")
+            continue
+        logger.info("removed live copy of %s (%s)", path.name, why)
+
+
+def extend_live_copies(
+    output_dir: Path, share_root: Path, dry_run: bool = False
+) -> Tuple[int, List[str]]:
+    """Extend every live run's copy. Returns how many are live, and what failed."""
+    live = live_runs(output_dir)
+    errors: List[str] = []
+    for run in live:
+        dest = live_destination(share_root, run.name)
+        if dry_run:
+            logger.info("would extend %s -> %s", run.name, dest)
+            continue
+        try:
+            appended = append_run(run, dest)
+        except OSError as exc:
+            logger.warning("%s: live copy failed: %s", run.name, exc)
+            errors.append(f"{run.name}: {exc}")
+            continue
+        logger.info("extended %s by %d byte(s)", run.name, appended)
+    return len(live), errors
+
+
+def tidy_live_copies(output_dir: Path, share_root: Path) -> List[str]:
+    """Drop the live copies nothing needs any more, and sweep what no box is
+    extending. Runs after the filing pass, so a run leaves `_LIVE` as it lands."""
+    errors: List[str] = []
+    try:
+        _remove_live(spent_live_copies(output_dir, share_root), "run finished", errors)
+        _remove_live(sweep_live_copies(share_root), "nothing is extending it", errors)
+    except OSError as exc:
+        logger.warning("could not tidy live copies: %s", exc)
+        errors.append(str(exc))
+    return errors
+
+
 def run_once(output_dir: Path, share_root: Path, dry_run: bool = False) -> MirrorStatus:
     """One pass. Returns what to publish about it - and publishing happens even
     when the share is unreachable, because "unreachable" is the single most
@@ -299,8 +554,14 @@ def run_once(output_dir: Path, share_root: Path, dry_run: bool = False) -> Mirro
         logger.warning("results share unreachable (%s): %s", share_root, unreachable)
         return MirrorStatus(
             updated_at=time.time(), share_root=str(share_root), reachable=False,
-            outstanding=len(_countable(output_dir, share_root)), error=unreachable,
+            outstanding=len(_countable(output_dir, share_root)),
+            live=len(live_runs(output_dir)), error=unreachable,
         )
+
+    # Extending first: that work is bounded by a few minutes of new rows, and a
+    # backlog is not. Tidying waits until after the filing pass below, so a run
+    # leaves _LIVE on the same pass that puts it in the filed tree.
+    live, live_errors = extend_live_copies(output_dir, share_root, dry_run)
 
     pending = pending_runs(output_dir, share_root)
     mirrored, errors = 0, []
@@ -317,12 +578,18 @@ def run_once(output_dir: Path, share_root: Path, dry_run: bool = False) -> Mirro
         mirrored += 1
         logger.info("copied %s -> %s", run.name, dest)
 
+    if not dry_run:
+        live_errors += tidy_live_copies(output_dir, share_root)
+
     return MirrorStatus(
         updated_at=time.time(), share_root=str(share_root), reachable=True,
-        mirrored=mirrored, outstanding=len(pending) - mirrored,
+        mirrored=mirrored, outstanding=len(pending) - mirrored, live=live,
         # Capped: this ends up in a dialog, and every one of them was logged in
         # full on the way past.
         error=_summarise(errors),
+        # Kept apart from `error`: a failed live copy costs a remote view, not a
+        # record, and the operator prompt speaks only to the record.
+        live_error=_summarise(live_errors),
     )
 
 
@@ -385,10 +652,12 @@ def main() -> int:
     if not args.dry_run:
         write_status(status)
     logger.info(
-        "pass done: %d copied, %d outstanding, share %s",
-        status.mirrored, status.outstanding,
+        "pass done: %d copied, %d outstanding, %d live, share %s",
+        status.mirrored, status.outstanding, status.live,
         "reachable" if status.reachable else "UNREACHABLE",
     )
+    # live_error is deliberately not here: the task's RestartCount would retry a
+    # whole pass over a remote view, and the record it already filed was fine.
     return 0 if status.reachable and not status.error else 1
 
 
