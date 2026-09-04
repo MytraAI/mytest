@@ -452,11 +452,11 @@ def test_only_the_wired_thermocouples_are_bounded():
     """The DAQ streams eight channels and publishes None for one it cannot read.
     A numeric bound on a None is unevaluable, and the runner stops a run it
     cannot evaluate - so bounding an unconnected channel aborts every run on its
-    first frame. Only channels 1 and 2 are wired on this stand."""
+    first frame. Only channel 2 is wired on this stand."""
     from testcases.zdrive.rulebooks.zdrive_rulebook import LIVE_TC_CHANNELS
-    assert LIVE_TC_CHANNELS == (1, 2)
+    assert LIVE_TC_CHANNELS == (2,)
     bounded = {b.channel for b in ZDRIVE_RULEBOOK.bounds if b.channel.startswith("temperature_")}
-    assert bounded == {"temperature_1_c", "temperature_2_c"}
+    assert bounded == {"temperature_2_c"}
 
 
 def test_the_thermal_bounds_are_fatal_at_70c_and_tolerate_a_dropped_sample():
