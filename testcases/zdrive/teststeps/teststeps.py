@@ -590,10 +590,10 @@ def temperatures_need_a_wait(test_case: BaseZdriveTest) -> Optional[str]:
 def wait_for_thermal_headroom(test_case: BaseZdriveTest) -> int:
     """Block until nothing on the stand is too hot to lift, and report how long it took.
 
-    Returns the number of THERMAL_WAIT_S waits, so a caller can record it. Unbounded
-    deliberately: a stand that cannot cool has a collapsed cycle rate rather than a
-    failed run, and publishing the count is what keeps that visible rather than
-    silent.
+    Returns the waits this call made; the run's total is kept on the test case and
+    published from here. Unbounded deliberately: a stand that cannot cool has a
+    collapsed cycle rate rather than a failed run, and publishing the count is what
+    keeps that visible rather than silent.
 
     Called with the load on its bottom stop, the brake engaged and the axis idle -
     the only state in this cycle where waiting an arbitrary length of time costs
@@ -607,16 +607,20 @@ def wait_for_thermal_headroom(test_case: BaseZdriveTest) -> int:
     while True:
         objection = temperatures_need_a_wait(test_case)
         if objection is None:
-            test_case.set_state("thermal_waits", waits)
             if waits:
                 logger.info("test %s: cool enough to lift after %d wait(s)",
                             test_case.test_id, waits)
             return waits
         waits += 1
-        test_case.set_state("thermal_waits", waits)
+        # Banked on the test case as the wait begins, not by the caller once this
+        # returns: check_should_continue() raises out of the wait below on a stop,
+        # and a wait the verdict never heard about is one the run did not record.
+        test_case.thermal_waits += 1
+        test_case.set_state("thermal_waits", test_case.thermal_waits)
         logger.warning(
-            "test %s: %s - holding at the bottom for %.0f s (wait %d)",
-            test_case.test_id, objection, THERMAL_WAIT_S, waits,
+            "test %s: %s - holding at the bottom for %.0f s "
+            "(wait %d of this cycle, %d in the run)",
+            test_case.test_id, objection, THERMAL_WAIT_S, waits, test_case.thermal_waits,
         )
         test_case.wait_for(THERMAL_WAIT_S)
 

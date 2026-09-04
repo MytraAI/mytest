@@ -203,6 +203,10 @@ class CycleBrakeHoldTest(_LiftingZdriveTest):
         would raise partway through a cycle with the load already lifted."""
         super().__init__(test_id, use_mock, require_engine=require_engine)
         self.loaded_brake_holds = 0
+        self.thermal_waits = 0
+        """THERMAL_WAIT_S waits this run entered to cool - the duty the stand lost
+        to temperature, where lift_cycles is the duty it achieved. Counted on entry,
+        so a run stopped inside a wait still records it."""
         self.lift_cycles = 0
         """How many cycles this run has COMPLETED - the drive's duty, where
         loaded_brake_holds is the brake's. Completed rather than begun, so it describes
@@ -234,6 +238,7 @@ class CycleBrakeHoldTest(_LiftingZdriveTest):
             **self.run_details,
             "loaded_brake_holds": self.loaded_brake_holds,
             "lift_cycles": self.lift_cycles,
+            "thermal_waits": self.thermal_waits,
             "hold_interval_cycles": self._hold_interval_cycles,
             "total_distance_m": self.total_distance_m,
             "top_position_turns": self.TOP_POSITION,
