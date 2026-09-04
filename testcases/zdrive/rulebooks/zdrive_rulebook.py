@@ -190,9 +190,9 @@ TC_DROPOUT_GRACE_S = 10.0
 the odd sample, and one dropped sample is not a lost sensor; a thermocouple that
 has come out reads FAULT forever."""
 
-LIVE_TC_CHANNELS = (1, 2)
+LIVE_TC_CHANNELS = (2,)
 """Which thermocouple inputs are wired on this stand, and so the only ones
-bounded. Stand configuration: unplug one and this has to change with it, because
+bounded. One channel, so this is the whole of the stand's thermocouple cover. Stand configuration: unplug one and this has to change with it, because
 a numeric bound on an unread channel is unevaluable and stops every run on its
 first frame."""
 
