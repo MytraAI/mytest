@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from tools.mirror_results import (
     copy_run,
     destination,
     is_finished,
+    live_destination,
     pending_runs,
     run_once,
     skip_reason,
@@ -377,3 +379,270 @@ def test_every_warning_body_says_where_the_run_is_and_how_to_fix_it():
         said = describe_for_operator(status)
         assert "recorded on this machine either way" in said, said
         assert "Setup-StandBox.ps1 -ResultsShareOnly" in said, said
+
+
+# --- runs that are still being written --------------------------------------------
+
+
+def write_live_run(runs: Path, test_id: str, rows: str = "t,ibus\n0.0,1.2\n") -> Path:
+    """A run directory as it looks mid-run: telemetry and a log, and no verdict."""
+    run = runs / test_id
+    (run / "odrive").mkdir(parents=True)
+    (run / "odrive" / "telemetry.csv").write_text(rows)
+    (run / "odrive" / "logs.txt").write_text("driver said something\n")
+    return run
+
+
+def live_csv(share: Path, test_id: str) -> Path:
+    return live_destination(share, test_id) / "odrive" / "telemetry.csv"
+
+
+def age(path: Path, seconds: float) -> None:
+    when = time.time() - seconds
+    for item in [path, *path.rglob("*")]:
+        os.utime(item, (when, when))
+
+
+def test_a_run_being_written_is_copied_live_and_not_filed(tmp_path):
+    """The two trees are separate: nothing lands in the filed tree without a
+    verdict to file it by."""
+    share = tmp_path / "share"
+    write_live_run(tmp_path / "runs", "live-1")
+
+    status = run_once(tmp_path, share)
+
+    assert status.live == 1 and status.mirrored == 0
+    assert live_csv(share, "live-1").read_text() == "t,ibus\n0.0,1.2\n"
+    assert (live_destination(share, "live-1") / "odrive" / "logs.txt").exists()
+    assert [p.name for p in share.iterdir()] == ["_LIVE"]
+
+
+def test_a_second_pass_sends_only_what_is_new(tmp_path):
+    """The header is written once and rows are not repeated - the file on the
+    share has to be the file on the box, not a concatenation of passes."""
+    share = tmp_path / "share"
+    run = write_live_run(tmp_path / "runs", "live-1")
+    run_once(tmp_path, share)
+
+    csv = run / "odrive" / "telemetry.csv"
+    csv.write_text(csv.read_text() + "1.0,1.3\n2.0,1.4\n")
+    run_once(tmp_path, share)
+
+    assert live_csv(share, "live-1").read_text() == csv.read_text()
+
+
+def test_a_half_written_row_is_held_back_until_it_is_whole(tmp_path):
+    """The engine's writer flushes mid-row, and a torn row on the share is one a
+    reader parses wrongly rather than fails on."""
+    share = tmp_path / "share"
+    run = write_live_run(tmp_path / "runs", "live-1")
+    csv = run / "odrive" / "telemetry.csv"
+    csv.write_text(csv.read_text() + "1.0,1.")
+    run_once(tmp_path, share)
+
+    assert live_csv(share, "live-1").read_text() == "t,ibus\n0.0,1.2\n"
+
+    csv.write_text(csv.read_text() + "3\n")
+    run_once(tmp_path, share)
+
+    assert live_csv(share, "live-1").read_text() == csv.read_text()
+
+
+def test_a_file_with_no_line_ending_at_all_is_sent_once_it_is_big_enough(tmp_path):
+    """Otherwise anything that is not line-shaped is silently never copied."""
+    share = tmp_path / "share"
+    run = write_live_run(tmp_path / "runs", "live-1")
+    blob = run / "odrive" / "capture.bin"
+    blob.write_bytes(b"x" * (mirror_results.RAW_APPEND_LIMIT - 1))
+    run_once(tmp_path, share)
+
+    assert not (live_destination(share, "live-1") / "odrive" / "capture.bin").exists()
+
+    blob.write_bytes(b"x" * mirror_results.RAW_APPEND_LIMIT)
+    run_once(tmp_path, share)
+
+    assert (live_destination(share, "live-1") / "odrive" / "capture.bin").exists()
+
+
+def test_a_live_copy_swept_by_another_box_is_simply_sent_again(tmp_path):
+    """No ledger to disagree with the share: the remote file's own size is how
+    much of it has been sent, so a copy that is gone has had nothing sent."""
+    share = tmp_path / "share"
+    run = write_live_run(tmp_path / "runs", "live-1")
+    run_once(tmp_path, share)
+    shutil.rmtree(live_destination(share, "live-1"))
+
+    csv = run / "odrive" / "telemetry.csv"
+    csv.write_text(csv.read_text() + "1.0,1.3\n")
+    run_once(tmp_path, share)
+
+    assert live_csv(share, "live-1").read_text() == csv.read_text()
+
+
+def test_a_live_copy_longer_than_its_source_is_copied_afresh(tmp_path):
+    """A copy longer than the file it came from is not a prefix of it, so
+    appending would produce a file that never existed on the box.
+
+    Only length is compared - two files of the same length that differ are not
+    something the share is asked to detect."""
+    share = tmp_path / "share"
+    run = write_live_run(tmp_path / "runs", "live-1")
+    run_once(tmp_path, share)
+
+    csv = run / "odrive" / "telemetry.csv"
+    csv.write_text("t,ibus\n")
+    run_once(tmp_path, share)
+
+    assert live_csv(share, "live-1").read_text() == csv.read_text()
+
+
+def test_a_device_that_appears_mid_run_is_picked_up(tmp_path):
+    """A device directory appears whenever its driver starts, which is not
+    necessarily before the first pass."""
+    share = tmp_path / "share"
+    run = write_live_run(tmp_path / "runs", "live-1")
+    run_once(tmp_path, share)
+
+    (run / "cpx400dp").mkdir()
+    (run / "cpx400dp" / "telemetry.csv").write_text("t,v\n0.0,24.0\n")
+    run_once(tmp_path, share)
+
+    assert (live_destination(share, "live-1") / "cpx400dp" / "telemetry.csv").exists()
+
+
+def test_a_finished_run_is_filed_and_its_live_copy_removed(tmp_path):
+    """The filed copy is made in full from the local run - the live copy is a
+    view, and is dropped once there is a record."""
+    share = tmp_path / "share"
+    runs = tmp_path / "runs"
+    write_live_run(runs, "run-1")
+    run_once(tmp_path, share)
+    assert live_destination(share, "run-1").exists()
+
+    (runs / "run-1" / "verdict.json").write_text(json.dumps(verdict()))
+    status = run_once(tmp_path, share)
+
+    assert status.mirrored == 1 and status.live == 0
+    assert destination(share, verdict(), "run-1").exists()
+    assert not live_destination(share, "run-1").exists()
+
+
+def test_a_run_that_is_never_filed_still_has_its_live_copy_removed(tmp_path):
+    """What excludes a mock or an example_dut run lives in its verdict, so it is
+    copied live before anyone can tell - and nothing else would clean it up."""
+    share = tmp_path / "share"
+    runs = tmp_path / "runs"
+    write_live_run(runs, "mock-1")
+    run_once(tmp_path, share)
+    assert live_destination(share, "mock-1").exists()
+
+    (runs / "mock-1" / "verdict.json").write_text(json.dumps(verdict(used_mock=True)))
+    status = run_once(tmp_path, share)
+
+    assert status.mirrored == 0
+    assert not live_destination(share, "mock-1").exists()
+
+
+def test_a_run_nothing_is_writing_stops_being_copied_live(tmp_path):
+    share = tmp_path / "share"
+    run = write_live_run(tmp_path / "runs", "live-1")
+    run_once(tmp_path, share)
+    age(run, mirror_results.LIVE_QUIET_S + 60)
+
+    status = run_once(tmp_path, share)
+
+    assert status.live == 0
+    assert not live_destination(share, "live-1").exists()
+
+
+def test_a_live_copy_nobody_is_extending_is_swept_whoever_left_it(tmp_path):
+    """The one thing here that touches a directory this box has no run for: a
+    box that never came back cannot tidy up after itself."""
+    share = tmp_path / "share"
+    abandoned = live_destination(share, "someone-elses-run")
+    abandoned.mkdir(parents=True)
+    (abandoned / "telemetry.csv").write_text("t,ibus\n0.0,1.2\n")
+
+    run_once(tmp_path, share)
+    assert abandoned.exists(), "an hour has not passed"
+
+    age(abandoned, mirror_results.LIVE_SWEEP_S + 60)
+    run_once(tmp_path, share)
+
+    assert not abandoned.exists()
+
+
+def test_a_fresh_live_copy_of_another_box_is_left_alone(tmp_path):
+    """Sweeping is what makes cross-box deletion safe; doing it early is what
+    would make it dangerous."""
+    share = tmp_path / "share"
+    theirs = live_destination(share, "someone-elses-run")
+    theirs.mkdir(parents=True)
+    (theirs / "telemetry.csv").write_text("t,ibus\n0.0,1.2\n")
+    age(theirs, mirror_results.LIVE_QUIET_S + 60)
+
+    run_once(tmp_path, share)
+
+    assert theirs.exists(), "quiet for ten minutes is not abandoned for an hour"
+
+
+def test_a_failed_live_copy_does_not_stop_the_backlog(tmp_path, monkeypatch):
+    """A live copy costs a remote view; the backlog is the record."""
+    share = tmp_path / "share"
+    runs = tmp_path / "runs"
+    write_live_run(runs, "live-1")
+    write_run(runs, "finished-1", verdict())
+    monkeypatch.setattr(
+        mirror_results, "append_run",
+        lambda src, dest: (_ for _ in ()).throw(OSError("share went away")),
+    )
+
+    status = run_once(tmp_path, share)
+
+    assert status.mirrored == 1
+    assert "share went away" in status.live_error
+    assert status.error == "", "a live failure is not something to tell an operator"
+
+
+def test_an_operator_is_not_warned_about_live_copying(tmp_path):
+    """The dialog's headline is about the record. A remote view failing is not a
+    reason to interrupt somebody standing at a stand."""
+    healthy = MirrorStatus(time.time(), "//nas/x", True, live=1, live_error="nope")
+    assert describe_for_operator(healthy) is None
+
+
+def test_a_dry_run_appends_nothing(tmp_path):
+    share = tmp_path / "share"
+    write_live_run(tmp_path / "runs", "live-1")
+
+    status = run_once(tmp_path, share, dry_run=True)
+
+    assert status.live == 1
+    assert not live_destination(share, "live-1").exists()
+
+
+def test_a_copy_another_box_swept_first_is_not_an_error(tmp_path):
+    """Two boxes can decide to sweep the same abandoned copy in one window. The
+    loser wanted it gone and it is gone."""
+    errors = []
+    mirror_results._remove_live([tmp_path / "never-existed"], "gone", errors)
+
+    assert errors == []
+
+
+def test_a_live_failure_does_not_fail_the_pass(tmp_path, monkeypatch):
+    """The scheduled task retries a failed pass. A remote view is not worth
+    re-running a pass whose filing already succeeded."""
+    share = tmp_path / "share"
+    write_live_run(tmp_path / "runs", "live-1")
+    monkeypatch.setattr(
+        mirror_results, "append_run",
+        lambda src, dest: (_ for _ in ()).throw(OSError("share went away")),
+    )
+    monkeypatch.setattr(mirror_results, "write_status", lambda status: None)
+    monkeypatch.setattr(
+        mirror_results.sys, "argv",
+        ["mirror_results", "--share-root", str(share), "--output-dir", str(tmp_path)],
+    )
+
+    assert mirror_results.main() == 0

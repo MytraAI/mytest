@@ -63,8 +63,14 @@ class MirrorStatus:
     """Runs finished, eligible, and not yet on the share. Non-zero is normal for
     a moment and a backlog if it stays that way, which is the number worth
     putting in front of a person."""
+    live: int = 0
+    """Runs being copied to the share while they are still being written. Not a
+    backlog and never reported as one - they are unfinished by definition."""
     error: str = ""
     """What went wrong, if anything, in terms an operator can act on."""
+    live_error: str = ""
+    """What went wrong copying a run that is still being written. Deliberately
+    not shown to an operator: it costs a remote view, not a record."""
 
     def age_s(self, now: Optional[float] = None) -> float:
         return (time.time() if now is None else now) - self.updated_at
@@ -113,7 +119,9 @@ def read_status(path: Optional[Path] = None) -> Optional[MirrorStatus]:
             reachable=bool(data["reachable"]),
             mirrored=int(data.get("mirrored", 0)),
             outstanding=int(data.get("outstanding", 0)),
+            live=int(data.get("live", 0)),
             error=str(data.get("error", "")),
+            live_error=str(data.get("live_error", "")),
         )
     except (OSError, ValueError, KeyError, TypeError):
         return None
