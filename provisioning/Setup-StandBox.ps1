@@ -12,7 +12,8 @@
               nothing, USB selective suspend / PCIe ASPM / disk spindown / wireless
               power saving / Energy Saver off, per-device "turn off to save power"
               cleared, screen saver off, the automatic lock off (-KeepAutoLock to keep
-              it), and a boot-time task holding a wake lock.
+              it; an MDM-enrolled box is warned that its policy refresh puts the lock
+              back), and a boot-time task holding a wake lock.
     SSH       OpenSSH.Server installed, sshd Automatic with restart-on-failure,
               DefaultShell -> pwsh, optional public key for -TargetUser.
     Network   inbound TCP 22 open on the Private and Domain profiles (not Public),
@@ -49,6 +50,10 @@
 
     Pass this on a box that must keep locking. The cost of the default is that the box
     stays signed in unattended, and the stand account is a local administrator.
+
+    ON AN MDM-ENROLLED BOX THIS SETTING IS NOT THIS SCRIPT'S TO WIN. MDM re-applies the
+    inactivity limit within the hour whatever is written here, so the run says so and names
+    the authority to fix it in rather than reporting a success that expires.
 
 .PARAMETER ResultsShareOnly
     Establish access to the results share and register the mirror task, and do nothing
@@ -392,6 +397,29 @@ function Disable-ScreenSaver {
 $WakeFlags    = [uint32]2147483651
 $WakeRelease  = [uint32]2147483648
 
+function Get-MdmEnrollment {
+    # The real enrollment is the one carrying a discovery URL. Windows ships three
+    # placeholders - 'Deploy Authority', 'Cloud Authority', 'Local Authority' - which are
+    # present on an unmanaged box too and have none, so ProviderID alone cannot tell them
+    # apart. Returns $null when nothing manages this box.
+    Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Enrollments' -ErrorAction SilentlyContinue |
+        ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
+        Where-Object { $_.DiscoveryServiceFullURL } |
+        Select-Object -First 1
+}
+
+function Format-MdmLockWarning {
+    param($Enrollment)
+    # Named in full, because the fix is not on this box: somebody has to change the policy
+    # in whatever is named here.
+    $authority = $Enrollment.ProviderID
+    $where = try { ([uri]$Enrollment.DiscoveryServiceFullURL).Host } catch { $Enrollment.DiscoveryServiceFullURL }
+    "this box is MDM-enrolled ($authority via $where) and its policy refresh re-applies " +
+    "the machine inactivity limit within the hour - nothing written on the box holds. " +
+    "Turn the screen lock off for this device in $authority, or it keeps locking however " +
+    "often this script is run."
+}
+
 function Set-AutoLockPolicy {
     # 'Interactive logon: Machine inactivity limit'. Locks the workstation after N seconds
     # of no input, independently of screen saver and power settings - so a box with every
@@ -405,18 +433,29 @@ function Set-AutoLockPolicy {
     # setting that has to be remembered separately from the run that configures everything
     # else is one nobody remembers.
     #
-    # NOTHING ELSE MANAGES THIS VALUE, so writing the registry is enough and no policy
-    # tooling is needed. Checked on both stands: they are in a workgroup, there is no
-    # local policy template, and the setting is Not Defined in the local security
-    # database - and a value written here survived a gpupdate /force on SEIT-LT-2. Beware
-    # `secedit /export` without `/db`, which reports the live registry back and so looks
-    # like a second, independent source agreeing with it.
+    # WRITING THE REGISTRY IS NOT ENOUGH ON AN MDM-ENROLLED BOX, and every stand is
+    # enrolled. Being in a workgroup rules out a domain GPO but not MDM, which writes this
+    # policy directly and appears in neither gpresult nor the security database: on
+    # SEIT-STATION-5 a 0 written here was reverted to 1200 by the OMA-DM client 435 s
+    # later. The read-back below runs immediately and so cannot see that - it confirms the
+    # write landed, never that it will hold - which is why an enrolled box is told the
+    # lock is coming back instead of being congratulated. Beware `secedit /export` without
+    # `/db`, which reports the live registry back and so looks like a second, independent
+    # source agreeing with it.
     $key = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
     $cur = (Get-ItemProperty $key -Name InactivityTimeoutSecs -ErrorAction SilentlyContinue).InactivityTimeoutSecs
+    $mdm = Get-MdmEnrollment
 
     Write-Step 'Automatic lock (machine inactivity limit)'
 
-    if ($null -eq $cur -or $cur -eq 0) { Write-Ok 'no automatic lock configured'; return }
+    if ($null -eq $cur -or $cur -eq 0) {
+        # Not necessarily good news: on an enrolled box this may only mean the policy has
+        # not refreshed yet, and reporting a clean pass here is how the lock comes back
+        # hours after a run that said it was handled.
+        if ($mdm) { Write-Note "no automatic lock configured right now, but $(Format-MdmLockWarning $mdm)" }
+        else      { Write-Ok 'no automatic lock configured' }
+        return
+    }
 
     # Rounded, because this is a duration in a sentence: a box shipped with a limit that is
     # not a whole number of minutes prints 14.8333333333333 otherwise.
@@ -451,7 +490,16 @@ function Set-AutoLockPolicy {
         return
     }
     if ($after -ne 0) {
-        Write-Note "tried to disable the automatic lock but it still reads $after s - something else is enforcing it. Look for a domain policy or a management agent."
+        $who = if ($mdm) { Format-MdmLockWarning $mdm } else { 'look for a domain policy or a management agent.' }
+        Write-Note "tried to disable the automatic lock but it still reads $after s - $who"
+        return
+    }
+
+    if ($mdm) {
+        # The write landed - $after is 0 - and it will not last. Said as a warning rather
+        # than a fix, because a run that reports success here is exactly why these stands
+        # went on locking themselves after being provisioned.
+        Write-Note "set the automatic lock to 0 (was $mins min), but $(Format-MdmLockWarning $mdm)"
         return
     }
 
