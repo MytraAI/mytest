@@ -645,7 +645,7 @@ def _apply_tuning_params(
     saves, so a run cannot leave a stand configured differently than it found it."""
     testbed: YdriveTestbed = test_case.testbed
     # Hard ceiling before the soft limit that has to sit under it, so the pair is
-    # never briefly inverted on a board whose previous soft limit was higher than
+    # never briefly inverted on a board whose existing soft limit is higher than
     # the ceiling being set now.
     testbed.command.set_motor_config_current_hard_max(current_hard_max)
     testbed.command.set_motor_config_current_soft_max(current_soft_max)

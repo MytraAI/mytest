@@ -30,18 +30,14 @@ main_execution actually does:
   the motor. See MAX_DISTANCE_SINCE_CORRECTION_M.
 - undervoltage_bound: board_vbus_voltage < 33.43V, fatal, no persistence -
   trusted instantaneously rather than debounced. 90% of the lowest reading
-  measured with the bus up. See MIN_BUS_VOLTAGE_V, including why it is measured
-  over energised frames only and why it replaced the drive's own 10.5 V trip.
+  measured with the bus up - see MIN_BUS_VOLTAGE_V.
 - overvoltage_bound: board_vbus_voltage > 55.39V, fatal - 110% of the highest
   measured, and below the drive's own 64 V trip so the rulebook ends the run
-  first. The rail rises on regen, which nothing bounded before. See
-  MAX_BUS_VOLTAGE_V.
-- in_power_limit_2 is no longer bounded. It was recorded-not-fatal to find out
-  how often this stand leaves the supply's 420 W envelope; two 1800 lb runs
-  answered ~45-49 brief excursions an hour, the longest 43 ms, which made every
-  healthy run record FAIL for a direction reversal. Still recorded in the
-  cpx400dp stream, just no longer deciding pass/fail - see the note above
-  MIN_BUS_VOLTAGE_V.
+  first. The rail rises on regen. See MAX_BUS_VOLTAGE_V.
+- in_power_limit_2 is recorded, not bounded. An ordinary direction reversal
+  takes this stand out of the supply's 420 W envelope 45-49 times an hour, the
+  longest excursion 43 ms, so a bound on it fails every healthy run. It stays in
+  the cpx400dp stream and decides nothing.
 - overtemperature_bound_<n>: temperature_<n>_c > 80C on every LIVE
   thermocouple channel, fatal, debounced 5s.
 

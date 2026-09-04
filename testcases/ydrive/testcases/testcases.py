@@ -276,10 +276,10 @@ class CycleBrakeEnduranceTest(_BrakingYdriveTest):
 
     THE SIGN IS THE WHOLE POINT. The camera looks at the top of the stroke, the top is
     0, and position decreases going up, so the parked fixture is at a negative number.
-    Asserting a positive one told the axis it was a full stroke below where it was: the
-    2026-08-25 14:23 run wrote 125, was commanded to 110, drove UP into the mechanical
-    stop 7.9 turns later and sat there at the 18 A limit for 19 s. Nothing caught it,
-    because 116 is within CYCLE_POSITION_TOLERANCE of 110.
+    A positive value here tells the axis it is a full stroke below where it is, and it
+    drives UP into the mechanical stop and sits there at the current limit. Nothing
+    catches that: the wrong position is within CYCLE_POSITION_TOLERANCE of the
+    commanded one.
 
     A PHYSICAL PLACE, and the reason this test's positions are absolute where
     BrakeEnduranceTest's are relative to a hand-set origin. The operator parks the

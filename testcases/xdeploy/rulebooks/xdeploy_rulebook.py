@@ -28,9 +28,10 @@ WHAT THIS RULEBOOK DELIBERATELY DOES NOT BOUND, AND WHAT THAT COSTS.
 
 - overvoltage_bound: board_vbus_voltage > 52V, fatal, no persistence.
 
-  THE ONLY OVERVOLTAGE PROTECTION ON THIS STAND BEYOND THE BRAKE RESISTOR: this
-  board has no dc_bus_overvoltage_trip_level set, so there is no firmware trip
-  underneath this bound and nothing else acts if it is passed. Every cycle lowers
+  THE FIRST OVERVOLTAGE PROTECTION ON THIS STAND BEYOND THE BRAKE RESISTOR: the
+  board's own dc_bus_overvoltage_trip_level is 64 V, 12 V above this bound, so
+  this bound ends the run well before the firmware would act. The trip is a
+  backstop, not something a run reaches on the way to here. Every cycle lowers
   a gravity load onto a bench supply that cannot sink, which is what pushes the
   bus up in the first place - see XdeployTestbed's ODRIVE_MAX_REGEN_CURRENT_A.
 
@@ -98,9 +99,9 @@ whatever the bench supply is set to."""
 MAX_BUS_VOLTAGE_V = 52.0
 """Fatal ceiling on the DC bus measured at the drive.
 
-The same figure zdrive bounds its bus at. Unlike zdrive's it has no firmware trip
-beneath it - this board has no overvoltage trip level set - so nothing acts on an
-overvoltage except the brake resistor and this bound ending the run."""
+The same figure zdrive bounds its bus at, and as on zdrive it sits well under the
+board's own dc_bus_overvoltage_trip_level of 64 V - so this bound ends the run
+first, and the brake resistor and that trip are what is left if it does not."""
 
 MAX_FET_TEMPERATURE_C = 80.0
 """Fatal ceiling on the ODrive's own inverter FET thermistor, below the
@@ -130,14 +131,10 @@ has come out reads FAULT forever."""
 
 LIVE_TC_CHANNELS = (1, 2)
 """Which thermocouple inputs are wired on this stand, and so the only ones
-bounded.
-
-CONFIRMED AGAINST THE HARNESS on 2026-09-03: read directly off the DAQ on COM7,
-channels 1 and 2 carried 31.3 C and 34.1 C and channels 3-8 all reported FAULT.
-Stand configuration, so unplug or move a thermocouple and this has to change with
-it. Getting it wrong fails loudly rather than quietly, which is the one mercy: a
-bound on an unwired channel is unevaluable and stops the run on its first frame,
-naming the channel."""
+bounded. Stand configuration: unplug or move a thermocouple and this has to
+change with it. Getting it wrong fails loudly rather than quietly - a bound on an
+unwired channel is unevaluable and stops the run on its first frame, naming the
+channel."""
 
 BASE_XDEPLOY_TEST_NAME = "base_xdeploy_test"
 MANUAL_TEST_NAME = "xdeploy_manual_test"

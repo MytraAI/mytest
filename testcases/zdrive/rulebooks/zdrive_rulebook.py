@@ -13,13 +13,13 @@ see ManualTest.
   THIS IS THE ONLY THING THAT KNOWS THIS STAND RUNS AT 48 V. The N6974A's driver
   clamps to the instrument's own 80 V rating, correctly - it serves any stand,
   including one running a higher bus - so nothing below this bound stops 80 V
-  being commanded onto an ODrive that trips itself at 55 V. ZdriveTestbed
+  being commanded onto an ODrive that trips itself at 64 V. ZdriveTestbed
   configures 48 V and check_rails() confirms it, which covers a setpoint that was
   never right; this covers one that stopped being right mid-run.
 
   52 V leaves room above the ~48.5 V the bus actually sits at - the remote sense
   leads are open on this stand, so the instrument regulates from local sense
-  about 1% high - and sits under the ODrive's own 55 V trip, so the run ends
+  about 1% high - and sits well under the ODrive's own 64 V trip, so the run ends
   before the board acts on its own behalf.
 
   Undebounced: a bus that has climbed 4 V above its setpoint is not a sample to
@@ -28,12 +28,14 @@ see ManualTest.
 - bus_current_bound: current > 25A or < -12.75A, fatal, debounced.
 
   Both directions, because this stand's whole purpose lives in the negative one.
-  25 A is the supply's rated output and a gross-fault net rather than an
-  operating limit: the expected peak is about 8 A, since bus current is
-  mechanical power over bus voltage rather than motor phase current. It is
-  reachable precisely because current limiting is not done here - the ODrive's
-  soft/hard phase limits do that - so the supply's positive limit is left wide
-  and the bus really can draw 25 A into a fault.
+  25 A is the supply's rated output, and a lift of this load draws about 20 A of
+  it: a third of a run sits above 15 A and the peak is near 20.7 A. Bus current
+  is mechanical power over bus voltage rather than motor phase current, which is
+  why that is nowhere near the motor's phase amps. So this is a gross-fault net
+  with about 4 A over the working peak rather than a limit with room to spare -
+  more load or more speed moves this stand into it. Current limiting is not done
+  here - the ODrive's soft/hard phase limits do that - so the supply's positive
+  limit is left wide and the bus really can draw 25 A into a fault.
 
   -12.75 A is the whole sinking capability one N7909A gives a 2 kW model, so the
   bound fires when absorption saturates. Past that the bus rises instead, and
@@ -161,7 +163,7 @@ a 48 V bus."""
 
 MAX_BUS_CURRENT_A = 25.0
 """Fatal ceiling on bus current drawn from the supply - this model's rating, and
-roughly three times the expected peak."""
+about 4 A over the peak a lift of this load actually draws."""
 
 MIN_BUS_CURRENT_A = -12.75
 """Fatal floor on bus current, i.e. the most this supply will absorb: 50% of
@@ -192,8 +194,9 @@ has come out reads FAULT forever."""
 
 LIVE_TC_CHANNELS = (2,)
 """Which thermocouple inputs are wired on this stand, and so the only ones
-bounded. One channel, so this is the whole of the stand's thermocouple cover. Stand configuration: unplug one and this has to change with it, because
-a numeric bound on an unread channel is unevaluable and stops every run on its
+bounded. One channel, so this is the whole of the stand's thermocouple cover.
+Stand configuration: unplug one and this has to change with it, because a
+numeric bound on an unread channel is unevaluable and stops every run on its
 first frame."""
 
 MAX_STOPPING_DISTANCE_M = 0.25
